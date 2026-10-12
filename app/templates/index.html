@@ -48,9 +48,6 @@
             <div><strong>Cues (EN):</strong>
               <ul id="r_cues"></ul>
             </div>
-            <div><strong>עצות (HE):</strong>
-              <ul id="r_cues_he" dir="rtl" class="rtl"></ul>
-            </div>
           </div>
         </div>
         <pre id="r_json" class="json"></pre>
@@ -70,7 +67,6 @@
       const rConf = document.getElementById('r_conf');
       const rNotes = document.getElementById('r_notes');
       const rCues = document.getElementById('r_cues');
-      const rCuesHe = document.getElementById('r_cues_he');
       const rJson = document.getElementById('r_json');
 
       form.addEventListener('submit', async (e) => {
@@ -94,10 +90,6 @@
           rCues.innerHTML = '';
           (json.cues || []).forEach(c => {
             const li = document.createElement('li'); li.textContent = c; rCues.appendChild(li);
-          });
-          rCuesHe.innerHTML = '';
-          (json.cues_he || []).forEach(c => {
-            const li = document.createElement('li'); li.textContent = c; rCuesHe.appendChild(li);
           });
           rJson.textContent = JSON.stringify(json, null, 2);
           resultBox.style.display = '';

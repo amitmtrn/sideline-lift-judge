@@ -22,7 +22,6 @@ class LiftJudgment(BaseModel):
     band: Band
     max_horizontal_drift: str = Field(default="")
     cues: List[str] = Field(default_factory=list)
-    cues_he: List[str] = Field(default_factory=list)
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     notes: Optional[str] = Field(default=None)
 
@@ -32,8 +31,6 @@ class LiftJudgment(BaseModel):
         if self.band != "unknown":
             if not (1 <= len(self.cues) <= 2):
                 raise ValueError("cues must contain 1 or 2 items")
-            if not (1 <= len(self.cues_he) <= 2):
-                raise ValueError("cues_he must contain 1 or 2 items")
         return self
 
 
