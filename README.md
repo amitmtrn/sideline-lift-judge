@@ -57,10 +57,7 @@ uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --reload
 Open `http://localhost:8000`:
 - Choose lift type (snatch / clean / jerk)
 - Upload a short side-view clip
-- The app extracts ~12 frames (clamped to 8–16), calls the model, validates output JSON, and displays:
-  - score (1–10), band, max horizontal drift
-  - 1–2 coaching cues in English and Hebrew (RTL direction ensured)
-  - confidence and the raw JSON
+- The app extracts ~12 frames (clamped to 8–16), calls the model, validates output JSON, and displays score (1–10), band, max horizontal drift, 1–2 coaching cues, confidence, and the raw JSON.
 
 ### CLI (no UI)
 ```bash
@@ -71,6 +68,16 @@ Options:
 - `--prompts_dir prompts/`
 
 Outputs the validated JSON to stdout. Retries once if the first response is invalid JSON.
+
+### Local samples (do not commit videos)
+- Put your test clips under `samples/` (this path is gitignored).
+- Example:
+  ```bash
+  mkdir -p samples
+  cp /path/to/your/side_view_snatch.mp4 samples/snatch1.mp4
+  python score_clip.py samples/snatch1.mp4 --lift snatch
+  ```
+- Videos must not be committed to the public repo.
 
 ### Tests
 Run unit tests:

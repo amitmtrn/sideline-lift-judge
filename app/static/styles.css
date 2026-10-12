@@ -23,7 +23,6 @@ button:hover { filter: brightness(1.05); }
 .error { border-color: #7a2b2b; color: var(--error); }
 .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 .json { background: #0e1520; padding: 12px; border-radius: 8px; border: 1px solid var(--border); color: #a6e1d1; overflow-x: auto; }
-.rtl { direction: rtl; unicode-bidi: plaintext; }
 @media (max-width: 720px) {
   .grid { grid-template-columns: 1fr; }
 }

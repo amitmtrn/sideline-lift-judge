@@ -13,7 +13,6 @@ def test_parse_and_validate_json_ok():
         "band": "solid",
         "max_horizontal_drift": "small forward loop past mid-foot at turnover",
         "cues": ["keep the bar close to the body"],
-        "cues_he": ["מוט צמוד לגוף"],
         "confidence": 0.76,
         "notes": "Good extension, minor drift corrected.",
     }
@@ -32,7 +31,6 @@ def test_parse_and_validate_json_with_fences():
             "band": "mixed",
             "max_horizontal_drift": "noticeable away from shins early",
             "cues": ["finish the legs/hips (triple extension) before the arms take over"],
-            "cues_he": ["דחוף את הרצפה חזק ומהר"],
             "confidence": 0.55,
         }
     ) + "\n```"
@@ -49,7 +47,6 @@ def test_validate_cues_count_enforced():
             "band": "solid",
             "max_horizontal_drift": "—",
             "cues": [],
-            "cues_he": [],
             "confidence": 0.8,
         }
     )
@@ -65,7 +62,6 @@ def test_band_unknown_allows_empty_cues():
             "band": "unknown",
             "max_horizontal_drift": "",
             "cues": [],
-            "cues_he": [],
             "confidence": None,
             "notes": "bar not visible",
         }

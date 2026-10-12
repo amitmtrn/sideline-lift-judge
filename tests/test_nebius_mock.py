@@ -11,7 +11,7 @@ def test_nebius_client_extracts_message_text():
         "choices": [
             {
                 "index": 0,
-                "message": {"role": "assistant", "content": '{"lift":"snatch","score":7,"band":"solid","max_horizontal_drift":"x","cues":["x"],"cues_he":["y"],"confidence":0.4}'},
+                "message": {"role": "assistant", "content": '{"lift":"snatch","score":7,"band":"solid","max_horizontal_drift":"x","cues":["x"],"confidence":0.4}'},
                 "finish_reason": "stop",
             }
         ],
