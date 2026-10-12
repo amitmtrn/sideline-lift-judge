@@ -1,0 +1,10 @@
+Lift type: snatch (full snatch from floor to overhead; power or squat catch OK — judge bar path / efficiency only).
+
+Attached: one lift clip (or frame sequence). Media-first — ground every claim in what is visible.
+
+Tasks:
+1. Estimate max horizontal drift of the bar relative to the body / mid-foot from floor through turnover to catch (words, not pixels).
+2. Score bar-path efficiency 1–10 with the system rubric; set band.
+3. Return exactly 1–2 cues from SHARED + SNATCH lists only.
+
+Respond with JSON only matching the schema (lift = "snatch").
