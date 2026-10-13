@@ -1,0 +1,10 @@
+Lift type: clean (pull from floor through transition + second pull + turnover + front-rack catch). If only the pull is visible, still score path through the last visible frame and note that in notes.
+
+Attached: one lift clip (or frame sequence). Media-first — ground every claim in what is visible.
+
+Tasks:
+1. Estimate max horizontal drift of the bar relative to the body / mid-foot, and note any costly velocity bleed in transition (words).
+2. Score bar-path efficiency 1–10 with the system rubric; set band.
+3. Return exactly 1–2 cues from SHARED + CLEAN lists only.
+
+Respond with JSON only matching the schema (lift = "clean").
