@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Sideline Lift Judge — MVP</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h1>Sideline Lift Judge</h1>
+      <p class="subtitle">Bar-path efficiency judge for Olympic lifts (snatch, clean, jerk)</p>
+
+      <form id="uploadForm">
+        <div class="field">
+          <label>Lift type</label>
+          <div class="lift-options">
+            <label><input type="radio" name="lift" value="snatch" checked /> Snatch</label>
+            <label><input type="radio" name="lift" value="clean" /> Clean</label>
+            <label><input type="radio" name="lift" value="jerk" /> Jerk</label>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="video">Upload a short side-view clip (mp4/mov/mkv)</label>
+          <input id="video" type="file" name="file" accept="video/*" required />
+        </div>
+
+        <div class="field">
+          <label for="num_frames">Frames sampled (8–16)</label>
+          <input id="num_frames" name="num_frames" type="number" min="8" max="16" value="12" />
+        </div>
+
+        <button type="submit">Score lift</button>
+      </form>
+
+      <div id="result" class="result" style="display:none;">
+        <h2>Result</h2>
+        <div class="grid">
+          <div>
+            <div><strong>Lift:</strong> <span id="r_lift"></span></div>
+            <div><strong>Score:</strong> <span id="r_score"></span> (<span id="r_band"></span>)</div>
+            <div><strong>Max horizontal drift:</strong> <span id="r_drift"></span></div>
+            <div><strong>Confidence:</strong> <span id="r_conf"></span></div>
+            <div><strong>Notes:</strong> <span id="r_notes"></span></div>
+          </div>
+          <div>
+            <div><strong>Cues (EN):</strong>
+              <ul id="r_cues"></ul>
+            </div>
+          </div>
+        </div>
+        <pre id="r_json" class="json"></pre>
+      </div>
+
+      <div id="error" class="error" style="display:none;"></div>
+    </div>
+
+    <script>
+      const form = document.getElementById('uploadForm');
+      const resultBox = document.getElementById('result');
+      const errorBox = document.getElementById('error');
+      const rLift = document.getElementById('r_lift');
+      const rScore = document.getElementById('r_score');
+      const rBand = document.getElementById('r_band');
+      const rDrift = document.getElementById('r_drift');
+      const rConf = document.getElementById('r_conf');
+      const rNotes = document.getElementById('r_notes');
+      const rCues = document.getElementById('r_cues');
+      const rJson = document.getElementById('r_json');
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        resultBox.style.display = 'none';
+        errorBox.style.display = 'none';
+        const data = new FormData(form);
+        try {
+          const resp = await fetch('/api/score', { method: 'POST', body: data });
+          if (!resp.ok) {
+            const detail = await resp.json().catch(() => ({}));
+            throw new Error(detail.detail || ('HTTP ' + resp.status));
+          }
+          const json = await resp.json();
+          rLift.textContent = json.lift;
+          rScore.textContent = json.score ?? '—';
+          rBand.textContent = json.band;
+          rDrift.textContent = json.max_horizontal_drift || '—';
+          rConf.textContent = json.confidence == null ? '—' : json.confidence.toFixed(2);
+          rNotes.textContent = json.notes || '—';
+          rCues.innerHTML = '';
+          (json.cues || []).forEach(c => {
+            const li = document.createElement('li'); li.textContent = c; rCues.appendChild(li);
+          });
+          rJson.textContent = JSON.stringify(json, null, 2);
+          resultBox.style.display = '';
+        } catch (err) {
+          errorBox.textContent = 'Error: ' + (err.message || err.toString());
+          errorBox.style.display = '';
+        }
+      });
+    </script>
+  </body>
+  </html>
+
