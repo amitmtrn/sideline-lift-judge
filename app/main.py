@@ -12,7 +12,9 @@ from dotenv import load_dotenv
 
 from app.schemas.judgment import LiftJudgment, LiftType, parse_and_validate_json
 from app.utils.frames import sample_video_frames_bgr
-from app.services.nebius_client import NebiusChatClient, assemble_messages_for_lift
+from app.utils.video_meta import get_rotation_degrees
+from app.utils.image_ops import rotate_by_degrees, resize_long_side
+from app.services.nebius_client import NebiusChatClient, assemble_vision_messages, assemble_judge_messages
 
 
 # Load .env if present for local dev
@@ -48,8 +50,7 @@ def get_client() -> NebiusChatClient:
     if not api_key:
         raise RuntimeError("NEBIUS_API_KEY is not set. See README for setup.")
     base_url = os.getenv("NEBIUS_BASE_URL") or NebiusChatClient.DEFAULT_BASE_URL
-    model = os.getenv("NEBIUS_MODEL") or NebiusChatClient.DEFAULT_MODEL
-    return NebiusChatClient(api_key=api_key, base_url=base_url, default_model=model)
+    return NebiusChatClient(api_key=api_key, base_url=base_url)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -84,22 +85,30 @@ async def score_endpoint(
         frames = sample_video_frames_bgr(str(tmp_path), target_count=max(8, min(16, int(num_frames))))
         if not frames:
             raise HTTPException(status_code=400, detail="Could not decode frames from the uploaded video.")
-        images = bgr_frames_to_data_urls(frames)
+        # Orientation + downscale to ~768 long side
+        rotation_deg = get_rotation_degrees(str(tmp_path))
+        processed = [resize_long_side(rotate_by_degrees(f, rotation_deg), 768) for f in frames]
+        images = bgr_frames_to_data_urls(processed)
         client = get_client()
-        messages = assemble_messages_for_lift(lift=lift, images=images, prompts_dir=str(PROMPTS_DIR))
+        # Stage 1: vision observations (MiniCPM-V)
+        vision_model = os.getenv("NEBIUS_VISION_MODEL") or "openbmb/MiniCPM-V-4_5"
+        v_messages = assemble_vision_messages(lift=lift, images=images, prompts_dir=str(PROMPTS_DIR))
+        observations = await client.create_chat_completion(messages=v_messages, model=vision_model)
+        # Stage 2: judge (Nemotron)
+        judge_model = os.getenv("NEBIUS_JUDGE_MODEL") or "nvidia/Nemotron-3-Ultra-550b-a55b"
+        j_messages = assemble_judge_messages(lift=lift, observations=observations, prompts_dir=str(PROMPTS_DIR))
         # Call with one automatic retry on parse failure
-        first = await client.create_chat_completion(messages=messages, model=None)
+        first = await client.create_chat_completion(messages=j_messages, model=judge_model)
         try:
             judgment = parse_and_validate_json(first)
         except (ValueError, ValidationError):
-            # Add a terse repair instruction and retry once
-            retry_messages = messages + [
+            retry_messages = j_messages + [
                 {
                     "role": "system",
                     "content": "Your previous response was not valid JSON. Reply again with JSON only matching the schema, no markdown.",
                 }
             ]
-            second = await client.create_chat_completion(messages=retry_messages, model=None)
+            second = await client.create_chat_completion(messages=retry_messages, model=judge_model)
             judgment = parse_and_validate_json(second)  # Let errors bubble
         return JSONResponse(content=judgment.model_dump())
     finally:
