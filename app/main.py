@@ -69,7 +69,7 @@ async def score_endpoint(
     request: Request,
     lift: LiftType = Form(...),
     file: UploadFile = File(...),
-    num_frames: int = Form(12),
+    num_frames: int = Form(10),
 ):
     if file.content_type not in ("video/mp4", "video/quicktime", "video/x-matroska", "video/mpeg", "video/avi"):
         raise HTTPException(status_code=400, detail=f"Unsupported content type: {file.content_type}")
@@ -90,10 +90,22 @@ async def score_endpoint(
         processed = [resize_long_side(rotate_by_degrees(f, rotation_deg), 768) for f in frames]
         images = bgr_frames_to_data_urls(processed)
         client = get_client()
-        # Stage 1: vision observations (MiniCPM-V)
+        # Stage 1: vision observations (MiniCPM-V) with chunking when needed
         vision_model = os.getenv("NEBIUS_VISION_MODEL") or "openbmb/MiniCPM-V-4_5"
-        v_messages = assemble_vision_messages(lift=lift, images=images, prompts_dir=str(PROMPTS_DIR))
-        observations = await client.create_chat_completion(messages=v_messages, model=vision_model)
+        max_images = int(os.getenv("NEBIUS_VISION_MAX_IMAGES") or "10")
+        if len(images) <= max_images:
+            v_messages = assemble_vision_messages(lift=lift, images=images, prompts_dir=str(PROMPTS_DIR))
+            observations = await client.create_chat_completion(messages=v_messages, model=vision_model)
+        else:
+            from app.services.nebius_client import collect_observations_in_chunks
+            observations = await collect_observations_in_chunks(
+                client=client,
+                lift=lift,
+                images=images,
+                prompts_dir=str(PROMPTS_DIR),
+                model=vision_model,
+                max_images_per_call=max_images,
+            )
         # Stage 2: judge (Nemotron)
         judge_model = os.getenv("NEBIUS_JUDGE_MODEL") or "nvidia/Nemotron-3-Ultra-550b-a55b"
         j_messages = assemble_judge_messages(lift=lift, observations=observations, prompts_dir=str(PROMPTS_DIR))
