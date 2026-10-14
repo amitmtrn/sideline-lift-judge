@@ -95,7 +95,12 @@ async def score_endpoint(
         max_images = int(os.getenv("NEBIUS_VISION_MAX_IMAGES") or "10")
         if len(images) <= max_images:
             v_messages = assemble_vision_messages(lift=lift, images=images, prompts_dir=str(PROMPTS_DIR))
-            observations = await client.create_chat_completion(messages=v_messages, model=vision_model)
+            observations = await client.create_chat_completion(
+                messages=v_messages,
+                model=vision_model,
+                max_tokens=1500,
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            )
         else:
             from app.services.nebius_client import collect_observations_in_chunks
             observations = await collect_observations_in_chunks(

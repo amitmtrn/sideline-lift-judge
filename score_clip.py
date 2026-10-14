@@ -63,7 +63,12 @@ async def main() -> int:
     # Clamp or chunk to max_images
     if len(images) <= max_images:
         v_messages = assemble_vision_messages(lift=args.lift, images=images, prompts_dir=args.prompts_dir)
-        observations = await client.create_chat_completion(messages=v_messages, model=vision_model)
+        observations = await client.create_chat_completion(
+            messages=v_messages,
+            model=vision_model,
+            max_tokens=1500,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
     else:
         from app.services.nebius_client import collect_observations_in_chunks
         observations = await collect_observations_in_chunks(
@@ -91,7 +96,8 @@ async def main() -> int:
         text2 = await client.create_chat_completion(messages=j_messages, model=judge_model)
         judgment = parse_and_validate_json(text2)
 
-    print(judgment.model_dump_json(indent=2, ensure_ascii=False))
+    import json as _json
+    print(_json.dumps(judgment.model_dump(), indent=2, ensure_ascii=False))
     return 0
 
 
