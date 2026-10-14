@@ -70,3 +70,23 @@ def test_band_unknown_allows_empty_cues():
     assert j.band == "unknown"
     assert j.cues == []
 
+
+def test_parse_skips_reasoning_prose_with_braces():
+    # Reasoning models sometimes narrate the schema (braces included) before answering.
+    text = (
+        "Let me think. The schema is { \"lift\": ..., \"score\": ... } and the bar "
+        'drifts forward {not an object}, so:\n'
+        '{"lift":"clean","score":6,"band":"mixed","max_horizontal_drift":"forward loop in transition",'
+        '"cues":["keep the bar close to the body"],"confidence":0.6}\n'
+        "That is my answer."
+    )
+    j = parse_and_validate_json(text)
+    assert j.lift.value == "clean"
+    assert j.score == 6
+
+
+def test_parse_raises_value_error_on_truncated_reasoning():
+    # Judge truncated mid-thought (finish_reason=length) -> no JSON at all.
+    with pytest.raises(ValueError):
+        parse_and_validate_json("The user wants me to analyze the observations. Key points about bar path")
+

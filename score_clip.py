@@ -7,10 +7,14 @@ from pathlib import Path
 from typing import List
 
 from dotenv import load_dotenv
-from pydantic import ValidationError
 
-from app.schemas.judgment import parse_and_validate_json, LiftType
-from app.services.nebius_client import NebiusChatClient, assemble_vision_messages, assemble_judge_messages
+from app.schemas.judgment import LiftType
+from app.services.nebius_client import (
+    NO_THINKING_EXTRA_BODY,
+    NebiusChatClient,
+    assemble_vision_messages,
+    request_judgment,
+)
 from app.utils.frames import sample_video_frames_bgr
 from app.utils.video_meta import get_rotation_degrees
 from app.utils.image_ops import rotate_by_degrees, resize_long_side
@@ -67,7 +71,7 @@ async def main() -> int:
             messages=v_messages,
             model=vision_model,
             max_tokens=1500,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            extra_body=NO_THINKING_EXTRA_BODY,
         )
     else:
         from app.services.nebius_client import collect_observations_in_chunks
@@ -84,17 +88,13 @@ async def main() -> int:
         print(observations)
         print("=== End observations ===")
     # Stage 2: judge
-    j_messages = assemble_judge_messages(lift=args.lift, observations=observations, prompts_dir=args.prompts_dir)
-    text = await client.create_chat_completion(messages=j_messages, model=judge_model)
-    try:
-        judgment = parse_and_validate_json(text)
-    except (ValueError, ValidationError):
-        # Retry once with repair instruction
-        j_messages.append(
-            {"role": "system", "content": "Your previous response was not valid JSON. Reply again with JSON only matching the schema, no markdown."}
-        )
-        text2 = await client.create_chat_completion(messages=j_messages, model=judge_model)
-        judgment = parse_and_validate_json(text2)
+    judgment = await request_judgment(
+        client=client,
+        lift=args.lift,
+        observations=observations,
+        prompts_dir=args.prompts_dir,
+        model=judge_model,
+    )
 
     import json as _json
     print(_json.dumps(judgment.model_dump(), indent=2, ensure_ascii=False))

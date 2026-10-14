@@ -32,6 +32,12 @@ curl -H "Authorization: Bearer $NEBIUS_API_KEY" https://api.tokenfactory.nebius.
 Environment variables:
 - `NEBIUS_VISION_MODEL` (default `openbmb/MiniCPM-V-4_5`)
 - `NEBIUS_JUDGE_MODEL` (default `nvidia/Nemotron-3-Ultra-550b-a55b`)
+- `NEBIUS_JUDGE_MAX_TOKENS` (default `2048`)
+
+Both stages request `chat_template_kwargs.enable_thinking = false`. The judge models are
+reasoning models: left to think, they spend the whole completion budget on reasoning, get cut
+off at `finish_reason: length`, and never emit the JSON object. The judge budget keeps headroom
+in case a provider ignores that hint.
 
 ### Prompts
 The prompts are fixed, stored under `prompts/`:
