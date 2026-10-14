@@ -7,23 +7,28 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pydantic import ValidationError
 from dotenv import load_dotenv
 
-from app.schemas.judgment import LiftJudgment, LiftType, parse_and_validate_json
+from app.schemas.judgment import LiftJudgment, LiftType
 from app.utils.frames import sample_video_frames_bgr
 from app.utils.video_meta import get_rotation_degrees
 from app.utils.image_ops import rotate_by_degrees, resize_long_side
-from app.services.nebius_client import NebiusChatClient, assemble_vision_messages, assemble_judge_messages
+from app.services.nebius_client import (
+    NO_THINKING_EXTRA_BODY,
+    NebiusChatClient,
+    assemble_vision_messages,
+    request_judgment,
+)
 
 
 # Load .env if present for local dev
 load_dotenv()
 
-BASE_DIR = Path(__file__).resolve().parent.parent
+APP_DIR = Path(__file__).resolve().parent
+BASE_DIR = APP_DIR.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
-TEMPLATES_DIR = BASE_DIR / "templates"
-STATIC_DIR = BASE_DIR / "static"
+TEMPLATES_DIR = APP_DIR / "templates"
+STATIC_DIR = APP_DIR / "static"
 
 app = FastAPI(title="Sideline Lift Judge — MVP")
 
@@ -76,7 +81,7 @@ async def score_endpoint(
     # Persist upload to temp file for OpenCV
     import tempfile
 
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename or \"clip\").suffix) as tmp:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename or "clip").suffix) as tmp:
         data = await file.read()
         tmp.write(data)
         tmp_path = Path(tmp.name)
@@ -99,7 +104,7 @@ async def score_endpoint(
                 messages=v_messages,
                 model=vision_model,
                 max_tokens=1500,
-                extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+                extra_body=NO_THINKING_EXTRA_BODY,
             )
         else:
             from app.services.nebius_client import collect_observations_in_chunks
@@ -113,20 +118,14 @@ async def score_endpoint(
             )
         # Stage 2: judge (Nemotron)
         judge_model = os.getenv("NEBIUS_JUDGE_MODEL") or "nvidia/Nemotron-3-Ultra-550b-a55b"
-        j_messages = assemble_judge_messages(lift=lift, observations=observations, prompts_dir=str(PROMPTS_DIR))
         # Call with one automatic retry on parse failure
-        first = await client.create_chat_completion(messages=j_messages, model=judge_model)
-        try:
-            judgment = parse_and_validate_json(first)
-        except (ValueError, ValidationError):
-            retry_messages = j_messages + [
-                {
-                    "role": "system",
-                    "content": "Your previous response was not valid JSON. Reply again with JSON only matching the schema, no markdown.",
-                }
-            ]
-            second = await client.create_chat_completion(messages=retry_messages, model=judge_model)
-            judgment = parse_and_validate_json(second)  # Let errors bubble
+        judgment = await request_judgment(
+            client=client,
+            lift=lift,
+            observations=observations,
+            prompts_dir=str(PROMPTS_DIR),
+            model=judge_model,
+        )
         return JSONResponse(content=judgment.model_dump())
     finally:
         try:

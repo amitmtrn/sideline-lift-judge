@@ -8,6 +8,7 @@ from app.services.nebius_client import (
     assemble_vision_messages,
     assemble_judge_messages,
     collect_observations_in_chunks,
+    request_judgment,
 )
 
 
@@ -51,6 +52,80 @@ def test_two_stage_pipeline_mocks_requests():
         out = loop.run_until_complete(client.create_chat_completion(messages=j_msgs, model="nvidia/Nemotron-3-Ultra-550b-a55b"))
         assert '"lift":"snatch"' in out
         assert post.call_count == 2
+
+
+def test_assemble_accepts_lift_type_enum():
+    # The web form binds lift as LiftType; str(LiftType.snatch) is "LiftType.snatch",
+    # which used to be interpolated straight into the prompt filename.
+    from app.schemas.judgment import LiftType
+
+    j_msgs = assemble_judge_messages(lift=LiftType.snatch, observations="obs", prompts_dir="prompts")
+    assert any("snatch" in str(m["content"]) for m in j_msgs)
+    v_msgs = assemble_vision_messages(lift=LiftType.clean, images=[], prompts_dir="prompts")
+    assert "Lift: clean" in v_msgs[1]["content"][0]["text"]
+
+
+def test_judge_request_disables_thinking_and_raises_token_budget():
+    client = NebiusChatClient(api_key="x", base_url="https://example.test/v1")
+    m = Mock()
+    m.status_code = 200
+    m.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": '{"lift":"snatch","score":5,"band":"mixed","max_horizontal_drift":"forward loop",'
+                    '"cues":["keep the bar close to the body"],"confidence":0.6}'
+                }
+            }
+        ]
+    }
+    import asyncio
+    with patch("app.services.nebius_client.requests.post", return_value=m) as post:
+        judgment = asyncio.get_event_loop().run_until_complete(
+            request_judgment(
+                client=client,
+                lift="snatch",
+                observations="Bar drifts forward through the turnover.",
+                prompts_dir="prompts",
+                model="nvidia/Nemotron-3-Ultra-550b-a55b",
+            )
+        )
+    assert judgment.score == 5
+    payload = post.call_args.kwargs["json"]
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+    assert payload["max_tokens"] >= 2048
+
+
+def test_judge_request_retries_once_when_reply_has_no_json():
+    client = NebiusChatClient(api_key="x", base_url="https://example.test/v1")
+    truncated = Mock()
+    truncated.status_code = 200
+    truncated.json.return_value = {"choices": [{"message": {"content": "Let me analyze the observations step by"}}]}
+    good = Mock()
+    good.status_code = 200
+    good.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": '{"lift":"jerk","score":7,"band":"solid","max_horizontal_drift":"small dip drift",'
+                    '"cues":["dip straight down (no forward knee slide); bar stays over mid-foot"],"confidence":0.7}'
+                }
+            }
+        ]
+    }
+    import asyncio
+    with patch("app.services.nebius_client.requests.post", side_effect=[truncated, good]) as post:
+        judgment = asyncio.get_event_loop().run_until_complete(
+            request_judgment(
+                client=client,
+                lift="jerk",
+                observations="Dip is straight; bar stays close.",
+                prompts_dir="prompts",
+                model="nvidia/Nemotron-3-Ultra-550b-a55b",
+            )
+        )
+    assert judgment.band == "solid"
+    assert post.call_count == 2
 
 
 def test_vision_chunking_makes_multiple_calls_when_over_limit():
