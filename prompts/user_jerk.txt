@@ -1,6 +1,6 @@
 Lift type: jerk (from front rack: dip–drive–split or power jerk to overhead). Judge bar path / dip–drive verticality only.
 
-Attached: one lift clip (or frame sequence). Media-first — ground every claim in what is visible.
+Attached: structured vision observations from Stage 1 (MiniCPM-V-4_5). Ground every claim in those observations; do not assume unobserved details.
 
 Tasks:
 1. Estimate max horizontal drift of the bar relative to mid-foot through dip, drive, and lockout (words).

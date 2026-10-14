@@ -19,13 +19,12 @@ class NebiusChatClient:
 
     # Verified from Nebius Token Factory docs
     DEFAULT_BASE_URL: str = "https://api.tokenfactory.nebius.com/v1"
-    # Preferred default model (vision-capable; see README)
-    DEFAULT_MODEL: str = "nvidia/Cosmos3-Super-Reasoner"
 
     def __init__(self, api_key: str, base_url: Optional[str] = None, default_model: Optional[str] = None) -> None:
         self.api_key = api_key
         self.base_url = base_url or self.DEFAULT_BASE_URL
-        self.default_model = default_model or self.DEFAULT_MODEL
+        # default_model is optional; callers should pass model explicitly for clarity
+        self.default_model = default_model
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -78,5 +77,40 @@ def assemble_messages_for_lift(*, lift: str, images: List[str], prompts_dir: str
     return [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": content},
+    ]
+
+
+def assemble_vision_messages(*, lift: str, images: List[str], prompts_dir: str) -> List[ChatMessage]:
+    """
+    Vision (Stage 1): build messages for MiniCPM-V to produce factual observations only.
+    """
+    observation_prompt = _load_prompt(f"{prompts_dir}/vision_observation.txt")
+    # Include lift type in the first text block to guide phase breakdown
+    content = [{"type": "text", "text": f"Lift: {lift}\n\n{observation_prompt}"}]
+    content += [{"type": "image_url", "image_url": {"url": url}} for url in images]
+    return [
+        {"role": "system", "content": "You strictly output factual observations about the images. No scores, no coaching, no speculation beyond what is visible."},
+        {"role": "user", "content": content},
+    ]
+
+
+def assemble_judge_messages(*, lift: str, observations: str, prompts_dir: str) -> List[ChatMessage]:
+    """
+    Judge (Stage 2): use rubric + per-lift prompt; evidence is the Stage-1 observations (no images).
+    Instruct to lower confidence when observations mention occlusion or oblique camera angle.
+    """
+    assert lift in ("snatch", "clean", "jerk")
+    system_prompt = _load_prompt(f"{prompts_dir}/system.txt")
+    user_prompt = _load_prompt(f"{prompts_dir}/user_{lift}.txt")
+    guidance = (
+        "Evidence is a vision-model observation summary (not raw images). "
+        "Judge bar-path efficiency ONLY from those observations. "
+        "If the observations mention occlusion, darkness, or an oblique camera angle, reflect higher uncertainty and lower confidence."
+    )
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "system", "content": guidance},
+        {"role": "user", "content": user_prompt},
+        {"role": "user", "content": f"Vision observations:\n{observations}"},
     ]
 
