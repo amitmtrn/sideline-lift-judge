@@ -5,6 +5,8 @@ import json
 from typing import Any, Dict, List, Optional, TypedDict
 
 import requests
+import math
+import re
 
 
 class ChatMessage(TypedDict, total=False):
@@ -32,12 +34,18 @@ class NebiusChatClient:
             "Content-Type": "application/json",
         }
 
-    async def create_chat_completion(self, messages: List[ChatMessage], model: Optional[str] = None, max_tokens: int = 800) -> str:
+    async def create_chat_completion(
+        self,
+        messages: List[ChatMessage],
+        model: Optional[str] = None,
+        max_tokens: int = 800,
+        extra_body: Optional[Dict[str, Any]] = None,
+    ) -> str:
         """
         Call the OpenAI-compatible /chat/completions endpoint. Returns the text content.
         """
         url = f"{self.base_url}/chat/completions"
-        payload = {
+        base_payload: Dict[str, Any] = {
             "model": model or self.default_model,
             "messages": messages,
             "temperature": 0.0,
@@ -45,13 +53,21 @@ class NebiusChatClient:
         }
         # Run in executor to avoid blocking
         loop = asyncio.get_event_loop()
+        # First attempt: include extra_body if provided
+        payload = dict(base_payload)
+        if extra_body:
+            payload.update(extra_body)
         response = await loop.run_in_executor(None, lambda: requests.post(url, headers=self._headers(), json=payload, timeout=60))
+        if response.status_code != 200 and extra_body:
+            # Fallback: retry once without extra_body
+            response = await loop.run_in_executor(None, lambda: requests.post(url, headers=self._headers(), json=base_payload, timeout=60))
         if response.status_code != 200:
             raise RuntimeError(f"Nebius API error {response.status_code}: {response.text}")
         data = response.json()
         # OpenAI-compatible shape
         try:
-            return data["choices"][0]["message"]["content"]
+            text = data["choices"][0]["message"]["content"]
+            return strip_think_blocks(text)
         except Exception:
             raise RuntimeError(f"Unexpected response format: {json.dumps(data)[:500]}")
 
@@ -113,4 +129,50 @@ def assemble_judge_messages(*, lift: str, observations: str, prompts_dir: str) -
         {"role": "user", "content": user_prompt},
         {"role": "user", "content": f"Vision observations:\n{observations}"},
     ]
+
+
+async def collect_observations_in_chunks(
+    *,
+    client: "NebiusChatClient",
+    lift: str,
+    images: List[str],
+    prompts_dir: str,
+    model: str,
+    max_images_per_call: int,
+) -> str:
+    """
+    Call the vision model in chunks of <= max_images_per_call and concatenate observations.
+    """
+    if max_images_per_call <= 0:
+        max_images_per_call = 10
+    chunks: List[List[str]] = [images[i : i + max_images_per_call] for i in range(0, len(images), max_images_per_call)]
+    observations_parts: List[str] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        messages = assemble_vision_messages(lift=lift, images=chunk, prompts_dir=prompts_dir)
+        text = await client.create_chat_completion(
+            messages=messages,
+            model=model,
+            max_tokens=1500,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        observations_parts.append(f"[Chunk {idx}/{len(chunks)}]\n{text}")
+    return "\n\n".join(observations_parts)
+
+
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+_THINK_PREFIX_RE = re.compile(r"^\s*<think>.*$", re.DOTALL | re.IGNORECASE)
+
+
+def strip_think_blocks(text: str) -> str:
+    """
+    Remove <think>...</think> blocks or an initial unclosed <think> prefix.
+    """
+    if not isinstance(text, str):
+        return text
+    # Remove all closed think blocks
+    cleaned = _THINK_BLOCK_RE.sub("", text)
+    # If starts with an unclosed <think>, drop everything up to the first closing tag or end
+    if cleaned.lstrip().lower().startswith("<think>") and "</think>" not in cleaned.lower():
+        return ""
+    return cleaned.strip()
 
