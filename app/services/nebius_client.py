@@ -5,6 +5,7 @@ import json
 from typing import Any, Dict, List, Optional, TypedDict
 
 import requests
+import math
 
 
 class ChatMessage(TypedDict, total=False):
@@ -113,4 +114,27 @@ def assemble_judge_messages(*, lift: str, observations: str, prompts_dir: str) -
         {"role": "user", "content": user_prompt},
         {"role": "user", "content": f"Vision observations:\n{observations}"},
     ]
+
+
+async def collect_observations_in_chunks(
+    *,
+    client: "NebiusChatClient",
+    lift: str,
+    images: List[str],
+    prompts_dir: str,
+    model: str,
+    max_images_per_call: int,
+) -> str:
+    """
+    Call the vision model in chunks of <= max_images_per_call and concatenate observations.
+    """
+    if max_images_per_call <= 0:
+        max_images_per_call = 10
+    chunks: List[List[str]] = [images[i : i + max_images_per_call] for i in range(0, len(images), max_images_per_call)]
+    observations_parts: List[str] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        messages = assemble_vision_messages(lift=lift, images=chunk, prompts_dir=prompts_dir)
+        text = await client.create_chat_completion(messages=messages, model=model)
+        observations_parts.append(f"[Chunk {idx}/{len(chunks)}]\n{text}")
+    return "\n\n".join(observations_parts)
 

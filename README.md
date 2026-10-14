@@ -56,7 +56,7 @@ uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --reload
 Open `http://localhost:8000`:
 - Choose lift type (snatch / clean / jerk)
 - Upload a short side-view clip
-- The app extracts ~12 frames (clamped to 8–16), auto-rotates based on phone metadata (when available) and downsizes frames to ~768px long side, then:
+- The app extracts ~10 frames by default (clamped to 8–16), auto-rotates based on phone metadata (when available) and downsizes frames to ~768px long side, then:
   - Stage 1 (MiniCPM‑V): produces plain-English observations only.
   - Stage 2 (Nemotron): produces the final JSON (score 1–10, band, max horizontal drift, 1–2 cues, confidence, optional notes). If Stage‑1 notes occlusion/oblique angle, confidence is lowered accordingly.
 
@@ -65,7 +65,7 @@ Open `http://localhost:8000`:
 python score_clip.py /path/to/clip.mp4 --lift snatch
 ```
 Options:
-- `--frames 12` (clamped to 8–16)
+- `--frames 10` (clamped to 8–16; at most 10 images per vision call; extra frames are chunked)
 - `--prompts_dir prompts/`
 - `--debug` (prints Stage‑1 observations)
 
@@ -87,12 +87,12 @@ Run unit tests:
 pytest -q
 ```
 Coverage in this MVP:
-- Frame sampling: creates a dummy video and verifies even sampling
+ - Frame sampling: creates a dummy video and verifies even sampling
 - JSON validation: success cases, fenced JSON, cues count logic, and band=unknown special-case
 - Nebius API calls: two-stage flow mocked to validate both the observation and judge steps (no live inference)
 
 ### Cost note
-- Frames per call: by default 12 images are sent (configurable to 8–16).
+- Frames per call: vision accepts at most 10 images per request (configurable via `NEBIUS_VISION_MAX_IMAGES`, default 10). If more frames are requested, the app chunks them across multiple vision calls and merges observations before judging.
 - Token estimate: depends on provider accounting for multi-image inputs; exact tokenization is provider-specific and not documented here. Treat as unknown and verify in your Nebius Token Factory usage dashboard.
 
 ### Deployment
