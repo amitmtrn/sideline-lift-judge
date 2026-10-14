@@ -32,7 +32,7 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description="Score a lift clip with Nebius Token Factory (NVIDIA vision model)")
     parser.add_argument("video", type=str, help="Path to video file")
     parser.add_argument("--lift", type=str, choices=[e.value for e in LiftType], required=True, help="Lift type")
-    parser.add_argument("--frames", type=int, default=12, help="Frames to sample (8–16)")
+    parser.add_argument("--frames", type=int, default=10, help="Frames to sample (8–16)")
     parser.add_argument("--prompts_dir", type=str, default=str(Path(__file__).parent / "prompts"), help="Prompts directory")
     parser.add_argument("--debug", action="store_true", help="Print Stage 1 vision observations")
     args = parser.parse_args()
@@ -45,6 +45,7 @@ async def main() -> int:
     base_url = os.getenv("NEBIUS_BASE_URL") or NebiusChatClient.DEFAULT_BASE_URL
     vision_model = os.getenv("NEBIUS_VISION_MODEL") or "openbmb/MiniCPM-V-4_5"
     judge_model = os.getenv("NEBIUS_JUDGE_MODEL") or "nvidia/Nemotron-3-Ultra-550b-a55b"
+    max_images = int(os.getenv("NEBIUS_VISION_MAX_IMAGES") or "10")
 
     if args.frames < 8 or args.frames > 16:
         print("NOTE: clamping frames to [8, 16]")
@@ -59,8 +60,20 @@ async def main() -> int:
 
     client = NebiusChatClient(api_key=api_key, base_url=base_url)
     # Stage 1: vision observations
-    v_messages = assemble_vision_messages(lift=args.lift, images=images, prompts_dir=args.prompts_dir)
-    observations = await client.create_chat_completion(messages=v_messages, model=vision_model)
+    # Clamp or chunk to max_images
+    if len(images) <= max_images:
+        v_messages = assemble_vision_messages(lift=args.lift, images=images, prompts_dir=args.prompts_dir)
+        observations = await client.create_chat_completion(messages=v_messages, model=vision_model)
+    else:
+        from app.services.nebius_client import collect_observations_in_chunks
+        observations = await collect_observations_in_chunks(
+            client=client,
+            lift=args.lift,
+            images=images,
+            prompts_dir=args.prompts_dir,
+            model=vision_model,
+            max_images_per_call=max_images,
+        )
     if args.debug:
         print("=== Stage 1: Vision observations ===")
         print(observations)

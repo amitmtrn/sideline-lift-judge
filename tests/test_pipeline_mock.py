@@ -3,7 +3,12 @@ from unittest.mock import Mock, patch
 
 import numpy as np  # type: ignore
 
-from app.services.nebius_client import NebiusChatClient, assemble_vision_messages, assemble_judge_messages
+from app.services.nebius_client import (
+    NebiusChatClient,
+    assemble_vision_messages,
+    assemble_judge_messages,
+    collect_observations_in_chunks,
+)
 
 
 def _single_image_data_url() -> str:
@@ -47,3 +52,24 @@ def test_two_stage_pipeline_mocks_requests():
         assert '"lift":"snatch"' in out
         assert post.call_count == 2
 
+
+def test_vision_chunking_makes_multiple_calls_when_over_limit():
+    client = NebiusChatClient(api_key="x", base_url="https://example.test/v1")
+    # Build 12 tiny images → should split into 2 calls when max_images=10
+    images = [_single_image_data_url() for _ in range(12)]
+    m1 = Mock(); m1.status_code = 200; m1.json.return_value = {"choices": [{"message": {"content": "obs1"}}]}
+    m2 = Mock(); m2.status_code = 200; m2.json.return_value = {"choices": [{"message": {"content": "obs2"}}]}
+    with patch("app.services.nebius_client.requests.post", side_effect=[m1, m2]) as post:
+        import asyncio
+        text = asyncio.get_event_loop().run_until_complete(
+            collect_observations_in_chunks(
+                client=client,
+                lift="snatch",
+                images=images,
+                prompts_dir="prompts",
+                model="openbmb/MiniCPM-V-4_5",
+                max_images_per_call=10,
+            )
+        )
+        assert "obs1" in text and "obs2" in text
+        assert post.call_count == 2
