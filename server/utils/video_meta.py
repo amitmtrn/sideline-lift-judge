@@ -50,13 +50,16 @@ def probe_video(video_path: str) -> VideoInfo:
     if not shutil.which("ffprobe"):
         return VideoInfo()
     try:
+        # -show_streams rather than a -show_entries selector: asking for
+        # `side_data_list` by name returns the section with its fields stripped
+        # ([{}]), which is how the display-matrix rotation went missing.
         out = subprocess.check_output(
             [
                 "ffprobe",
                 "-v",
                 "error",
-                "-show_entries",
-                "stream=codec_type,width,height,avg_frame_rate,side_data_list:stream_tags=rotate:format=duration",
+                "-show_streams",
+                "-show_format",
                 "-of",
                 "json",
                 video_path,
@@ -88,6 +91,17 @@ def probe_video(video_path: str) -> VideoInfo:
     return info
 
 
+def _is_display_matrix(side_data_type: object) -> bool:
+    """
+    ffprobe spells it "Display Matrix" (with a space, capitalised). Comparing
+    against "displaymatrix" silently never matched, so every rotated phone clip
+    reported 0° — fold case and drop non-letters instead.
+    """
+    if not isinstance(side_data_type, str):
+        return False
+    return "".join(ch for ch in side_data_type.lower() if ch.isalpha()) == "displaymatrix"
+
+
 def _rotation_from_stream(stream: dict) -> int:
     rotate_tag = (stream.get("tags") or {}).get("rotate")
     if rotate_tag is not None:
@@ -96,13 +110,32 @@ def _rotation_from_stream(stream: dict) -> int:
         except ValueError:
             pass
     for side_data in stream.get("side_data_list") or []:
-        if (side_data.get("side_data_type") or "").lower() == "displaymatrix":
+        if _is_display_matrix(side_data.get("side_data_type")):
             rotation = side_data.get("rotation")
             if rotation is not None:
                 try:
                     return normalize_rotation(int(float(rotation)))
                 except (TypeError, ValueError):
                     continue
+    return 0
+
+
+def rotation_still_needed(info: "VideoInfo", frame_width: int, frame_height: int) -> int:
+    """
+    How much we must rotate a frame OpenCV just handed us.
+
+    OpenCV's FFmpeg backend applies the display matrix itself on most builds, so
+    rotating by `info.rotation` on top of that turns a portrait clip on its side.
+    Decide from what actually came back: frames already at the display size need
+    nothing, frames at the coded size need the full rotation, and anything else
+    is left alone rather than risk rotating twice.
+    """
+    if not info.probed or not info.rotation:
+        return 0
+    if (frame_width, frame_height) == (info.display_width, info.display_height):
+        return 0
+    if (frame_width, frame_height) == (info.width, info.height):
+        return info.rotation
     return 0
 
 
@@ -125,46 +158,14 @@ def _parse_frame_rate(value: object) -> float:
 
 def get_rotation_degrees(video_path: str) -> int:
     """
-    Best-effort detection of rotation metadata using ffprobe if available.
-    Returns one of {0, 90, 180, 270} (clockwise degrees). Missing ffprobe → 0.
+    Rotation metadata in clockwise degrees, one of {0, 90, 180, 270}; 0 when
+    ffprobe is missing or the file carries none. Delegates to probe_video so the
+    display-matrix parsing lives in exactly one place.
+
+    Note this is the rotation *the file declares*, which is not necessarily the
+    rotation a decoded frame still needs — see `rotation_still_needed`.
     """
-    if not shutil.which("ffprobe"):
-        return 0
-    try:
-        cmd = [
-            "ffprobe",
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=side_data_list:stream_tags=rotate",
-            "-of",
-            "json",
-            video_path,
-        ]
-        out = subprocess.check_output(cmd, stderr=subprocess.STDOUT)
-        data = json.loads(out.decode("utf-8", errors="ignore"))
-        streams = data.get("streams", [])
-        if not streams:
-            return 0
-        s0 = streams[0]
-        # Tag-based rotate (common)
-        tags = s0.get("tags", {}) or {}
-        rotate_val = tags.get("rotate")
-        if rotate_val is not None:
-            deg = int(str(rotate_val).strip())
-            return normalize_rotation(deg)
-        # Display matrix side data
-        for sd in s0.get("side_data_list", []) or []:
-            if sd.get("side_data_type", "").lower() == "displaymatrix":
-                # Some ffprobe builds include rotation in degrees
-                deg = sd.get("rotation")
-                if deg is not None:
-                    return normalize_rotation(int(deg))
-        return 0
-    except Exception:
-        return 0
+    return probe_video(video_path).rotation
 
 
 def normalize_rotation(deg: int) -> int:

@@ -13,8 +13,9 @@ import logging
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Sequence
+from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
+from server.utils.bar_track import BarPath
 from server.utils.video_meta import probe_video
 
 logger = logging.getLogger(__name__)
@@ -74,6 +75,19 @@ def escape_drawtext(text: str) -> str:
 NO_EXPANSION = "expansion=none"
 
 
+# Mean glyph advance of the bold sans fonts we use, as a fraction of font size.
+# Only needs to be close: it decides whether a headline is shrunk, not laid out.
+CHAR_ADVANCE = 0.58
+MIN_TITLE_SIZE = 11
+
+
+def fitted_font_size(text: str, available_width: int) -> int:
+    """Largest font size at which `text` still fits across `available_width`."""
+    if not text or available_width <= 0:
+        return MIN_TITLE_SIZE
+    return max(MIN_TITLE_SIZE, int(available_width / (len(text) * CHAR_ADVANCE)))
+
+
 def wrap_text(text: str, width: int) -> List[str]:
     """Greedy wrap on word boundaries; a single over-long word is left alone."""
     words = (text or "").split()
@@ -91,16 +105,35 @@ def wrap_text(text: str, width: int) -> List[str]:
     return lines
 
 
+def _even(value: int) -> int:
+    """H.264 with yuv420p cannot encode an odd width or height."""
+    return max(2, int(value) - (int(value) % 2))
+
+
+def output_size(width: int, height: int) -> Optional[Tuple[int, int]]:
+    """
+    The exact size the replay will be encoded at. Computed here rather than left
+    to ffmpeg's `-2` so a trace overlay can be drawn at precisely the same size
+    and composited at 0:0 with no scaling guesswork.
+    """
+    if not (width and height):
+        return None
+    if max(width, height) > MAX_LONG_SIDE:
+        if width >= height:
+            return _even(MAX_LONG_SIDE), _even(round(height * MAX_LONG_SIDE / width))
+        return _even(round(width * MAX_LONG_SIDE / height)), _even(MAX_LONG_SIDE)
+    return _even(width), _even(height)
+
+
 def _scale_filter(width: int, height: int) -> str:
     """
-    Downscale the long side to MAX_LONG_SIDE, keep the aspect ratio, and force
-    even dimensions — H.264 with yuv420p cannot encode an odd width or height.
+    Downscale the long side to MAX_LONG_SIDE, keeping the aspect ratio and even
+    dimensions.
     """
-    if width and height and max(width, height) > MAX_LONG_SIDE:
-        if width >= height:
-            return f"scale={MAX_LONG_SIDE}:-2"
-        return f"scale=-2:{MAX_LONG_SIDE}"
-    return "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    size = output_size(width, height)
+    if size is None:
+        return "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    return f"scale={size[0]}:{size[1]}"
 
 
 def build_overlay_filters(
@@ -115,10 +148,13 @@ def build_overlay_filters(
     footer strip with the first cue. Sizes are derived from frame height so the
     text stays readable whether the clip is portrait or landscape.
     """
-    base = max(display_height, 240)
-    title_size = max(18, int(base * 0.075))
-    body_size = max(14, int(base * 0.045))
-    pad = max(8, int(base * 0.02))
+    # Sized from the width, because text runs across the frame: a tall portrait
+    # clip would otherwise get letters wider than the picture. These are output
+    # pixels, so the caller must pass the encoded size, not the source size.
+    base = max(display_width, 240)
+    title_size = max(14, int(base * 0.062))
+    body_size = max(12, int(base * 0.040))
+    pad = max(6, int(base * 0.022))
     header_height = title_size + 2 * pad
     color = BAND_COLORS.get(judgment.band, BAND_COLORS["unknown"])
 
@@ -126,6 +162,12 @@ def build_overlay_filters(
     headline = f"{judgment.lift.value.upper()}  {score}  {judgment.band.upper()}"
     if judgment.confidence is not None:
         headline += f"   confidence {judgment.confidence:.0%}"
+
+    # Shrink the headline to fit rather than letting it run off the side of a
+    # portrait clip. The confidence is part of the honesty contract, so it is
+    # the font that gives way, not the text.
+    title_size = min(title_size, fitted_font_size(headline, display_width - 2 * pad))
+    header_height = title_size + 2 * pad
 
     filters = [
         f"drawbox=x=0:y=0:w=iw:h={header_height}:color=black@0.62:t=fill",
@@ -152,6 +194,67 @@ def build_overlay_filters(
     return filters
 
 
+# Overlay colours, BGRA to match OpenCV. Same palette as the app.
+TRACE_GREEN = (106, 174, 47, 255)
+TRACE_SHADOW = (0, 0, 0, 170)
+REFERENCE_CHALK = (245, 242, 239, 190)
+DRIFT_ORANGE = (59, 125, 239, 255)
+
+
+def build_trace_overlay(path: "BarPath", width: int, height: int):
+    """
+    A transparent layer carrying the bar-path trace, the line the bar started
+    over, and a marker where it strayed furthest from it. Returns a BGRA image,
+    or None when there is nothing trustworthy to draw.
+
+    Drawn once for the whole clip rather than animated: a coach pausing on any
+    frame — or sharing a still — sees the whole path.
+    """
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    if not path.tracked or width <= 0 or height <= 0:
+        return None
+
+    layer = np.zeros((height, width, 4), dtype=np.uint8)
+    points = [(int(p.x * width), int(p.y * height)) for p in path.points]
+    thickness = max(2, round(min(width, height) / 220))
+
+    # The line the bar started over — what "keep the bar close" is measured against.
+    reference_x = int(path.reference_x * width)
+    for y in range(0, height, thickness * 8):
+        cv2.line(layer, (reference_x, y), (reference_x, min(height, y + thickness * 4)),
+                 REFERENCE_CHALK, max(1, thickness - 1), cv2.LINE_AA)
+
+    # The path itself, dark-edged so it reads over a light gym floor too.
+    for width_, colour in ((thickness + 3, TRACE_SHADOW), (thickness, TRACE_GREEN)):
+        cv2.polylines(layer, [np.array(points, dtype=np.int32)], False, colour, width_, cv2.LINE_AA)
+
+    # Where the bar was furthest from where it started.
+    _drift, worst = path.max_drift()
+    if worst is not None:
+        wx, wy = int(worst.x * width), int(worst.y * height)
+        for x in range(min(reference_x, wx), max(reference_x, wx), thickness * 6):
+            cv2.line(layer, (x, wy), (min(x + thickness * 3, max(reference_x, wx)), wy),
+                     DRIFT_ORANGE, thickness, cv2.LINE_AA)
+        cv2.circle(layer, (wx, wy), thickness * 4, DRIFT_ORANGE, thickness, cv2.LINE_AA)
+
+    # Where it began, so the direction of travel is unambiguous.
+    cv2.circle(layer, points[0], thickness * 3, REFERENCE_CHALK, -1, cv2.LINE_AA)
+    return layer
+
+
+def write_trace_overlay(path: "BarPath", width: int, height: int, out_path: str) -> Optional[str]:
+    import cv2  # type: ignore
+
+    layer = build_trace_overlay(path, width, height)
+    if layer is None:
+        return None
+    destination = Path(out_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return str(destination) if cv2.imwrite(str(destination), layer) else None
+
+
 def _run(args: List[str], timeout: float) -> bool:
     try:
         subprocess.run(
@@ -173,15 +276,16 @@ def render_annotated_replay(
     *,
     start_sec: Optional[float] = None,
     end_sec: Optional[float] = None,
+    bar_path: Optional["BarPath"] = None,
     timeout: float = 180.0,
 ) -> Optional[str]:
     """
-    Write an iOS-safe MP4 of [start_sec, end_sec] with the verdict burnt in.
+    Write an iOS-safe MP4 of [start_sec, end_sec] with the verdict burnt in, and
+    the bar-path trace drawn over it when `bar_path` was tracked confidently.
 
-    Falls back to the same clip without the overlay if drawtext fails (no font,
-    or a filtergraph the local build rejects), because a replay a coach can play
-    is worth more than no replay at all. Returns the written path, or None when
-    ffmpeg is unavailable or every attempt failed.
+    Degrades in steps: trace + text, then text alone, then a plain clip. A replay
+    a coach can play is worth more than no replay at all. Returns the written
+    path, or None when ffmpeg is unavailable or every attempt failed.
     """
     if not shutil.which("ffmpeg"):
         return None
@@ -219,37 +323,66 @@ def render_annotated_replay(
         "rotate=0",
     ]
 
+    # Every filter below runs after `scale`, so all sizes are in output pixels.
+    size = output_size(info.display_width, info.display_height)
+    text_width, text_height = size if size else (info.display_width, info.display_height)
+
     font = find_font()
-    filter_chains: List[str] = []
-    if font:
-        overlay = build_overlay_filters(
+    text_filters = (
+        build_overlay_filters(
             judgment,
             font=font,
-            display_width=info.display_width,
-            display_height=info.display_height,
+            display_width=text_width,
+            display_height=text_height,
         )
-        filter_chains.append(",".join([scale, *overlay]))
-    # Last resort: no overlay, but a clip that plays.
-    filter_chains.append(scale)
+        if font
+        else []
+    )
 
-    for attempt, chain in enumerate(filter_chains):
-        args = [
-            "ffmpeg",
-            "-y",
-            "-v",
-            "error",
-            *trim_args,
-            "-i",
-            str(video_path),
-            "-vf",
-            chain,
-            *encode_args,
-            str(destination),
-        ]
-        if _run(args, timeout) and destination.exists() and destination.stat().st_size > 1024:
-            if attempt and font:
-                # The clip still plays, but without the verdict burnt in — worth
-                # knowing about rather than discovering it in a shared replay.
-                logger.warning("Replay overlay could not be drawn; wrote a plain clip instead.")
-            return str(destination)
-    return None
+    # The trace is a transparent PNG built at exactly the encoded size, so it
+    # composites at 0:0 with no scaling of its own.
+    trace_file = None
+    if bar_path is not None and bar_path.tracked and size is not None:
+        trace_file = write_trace_overlay(bar_path, size[0], size[1], str(destination.with_suffix(".trace.png")))
+
+    # Best first, each step dropping one layer of annotation.
+    attempts: List[Tuple[str, List[str]]] = []
+    if trace_file:
+        chain = f"[0:v]{scale}[base];[base][1:v]overlay=0:0[traced]"
+        if text_filters:
+            chain += f";[traced]{','.join(text_filters)}[out]"
+        else:
+            chain += ";[traced]null[out]"
+        attempts.append(
+            ("trace+text", ["-i", trace_file, "-filter_complex", chain, "-map", "[out]", "-map", "0:a?"])
+        )
+    if text_filters:
+        attempts.append(("text", ["-vf", ",".join([scale, *text_filters])]))
+    attempts.append(("plain", ["-vf", scale]))
+
+    try:
+        for attempt, (label, filter_args) in enumerate(attempts):
+            args = [
+                "ffmpeg",
+                "-y",
+                "-v",
+                "error",
+                *trim_args,
+                "-i",
+                str(video_path),
+                *filter_args,
+                *encode_args,
+                str(destination),
+            ]
+            if _run(args, timeout) and destination.exists() and destination.stat().st_size > 1024:
+                if attempt:
+                    # The clip still plays, but with less on it than intended —
+                    # worth knowing rather than discovering in a shared replay.
+                    logger.warning(
+                        "Replay fell back to %s; the fuller overlay could not be drawn.", label
+                    )
+                return str(destination)
+        return None
+    finally:
+        if trace_file:
+            Path(trace_file).unlink(missing_ok=True)

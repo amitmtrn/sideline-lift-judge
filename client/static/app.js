@@ -513,6 +513,16 @@
 
   function replayBlock(item) {
     const block = element("div", "replay");
+    if (item.bar_path_tracked) {
+      const key = element("p", "trace-key");
+      key.appendChild(element("span", "swatch path", ""));
+      key.appendChild(element("span", null, "bar path"));
+      key.appendChild(element("span", "swatch start", ""));
+      key.appendChild(element("span", null, "where it started"));
+      key.appendChild(element("span", "swatch drift", ""));
+      key.appendChild(element("span", null, "furthest from it"));
+      block.appendChild(key);
+    }
     const video = document.createElement("video");
     video.src = item.annotated_video_url;
     video.controls = true;

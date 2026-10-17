@@ -34,7 +34,7 @@ from server.services.nebius_client import (
 from server.utils.clips import cut_segment, format_timestamp, has_ffmpeg, write_contact_sheet
 from server.utils.frames import sample_frames_in_range_bgr
 from server.utils.image_ops import frames_to_data_urls, prepare_frames
-from server.utils.video_meta import get_rotation_degrees
+from server.utils.video_meta import probe_video, rotation_still_needed
 from server.utils.segmentation import (
     DEFAULT_MAX_DURATION,
     DEFAULT_MERGE_GAP,
@@ -320,7 +320,15 @@ async def run(args: argparse.Namespace) -> int:
         if not args.no_clips and not has_ffmpeg():
             print("NOTE: ffmpeg not found; skipping per-exercise clip cutting.", file=sys.stderr)
 
-    rotation_deg = get_rotation_degrees(video_path)
+    # Not the file's declared rotation: OpenCV's decoder usually applies the
+    # display matrix itself, and rotating again lays a portrait clip on its side.
+    info = probe_video(video_path)
+    probe_frame = sample_frames_in_range_bgr(video_path, start_sec=0.0, end_sec=0.5, target_count=1)
+    rotation_deg = (
+        rotation_still_needed(info, probe_frame[0].shape[1], probe_frame[0].shape[0])
+        if probe_frame
+        else 0
+    )
     semaphore = asyncio.Semaphore(max(1, args.concurrency))
 
     # Stage 0b: triage each window, then expand clean & jerk into two exercises

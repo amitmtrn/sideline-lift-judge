@@ -789,6 +789,35 @@ details pre {
   max-height: 52dvh;
 }
 
+/* Legend for the trace burnt into the replay. */
+.trace-key {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 14px;
+  margin: 0 0 8px;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--chalk-faint);
+}
+
+.trace-key .swatch {
+  width: 16px;
+  height: 3px;
+  margin-right: -8px;
+  border-radius: 2px;
+  background: var(--plate-green);
+}
+
+.trace-key .swatch.start {
+  background: var(--chalk);
+}
+
+.trace-key .swatch.drift {
+  background: var(--plate-orange);
+}
+
 .replay .actions {
   margin-top: 10px;
 }
