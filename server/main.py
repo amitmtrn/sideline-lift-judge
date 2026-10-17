@@ -165,6 +165,7 @@ def _lift_payload(item: ScoredLift, *, job_id: Optional[str] = None) -> Dict[str
         "start_sec": item.start_sec,
         "end_sec": item.end_sec,
         "was_split": item.was_split,
+        "bar_path_tracked": item.bar_path_tracked,
     }
     if item.error:
         body["error"] = item.error

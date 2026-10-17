@@ -1,10 +1,17 @@
+# Runtime
 fastapi==0.115.4
 uvicorn==0.32.0
 jinja2==3.1.4
-python-multipart==0.0.12
-opencv-python-headless==4.10.0.84
-openai==1.51.2
+python-multipart==0.0.12          # parses the multipart upload
 pydantic==2.9.2
 python-dotenv==1.0.1
-requests==2.32.3
+requests==2.32.3                  # the Token Factory client is hand-rolled on this
+opencv-python-headless==4.10.0.84  # frame sampling and the motion scan
+numpy==2.5.4                      # imported directly, not just via OpenCV
+
+# Tests
 pytest==8.3.3
+httpx==0.28.1                     # required by starlette's TestClient
+
+# Also required, but not installable with pip: ffmpeg (ffmpeg + ffprobe on PATH).
+# Without it there is no trimming, no rotation handling and no annotated replay.

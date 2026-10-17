@@ -34,6 +34,7 @@ from server.services.nebius_client import (
     vision_model,
 )
 from server.services.replay import render_annotated_replay
+from server.utils.bar_track import BarPath, track_bar_path
 from server.utils.frames import sample_frames_in_range_bgr
 from server.utils.image_ops import frames_to_data_urls, prepare_frames
 from server.utils.segmentation import (
@@ -43,7 +44,7 @@ from server.utils.segmentation import (
     detect_segments,
     split_segment_at_valley,
 )
-from server.utils.video_meta import VideoInfo, probe_video
+from server.utils.video_meta import VideoInfo, probe_video, rotation_still_needed
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,7 @@ class ScoredLift:
     activity: str = ""
     observations: Optional[str] = None
     replay_path: Optional[str] = None
+    bar_path_tracked: bool = False
     error: Optional[str] = None
 
 
@@ -187,7 +189,9 @@ async def run_scoring(
     """
     frames_wanted = clamp_frames(request.frames)
     info = await _offload(probe_video, request.video_path)
-    rotation = info.rotation
+    # Rotation is decided per batch of decoded frames in _rotation_for, not from
+    # info.rotation: OpenCV's decoder already applies the display matrix on most
+    # builds, and rotating again would put a portrait clip on its side.
 
     progress("preparing", "Reading the clip…", 0.05)
     start, end, trimmed = resolve_trim(
@@ -224,7 +228,7 @@ async def run_scoring(
             prompts_dir=prompts_dir,
             windows=windows,
             profile=profile,
-            rotation=rotation,
+            info=info,
             outcome=outcome,
             progress=progress,
         )
@@ -240,7 +244,7 @@ async def run_scoring(
                 prompts_dir=prompts_dir,
                 windows=[window],
                 profile=profile,
-                rotation=rotation,
+                info=info,
                 outcome=outcome,
                 progress=progress,
                 fallback_lift=request.lift,
@@ -267,7 +271,6 @@ async def run_scoring(
             was_split=was_split,
             index=position,
             total=total,
-            rotation=rotation,
             info=info,
             frames_wanted=frames_wanted,
             progress=progress,
@@ -284,7 +287,7 @@ async def _plan_windows(
     prompts_dir: str,
     windows: List[CandidateSegment],
     profile: MotionProfile,
-    rotation: int,
+    info: VideoInfo,
     outcome: ScoreOutcome,
     progress: ProgressReporter,
     fallback_lift: Optional[LiftType] = None,
@@ -310,7 +313,7 @@ async def _plan_windows(
             continue
         try:
             images = await _offload(
-                _encode_frames, frames, rotation, TRIAGE_LONG_SIDE
+                _encode_frames, frames, _rotation_for(info, frames), TRIAGE_LONG_SIDE
             )
             triage = await classify_segment(
                 client=client,
@@ -364,7 +367,6 @@ async def _score_one_lift(
     was_split: bool,
     index: int,
     total: int,
-    rotation: int,
     info: VideoInfo,
     frames_wanted: int,
     progress: ProgressReporter,
@@ -391,7 +393,7 @@ async def _score_one_lift(
     if not frames:
         scored.error = "Could not read frames from this part of the clip."
         return scored
-    processed = await _offload(prepare_frames, frames, rotation_deg=rotation)
+    processed = await _offload(prepare_frames, frames, rotation_deg=_rotation_for(info, frames))
 
     try:
         progress("observing", f"Reading bar path — {label}…", low + 0.1 * (high - low))
@@ -429,7 +431,24 @@ async def _score_one_lift(
     scored.judgment = apply_quality(judgment, quality)
 
     if request.render_replay and request.replay_dir:
-        progress("rendering", f"Rendering replay — {label}…", low + 0.75 * (high - low))
+        progress("rendering", f"Drawing the bar path — {label}…", low + 0.7 * (high - low))
+        # Local CV, no model call: follow the plate so the replay can show the
+        # path the cue is talking about.
+        bar_path: Optional[BarPath] = None
+        try:
+            bar_path = await _offload(
+                track_bar_path,
+                request.video_path,
+                start_sec=window.start_sec,
+                end_sec=window.end_sec,
+            )
+        except Exception:
+            logger.exception("Bar tracking failed for %s", label)
+        scored.bar_path_tracked = bool(bar_path and bar_path.tracked)
+        if bar_path is not None and not bar_path.tracked:
+            logger.info("No bar trace for %s: %s", label, bar_path.reason)
+
+        progress("rendering", f"Rendering replay — {label}…", low + 0.8 * (high - low))
         replay = await _offload(
             render_annotated_replay,
             request.video_path,
@@ -437,11 +456,20 @@ async def _score_one_lift(
             str(Path(request.replay_dir) / f"replay_{index:02d}_{lift.value}.mp4"),
             start_sec=window.start_sec,
             end_sec=window.end_sec,
+            bar_path=bar_path,
         )
         scored.replay_path = replay
         if replay is None:
             logger.info("Replay rendering unavailable for %s", label)
     return scored
+
+
+def _rotation_for(info: VideoInfo, frames) -> int:
+    """Degrees these decoded frames still need, judged from their actual size."""
+    if not frames:
+        return 0
+    height, width = frames[0].shape[:2]
+    return rotation_still_needed(info, width, height)
 
 
 def _encode_frames(frames, rotation_deg: int, long_side: int) -> List[str]:

@@ -91,7 +91,7 @@ The prompts are fixed, stored under `prompts/`:
 - `prompts/vision_triage.txt` (Stage‑0b per-frame bar position, used by `score_session.py`)
 
 ### Setup
-1) Python 3.11+ recommended (tested on 3.12)
+1) Python 3.11+ (verified on 3.13 from a clean virtualenv)
 2) Create `.env` (see `.env.example`) with at least:
    - `NEBIUS_API_KEY=...`
    - Optionally override `NEBIUS_BASE_URL`, `NEBIUS_VISION_MODEL`, `NEBIUS_JUDGE_MODEL`
@@ -279,9 +279,33 @@ cap comes with a warning shown next to the score:
 Caps are ceilings, never floors — a judge that is already unsure stays unsure. The worst
 applicable cap wins. A clean & jerk that *was* split is noted, not penalised.
 
-### Annotated replay
+### Annotated replay and the bar-path trace
 Each scored lift gets an MP4 with the verdict burnt in — lift, score, band, confidence and the
-first cue — so the file still carries the score after it goes through a share sheet. Encoding is
+first cue — so the file still carries the score after it goes through a share sheet.
+
+When the barbell can be followed confidently, the replay also carries the **bar path** itself, so
+the cue has something to point at:
+
+| Mark | Meaning |
+|---|---|
+| Green line | the path the bar actually took |
+| Dashed white line | where the bar started — what "keep the bar close" is measured against |
+| Orange ring and ticks | the point where the bar strayed furthest from that line |
+
+Tracking is local OpenCV (`server/utils/bar_track.py`) — no model call and no extra token cost. It
+finds circles that move, follows several candidates at once, and keeps the one that behaves like a
+barbell: a plate travels a long way up the frame, while a head or a plate parked on a stand does
+not. Plate colour holds the identity so the trail cannot hop to the far plate and invent a sideways
+move that never happened.
+
+It gives up rather than guess. If the bar is found in under ~55% of frames, barely rises, or never
+moves, no trace is drawn and the replay is the verdict-only version. `bar_path_tracked` in the
+result says which you got.
+
+**It is a trace, not a measurement.** `BarPath.drift_cm()` can scale the drift by the plate's
+apparent size (assuming a 450 mm competition bumper), but that figure is *not* shown anywhere,
+because it is confounded by which plate is tracked, by camera parallax and by the athlete moving
+across the frame. Trust the shape of the line; don't read centimetres off it. Encoding is
 deliberately conservative so iOS Safari plays it inline: H.264, `yuv420p`, even dimensions, AAC or
 no audio, `+faststart`, long side capped at 720 px. If no usable font is found, it falls back to
 the same clip without the overlay rather than to no replay at all. Requires ffmpeg.

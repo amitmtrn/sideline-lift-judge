@@ -352,7 +352,10 @@ Course PDFs are **never committed** or redistributed.
 ## 18. Stretch goals
 
 - Jerk support, plus clean & jerk auto-split into two scored calls
-- A bar-path trace overlay drawn from per-frame bar positions on the annotated replay
+- ✅ **Done.** A bar-path trace overlay drawn from per-frame bar positions on the annotated
+  replay, plus the starting line and a marker at the worst drift (`server/utils/bar_track.py`).
+  Local OpenCV, no model call. Drawn only when tracking is confident; the derived
+  centimetre figure is deliberately not surfaced, as it is not validated.
 - Comparing two attempts side by side
 - **Native mobile app (React Native/Flutter):** 60 fps capture, locked exposure and focus, a live angle guide, on-device trimming, push notifications for finished results, an offline upload queue
 - Re-check Cosmos or another NVIDIA vision model if one becomes available on Token Factory, to run fully on NVIDIA models

@@ -7,6 +7,7 @@ import pytest
 
 from server.schemas.judgment import LiftJudgment
 from server.services.replay import (
+    output_size,
     MAX_LONG_SIDE,
     _scale_filter,
     build_overlay_filters,
@@ -69,11 +70,30 @@ def test_wrap_text_handles_empty_and_long_words():
     assert wrap_text("supercalifragilistic", 5) == ["supercalifragilistic"]
 
 
-def test_scale_filter_keeps_dimensions_even():
-    assert _scale_filter(1920, 1080) == f"scale={MAX_LONG_SIDE}:-2"
-    assert _scale_filter(1080, 1920) == f"scale=-2:{MAX_LONG_SIDE}"
-    # Already small: only force even dimensions.
-    assert "trunc" in _scale_filter(320, 240)
+def test_output_size_caps_the_long_side_and_stays_even():
+    # Explicit sizes, not ffmpeg's -2, so the trace overlay can be built at
+    # exactly the encoded size and composited at 0:0.
+    assert output_size(1920, 1080) == (MAX_LONG_SIDE, 404)
+    assert output_size(1080, 1920) == (404, MAX_LONG_SIDE)
+    for width, height in [(1920, 1080), (1080, 1920), (1366, 768), (640, 361), (101, 203)]:
+        out_w, out_h = output_size(width, height)
+        assert out_w % 2 == 0 and out_h % 2 == 0, (width, height)
+        assert max(out_w, out_h) <= MAX_LONG_SIDE
+        # Aspect ratio preserved to within the even-rounding.
+        assert out_w / out_h == pytest.approx(width / height, rel=0.02)
+
+
+def test_output_size_leaves_a_small_clip_alone():
+    assert output_size(320, 240) == (320, 240)
+
+
+def test_output_size_without_dimensions():
+    assert output_size(0, 0) is None
+
+
+def test_scale_filter_uses_the_computed_size():
+    assert _scale_filter(1920, 1080) == "scale=720:404"
+    assert _scale_filter(0, 0) == "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
 
 def test_overlay_mentions_score_band_and_cue():
@@ -206,3 +226,90 @@ def test_render_without_ffmpeg_returns_none(lift_video, tmp_path, monkeypatch):
 def test_find_font_returns_an_existing_file_or_none():
     font = find_font()
     assert font is None or font.endswith((".ttf", ".ttc"))
+
+
+# ---------- the bar-path trace (§18) ----------
+
+
+def tracked_path(drift: float = 0.12):
+    """A short rising path that loops sideways by `drift` of the frame width."""
+    from server.utils.bar_track import BarPath, BarPoint
+
+    points = [
+        BarPoint(t=i / 10, x=0.30 + drift * (1 if i == 5 else 0), y=0.90 - 0.07 * i)
+        for i in range(10)
+    ]
+    return BarPath(
+        points=points, plate_radius=0.08, coverage=1.0, sampled=10,
+        frame_width=404, frame_height=720,
+    )
+
+
+def test_trace_overlay_draws_only_when_tracked():
+    from server.services.replay import build_trace_overlay
+    from server.utils.bar_track import BarPath
+
+    assert build_trace_overlay(BarPath(), 404, 720) is None
+    assert build_trace_overlay(tracked_path(), 0, 0) is None
+    assert build_trace_overlay(tracked_path(), 404, 720) is not None
+
+
+def test_trace_overlay_is_transparent_except_where_it_draws():
+    import numpy as np  # type: ignore
+    from server.services.replay import build_trace_overlay
+
+    layer = build_trace_overlay(tracked_path(), 404, 720)
+    assert layer.shape == (720, 404, 4)
+    alpha = layer[:, :, 3]
+    painted = float((alpha > 0).mean())
+    # Enough to see, nowhere near a full-frame wash that would hide the lift.
+    assert 0.001 < painted < 0.2
+
+
+def test_trace_overlay_marks_the_worst_drift():
+    import numpy as np  # type: ignore
+    from server.services.replay import DRIFT_ORANGE, build_trace_overlay
+
+    layer = build_trace_overlay(tracked_path(drift=0.2), 404, 720)
+    orange = np.all(layer[:, :, :3] == np.array(DRIFT_ORANGE[:3]), axis=-1) & (layer[:, :, 3] > 0)
+    assert orange.any(), "the max-drift marker was not drawn"
+    # It sits out at the loop, not back on the starting line.
+    xs = np.where(orange.any(axis=0))[0]
+    assert xs.max() > 0.40 * 404
+
+
+@needs_ffmpeg
+@pytest.mark.skipif(find_font() is None, reason="no font available for drawtext")
+def test_render_burns_the_trace_into_the_video(lift_video, tmp_path):
+    import numpy as np  # type: ignore
+
+    plain = tmp_path / "plain.mp4"
+    traced = tmp_path / "traced.mp4"
+    assert render_annotated_replay(lift_video, judgment(), str(plain)) is not None
+    assert render_annotated_replay(lift_video, judgment(), str(traced), bar_path=tracked_path()) is not None
+
+    def mid_frame(path):
+        import cv2  # type: ignore
+
+        capture = cv2.VideoCapture(str(path))
+        try:
+            count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            capture.set(cv2.CAP_PROP_POS_FRAMES, max(0, count // 2))
+            ok, frame = capture.read()
+            assert ok
+            return frame
+        finally:
+            capture.release()
+
+    before, after = mid_frame(plain), mid_frame(traced)
+    assert before.shape == after.shape
+    # The trace must have changed pixels the text overlay does not touch.
+    middle = slice(after.shape[0] // 4, 3 * after.shape[0] // 4)
+    assert not np.array_equal(before[middle], after[middle]), "no trace in the frame"
+
+
+@needs_ffmpeg
+def test_render_cleans_up_the_trace_png(lift_video, tmp_path):
+    out = tmp_path / "replay.mp4"
+    assert render_annotated_replay(lift_video, judgment(), str(out), bar_path=tracked_path()) is not None
+    assert list(tmp_path.glob("*.png")) == [], "temporary trace overlay was left behind"
