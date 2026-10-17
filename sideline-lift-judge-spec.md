@@ -223,7 +223,7 @@ All of this runs on Nebius Token Factory, with an NVIDIA Nemotron model as the j
 | FR-5 | **Stage 2:** send the observation plus the lift-specific rubric prompt to the Nemotron judge; parse and validate against the Pydantic schema; retry or repair once on invalid JSON | P0 (exists) |
 | FR-6 | Fall back to `nemotron-3-super-120b-a12b` if Ultra fails or times out | P0 (exists) |
 | FR-7 | Return 1–2 cues tied to the observed fault and grounded in the biomechanics principles (§14) | P0 (done) |
-| FR-8 | **Angle-aware confidence:** lower confidence for non-side views, portrait video, missing bar, multiple lifts or unclear phases; show a matching warning in `notes` and the UI | P0 (done — `app/services/confidence.py`) |
+| FR-8 | **Angle-aware confidence:** lower confidence for non-side views, portrait video, missing bar, multiple lifts or unclear phases; show a matching warning in `notes` and the UI | P0 (done — `server/services/confidence.py`) |
 | FR-9 | Detect a likely mixed clean & jerk and prompt the user to trim or split it | P1 (done — it is split and both lifts scored) |
 | FR-10 | Render an annotated replay MP4 (H.264, iOS-safe) with inline playback, download and share | P0 (done) |
 | FR-11 | Mobile-first responsive UI + PWA manifest, icon and installability | P0 (done) |
@@ -271,7 +271,7 @@ All of this runs on Nebius Token Factory, with an NVIDIA Nemotron model as the j
    └─► Result page (score, band, drift, confidence, cues, notes, replay, share)
 ```
 
-**Key code:** `app/services/nebius_client.py` (Token Factory client for both stages), the frame-sampling module, `score_clip.py` (CLI), `prompts/` (`system.txt`, `user_snatch.txt`, `user_clean.txt`, `user_jerk.txt`, `vision_observation.txt`), `tests/`.
+**Key code:** `server/` holds the Python app (`services/nebius_client.py` is the Token Factory client for both stages, `services/pipeline.py` the run, `utils/frames.py` the sampler); `client/` holds everything served to the browser (`templates/`, `static/`); `prompts/` holds the model prompts (`system.txt`, `user_snatch.txt`, `user_clean.txt`, `user_jerk.txt`, `vision_observation.txt`, `vision_triage.txt`); `score_clip.py` and `score_session.py` are the CLIs; `tests/`.
 
 **Deployment (Oct 20):** host the FastAPI app behind HTTPS (required for camera access and PWA install) and point it at Token Factory. Requests run as async jobs with polling so slow mobile connections don't time out.
 
@@ -305,7 +305,7 @@ Course PDFs are **never committed** or redistributed.
 - [ ] **AC-1 (mobile):** a judge opens the demo URL **on a phone**, films or uploads a clip, and gets the score, cues and annotated video **without using a desktop**. The app is built and verified end to end at phone width in headless Chromium; **this stays open until the HTTPS deploy exists and a real phone has run it**.
 - [x] AC-2: a side-view, trimmed **snatch** clip returns schema-valid JSON with every field filled and 1–2 cues. *(covered by `tests/test_api.py::test_single_lift_round_trip`; still to be run against a real clip.)*
 - [x] AC-3: a clean clip works the same way, and a clean & jerk is split into two scored lifts. *(`tests/test_api.py::test_clean_and_jerk_comes_back_as_two_scored_lifts`.)*
-- [x] AC-4: a portrait or non-side-view clip, or a mixed clean & jerk clip, returns **visibly lower confidence** and a warning. *(`app/services/confidence.py`; `tests/test_confidence.py` and `test_api.py::test_mixed_clip_that_cannot_be_split_lowers_confidence` pin the 0.85 case.)*
+- [x] AC-4: a portrait or non-side-view clip, or a mixed clean & jerk clip, returns **visibly lower confidence** and a warning. *(`server/services/confidence.py`; `tests/test_confidence.py` and `test_api.py::test_mixed_clip_that_cannot_be_split_lowers_confidence` pin the 0.85 case.)*
 - [ ] AC-5: portrait phone video from iOS and Android is rotated correctly. **Needs real device clips** (rotation is read via ffprobe and applied; untested on real iOS/Android footage).
 - [ ] AC-6: the annotated MP4 plays inline in iOS Safari and Android Chrome and can be downloaded or shared. **Needs real devices** (encoding is H.264/yuv420p/faststart and verified by `tests/test_replay.py`; inline playback verified in headless Chromium only).
 - [x] AC-7: the Ultra → Super fallback works when the primary model fails. *(`tests/test_pipeline_mock.py::test_judge_falls_back_to_second_model_when_primary_fails`.)*

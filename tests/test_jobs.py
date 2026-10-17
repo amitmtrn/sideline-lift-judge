@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from app.services.jobs import DEFAULT_TTL_SECONDS, Job, JobStore, job_ttl_seconds
+from server.services.jobs import DEFAULT_TTL_SECONDS, Job, JobStore, job_ttl_seconds
 
 
 def run(coro):

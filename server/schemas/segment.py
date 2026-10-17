@@ -5,8 +5,8 @@ from typing import List, Optional
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from app.schemas.judgment import LiftJudgment, LiftType
-from app.schemas.json_parse import parse_model_json
+from server.schemas.judgment import LiftJudgment, LiftType
+from server.schemas.json_parse import parse_model_json
 
 # Where the bar is, ordered low to high. Asking the vision model to name a lift
 # makes it answer with the lift the scene reminds it of; asking where the bar is

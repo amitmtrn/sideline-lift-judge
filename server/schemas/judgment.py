@@ -5,7 +5,7 @@ from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.schemas.json_parse import iter_json_object_candidates, parse_model_json
+from server.schemas.json_parse import iter_json_object_candidates, parse_model_json
 
 
 class LiftType(str, Enum):

@@ -1,8 +1,8 @@
 """FR-8 / AC-4: a bad clip must come back with visibly lower confidence."""
 import pytest
 
-from app.schemas.judgment import LiftJudgment
-from app.services.confidence import (
+from server.schemas.judgment import LiftJudgment
+from server.services.confidence import (
     CAP_MULTIPLE_LIFTS,
     CAP_OFF_AXIS,
     CAP_PORTRAIT,
@@ -11,7 +11,7 @@ from app.services.confidence import (
     assess_clip_quality,
     merge_notes,
 )
-from app.utils.video_meta import VideoInfo
+from server.utils.video_meta import VideoInfo
 
 
 def judgment(confidence=0.85, notes="Bar drifts forward.") -> LiftJudgment:

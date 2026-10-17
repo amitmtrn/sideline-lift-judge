@@ -1,4 +1,4 @@
-from app.services.nebius_client import strip_think_blocks
+from server.services.nebius_client import strip_think_blocks
 
 
 def test_strip_closed_think_block():

@@ -1,6 +1,6 @@
 import numpy as np  # type: ignore
 
-from app.utils.image_ops import rotate_by_degrees, resize_long_side
+from server.utils.image_ops import rotate_by_degrees, resize_long_side
 
 
 def test_rotate_by_degrees_90_shape_swap():

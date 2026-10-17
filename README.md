@@ -22,6 +22,29 @@ model, and both stages run on **Nebius Token Factory**.
 - Pydantic for JSON schema validation
 - Pytest throughout, with every Token Factory call mocked
 
+### Project layout
+Server and client are separate top-level folders. Nothing in `client/` is imported as Python —
+the server only reads it off disk and serves it — so the front end can be replaced (or a native
+app added, see the roadmap) without touching the pipeline.
+
+```
+server/              the Python app — nothing here is sent to the browser
+  main.py            FastAPI routes: pages, PWA assets, jobs API, replay files
+  services/          pipeline.py (a scoring run), nebius_client.py (Token Factory),
+                     confidence.py (FR-8 caps), replay.py (ffmpeg overlay), jobs.py
+  schemas/           Pydantic models — the judge's JSON contract
+  utils/             frames, rotation/probing, segmentation, clip cutting, uploads
+client/              everything served to the browser — no Python
+  templates/         index.html (Jinja)
+  static/            styles.css, app.js, service-worker.js, manifest.webmanifest,
+                     img/ (mark, filming guide), icons/ (PWA icons)
+prompts/             model prompts, shared by the server and both CLIs
+tools/               make_icons.py — regenerates the PWA icons
+tests/               pytest; every Token Factory call is mocked
+score_clip.py        CLI: one clip
+score_session.py     CLI: a whole session, split into exercises
+```
+
 ### Nebius Token Factory models (two-stage)
 - Base URL: `https://api.tokenfactory.nebius.com/v1`
 - API key: `NEBIUS_API_KEY` (required)
@@ -86,10 +109,24 @@ The prompts are fixed, stored under `prompts/`:
    so install it before testing with phone footage.
 
 ### Run the web app
+From the repo root, with `NEBIUS_API_KEY` set (in `.env` or the environment):
+
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --reload
+uvicorn server.main:app --reload --port 8000
 ```
-Open `http://localhost:8000`. The flow is four screens:
+
+Then open **http://localhost:8000**. To reach it from your phone on the same wifi, bind to all
+interfaces and browse to your machine's LAN address:
+
+```bash
+uvicorn server.main:app --host 0.0.0.0 --port 8000
+```
+
+> Over plain HTTP, `localhost` is treated as secure but a LAN address is not, so the camera and
+> PWA install will not work there — everything else will. For the real phone test you need the
+> HTTPS deploy.
+
+The flow is four screens:
 
 1. **Choose the lift** — snatch, clean, jerk, or *Find them* to scan a longer clip for every attempt.
 2. **Filming guide** — shown *before* the camera opens, not after a bad result.

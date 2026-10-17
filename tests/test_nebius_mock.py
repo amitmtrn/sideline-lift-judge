@@ -1,7 +1,7 @@
 import asyncio
 from unittest.mock import patch, Mock
 
-from app.services.nebius_client import NebiusChatClient
+from server.services.nebius_client import NebiusChatClient
 
 
 def test_nebius_client_extracts_message_text():
@@ -19,7 +19,7 @@ def test_nebius_client_extracts_message_text():
     m = Mock()
     m.status_code = 200
     m.json.return_value = fake_resp
-    with patch("app.services.nebius_client.requests.post", return_value=m) as _post:
+    with patch("server.services.nebius_client.requests.post", return_value=m) as _post:
         text = asyncio.run(
             client.create_chat_completion(messages=[{"role": "user", "content": "hi"}], model=None)
         )

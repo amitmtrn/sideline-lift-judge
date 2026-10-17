@@ -20,9 +20,9 @@ from typing import List, Optional, Tuple
 
 from dotenv import load_dotenv
 
-from app.schemas.judgment import LiftType
-from app.schemas.segment import ExerciseReport, SessionReport, SegmentTriage, SkippedSegment
-from app.services.nebius_client import (
+from server.schemas.judgment import LiftType
+from server.schemas.segment import ExerciseReport, SessionReport, SegmentTriage, SkippedSegment
+from server.services.nebius_client import (
     NebiusChatClient,
     classify_segment,
     collect_observations,
@@ -31,11 +31,11 @@ from app.services.nebius_client import (
     vision_max_images,
     vision_model,
 )
-from app.utils.clips import cut_segment, format_timestamp, has_ffmpeg, write_contact_sheet
-from app.utils.frames import sample_frames_in_range_bgr
-from app.utils.image_ops import frames_to_data_urls, prepare_frames
-from app.utils.video_meta import get_rotation_degrees
-from app.utils.segmentation import (
+from server.utils.clips import cut_segment, format_timestamp, has_ffmpeg, write_contact_sheet
+from server.utils.frames import sample_frames_in_range_bgr
+from server.utils.image_ops import frames_to_data_urls, prepare_frames
+from server.utils.video_meta import get_rotation_degrees
+from server.utils.segmentation import (
     DEFAULT_MAX_DURATION,
     DEFAULT_MERGE_GAP,
     DEFAULT_MIN_DURATION,

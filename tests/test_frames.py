@@ -4,7 +4,7 @@ from typing import List
 
 import numpy as np  # type: ignore
 
-from app.utils.frames import sample_video_frames_bgr
+from server.utils.frames import sample_video_frames_bgr
 
 
 def _write_dummy_video(path: str, width: int = 64, height: int = 48, frames: int = 20, fps: int = 10) -> None:

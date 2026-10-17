@@ -10,10 +10,10 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app.schemas.judgment import LiftType
-from app.services.jobs import Job, get_store, job_ttl_seconds
-from app.services.nebius_client import NebiusChatClient
-from app.services.pipeline import (
+from server.schemas.judgment import LiftType
+from server.services.jobs import Job, get_store, job_ttl_seconds
+from server.services.nebius_client import NebiusChatClient
+from server.services.pipeline import (
     DEFAULT_FRAMES,
     MAX_FRAMES,
     MIN_FRAMES,
@@ -24,23 +24,26 @@ from app.services.pipeline import (
     clamp_frames,
     run_scoring,
 )
-from app.utils.uploads import (
+from server.utils.uploads import (
     UnsupportedUpload,
     UploadTooLarge,
     is_supported_video_upload,
     max_upload_bytes,
     save_upload_to_temp,
 )
-from app.utils.video_meta import probe_video
+from server.utils.video_meta import probe_video
 
 # Load .env if present for local dev
 load_dotenv()
 
-APP_DIR = Path(__file__).resolve().parent
-BASE_DIR = APP_DIR.parent
+SERVER_DIR = Path(__file__).resolve().parent
+BASE_DIR = SERVER_DIR.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
-TEMPLATES_DIR = APP_DIR / "templates"
-STATIC_DIR = APP_DIR / "static"
+# The front end lives in client/ and is served from here; nothing in it is
+# imported as Python, so the two halves stay separable.
+CLIENT_DIR = BASE_DIR / "client"
+TEMPLATES_DIR = CLIENT_DIR / "templates"
+STATIC_DIR = CLIENT_DIR / "static"
 
 logger = logging.getLogger(__name__)
 
@@ -239,7 +242,7 @@ async def create_job(
     )
     # Validate the trim window now so the user hears about it immediately.
     try:
-        from app.services.pipeline import resolve_trim
+        from server.services.pipeline import resolve_trim
 
         resolve_trim(duration_sec=info.duration_sec, trim_start=start, trim_end=end)
     except TrimError as exc:

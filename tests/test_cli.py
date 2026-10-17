@@ -5,8 +5,8 @@ from unittest.mock import patch
 import pytest
 
 import score_clip
-from app.schemas.judgment import LiftJudgment, LiftType
-from app.services.pipeline import DEFAULT_FRAMES, ScoreOutcome, ScoredLift
+from server.schemas.judgment import LiftJudgment, LiftType
+from server.services.pipeline import DEFAULT_FRAMES, ScoreOutcome, ScoredLift
 from tests.conftest import judge_reply, observation_reply, triage_reply
 
 SNATCH_PATH = ["floor", "knees", "overhead", "overhead", "overhead", "overhead"]
@@ -93,7 +93,7 @@ def test_end_to_end_prints_one_verdict(lift_video, capsys, monkeypatch):
     monkeypatch.setenv("NEBIUS_API_KEY", "k")
     monkeypatch.setattr(score_clip, "load_dotenv", lambda *a, **k: None)
     with patch(
-        "app.services.nebius_client.requests.post",
+        "server.services.nebius_client.requests.post",
         side_effect=[triage_reply(SNATCH_PATH), observation_reply(), judge_reply("snatch", 8, "solid", 0.8)],
     ):
         assert score_clip.main([lift_video, "--lift", "snatch"]) == 0
@@ -106,7 +106,7 @@ def test_end_to_end_splits_a_clean_and_jerk(lift_video, capsys, monkeypatch):
     monkeypatch.setenv("NEBIUS_API_KEY", "k")
     monkeypatch.setattr(score_clip, "load_dotenv", lambda *a, **k: None)
     with patch(
-        "app.services.nebius_client.requests.post",
+        "server.services.nebius_client.requests.post",
         side_effect=[
             triage_reply(CLEAN_AND_JERK_PATH),
             observation_reply(),
@@ -125,7 +125,7 @@ def test_no_split_skips_the_triage_call(lift_video, capsys, monkeypatch):
     monkeypatch.setenv("NEBIUS_API_KEY", "k")
     monkeypatch.setattr(score_clip, "load_dotenv", lambda *a, **k: None)
     with patch(
-        "app.services.nebius_client.requests.post",
+        "server.services.nebius_client.requests.post",
         side_effect=[observation_reply(), judge_reply("snatch", 7, "solid", 0.8)],
     ) as post:
         assert score_clip.main([lift_video, "--lift", "snatch", "--no-split"]) == 0

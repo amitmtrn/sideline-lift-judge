@@ -3,7 +3,7 @@ import json
 import pytest
 from pydantic import ValidationError
 
-from app.schemas.judgment import LiftJudgment, parse_and_validate_json
+from server.schemas.judgment import LiftJudgment, parse_and_validate_json
 
 
 def test_parse_and_validate_json_ok():
