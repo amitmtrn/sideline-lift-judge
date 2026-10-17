@@ -12,6 +12,7 @@ from pydantic import ValidationError
 
 if TYPE_CHECKING:
     from app.schemas.judgment import LiftJudgment
+    from app.schemas.segment import SegmentTriage
 
 
 class ChatMessage(TypedDict, total=False):
@@ -26,6 +27,27 @@ NO_THINKING_EXTRA_BODY: Dict[str, Any] = {"chat_template_kwargs": {"enable_think
 # Headroom so the judge still completes its JSON if the provider ignores the
 # no-thinking hint and reasons anyway.
 DEFAULT_JUDGE_MAX_TOKENS = 2048
+
+DEFAULT_VISION_MODEL = "openbmb/MiniCPM-V-4_5"
+DEFAULT_JUDGE_MODEL = "nvidia/Nemotron-3-Ultra-550b-a55b"
+DEFAULT_JUDGE_FALLBACK_MODEL = "nvidia/nemotron-3-super-120b-a12b"
+
+
+def vision_model() -> str:
+    return os.getenv("NEBIUS_VISION_MODEL") or DEFAULT_VISION_MODEL
+
+
+def judge_model() -> str:
+    return os.getenv("NEBIUS_JUDGE_MODEL") or DEFAULT_JUDGE_MODEL
+
+
+def judge_fallback_model() -> str:
+    """
+    Second judge used when the primary one errors, times out, or never produces
+    valid JSON. Set NEBIUS_JUDGE_FALLBACK_MODEL empty to disable the fallback.
+    """
+    value = os.getenv("NEBIUS_JUDGE_FALLBACK_MODEL")
+    return DEFAULT_JUDGE_FALLBACK_MODEL if value is None else value.strip()
 
 
 class NebiusChatClient:
@@ -135,6 +157,72 @@ def assemble_vision_messages(*, lift: str, images: List[str], prompts_dir: str) 
     ]
 
 
+def assemble_triage_messages(*, images: List[str], prompts_dir: str) -> List[ChatMessage]:
+    """
+    Triage (Stage 0b): ask the vision model whether a candidate window from a
+    session clip holds a scored lift, and which one.
+    """
+    triage_prompt = _load_prompt(f"{prompts_dir}/vision_triage.txt")
+    content: List[Dict[str, Any]] = [{"type": "text", "text": triage_prompt}]
+    # Label every frame: asked for one answer per numbered frame, the model reads
+    # the sequence instead of naming the lift the whole clip reminds it of.
+    for position, url in enumerate(images, start=1):
+        content.append({"type": "text", "text": f"Frame {position}:"})
+        content.append({"type": "image_url", "image_url": {"url": url}})
+    return [
+        {
+            "role": "system",
+            "content": "You classify what is visible in gym video frames and reply with JSON only. No prose, no coaching, no deliberation.",
+        },
+        {"role": "user", "content": content},
+    ]
+
+
+async def classify_segment(
+    *,
+    client: "NebiusChatClient",
+    images: List[str],
+    prompts_dir: str,
+    model: str,
+    max_tokens: int = 400,
+) -> "SegmentTriage":
+    """
+    Triage one candidate window. One repair retry when the reply is not JSON;
+    a second failure returns an empty triage so one bad window cannot abort a
+    whole session run.
+    """
+    from app.schemas.segment import SegmentTriage, parse_triage_json
+
+    messages = assemble_triage_messages(images=images, prompts_dir=prompts_dir)
+    first = await client.create_chat_completion(
+        messages=messages,
+        model=model,
+        max_tokens=max_tokens,
+        extra_body=NO_THINKING_EXTRA_BODY,
+    )
+    try:
+        return parse_triage_json(first)
+    except (ValueError, ValidationError):
+        pass
+
+    retry_messages = messages + [
+        {
+            "role": "system",
+            "content": "Your previous response was not valid JSON. Reply again with JSON only matching the schema, no markdown, no reasoning.",
+        }
+    ]
+    second = await client.create_chat_completion(
+        messages=retry_messages,
+        model=model,
+        max_tokens=max_tokens,
+        extra_body=NO_THINKING_EXTRA_BODY,
+    )
+    try:
+        return parse_triage_json(second)
+    except (ValueError, ValidationError) as exc:
+        return SegmentTriage(lifts=[], activity="unclassified", notes=f"triage failed: {exc}")
+
+
 def assemble_judge_messages(*, lift: str, observations: str, prompts_dir: str) -> List[ChatMessage]:
     """
     Judge (Stage 2): use rubric + per-lift prompt; evidence is the Stage-1 observations (no images).
@@ -156,24 +244,18 @@ def assemble_judge_messages(*, lift: str, observations: str, prompts_dir: str) -
     ]
 
 
-async def request_judgment(
+async def _judge_with_model(
     *,
     client: "NebiusChatClient",
-    lift: str,
-    observations: str,
-    prompts_dir: str,
+    messages: List[ChatMessage],
     model: str,
-    max_tokens: Optional[int] = None,
+    max_tokens: int,
 ) -> "LiftJudgment":
     """
-    Judge (Stage 2) call with one automatic repair retry when the reply is not valid JSON.
-    Raises ValueError/ValidationError if the retry also fails.
+    One judge model, with a single repair retry when the reply is not valid JSON.
     """
     from app.schemas.judgment import parse_and_validate_json
 
-    if max_tokens is None:
-        max_tokens = int(os.getenv("NEBIUS_JUDGE_MAX_TOKENS") or DEFAULT_JUDGE_MAX_TOKENS)
-    messages = assemble_judge_messages(lift=lift, observations=observations, prompts_dir=prompts_dir)
     first = await client.create_chat_completion(
         messages=messages,
         model=model,
@@ -198,6 +280,87 @@ async def request_judgment(
         return parse_and_validate_json(second)  # Let errors bubble
 
 
+async def request_judgment(
+    *,
+    client: "NebiusChatClient",
+    lift: str,
+    observations: str,
+    prompts_dir: str,
+    model: str,
+    max_tokens: Optional[int] = None,
+    fallback_model: Optional[str] = None,
+) -> "LiftJudgment":
+    """
+    Judge (Stage 2) with one repair retry on invalid JSON, then one retry on a
+    second judge model when the primary fails outright — an API error, a timeout,
+    or no valid JSON even after the repair. Pass fallback_model="" to disable.
+    Raises the fallback's error if that one fails too.
+    """
+    if max_tokens is None:
+        max_tokens = int(os.getenv("NEBIUS_JUDGE_MAX_TOKENS") or DEFAULT_JUDGE_MAX_TOKENS)
+    if fallback_model is None:
+        fallback_model = judge_fallback_model()
+    messages = assemble_judge_messages(lift=lift, observations=observations, prompts_dir=prompts_dir)
+
+    try:
+        return await _judge_with_model(client=client, messages=messages, model=model, max_tokens=max_tokens)
+    except Exception:
+        # No usable second model: the caller sees the primary failure as before.
+        if not fallback_model or fallback_model == model:
+            raise
+    return await _judge_with_model(
+        client=client,
+        messages=messages,
+        model=fallback_model,
+        max_tokens=max_tokens,
+    )
+
+
+DEFAULT_VISION_MAX_TOKENS = 1500
+
+
+def vision_max_images() -> int:
+    """Images per vision call; the provider rejects more than this in one request."""
+    try:
+        value = int(os.getenv("NEBIUS_VISION_MAX_IMAGES") or "10")
+    except ValueError:
+        return 10
+    return value if value > 0 else 10
+
+
+async def collect_observations(
+    *,
+    client: "NebiusChatClient",
+    lift: str,
+    images: List[str],
+    prompts_dir: str,
+    model: str,
+    max_images_per_call: Optional[int] = None,
+    max_tokens: int = DEFAULT_VISION_MAX_TOKENS,
+) -> str:
+    """
+    Vision (Stage 1) for one lift: a single call when the frames fit the
+    per-request image limit, otherwise chunked calls merged into one summary.
+    """
+    limit = max_images_per_call if max_images_per_call and max_images_per_call > 0 else vision_max_images()
+    if len(images) <= limit:
+        messages = assemble_vision_messages(lift=lift, images=images, prompts_dir=prompts_dir)
+        return await client.create_chat_completion(
+            messages=messages,
+            model=model,
+            max_tokens=max_tokens,
+            extra_body=NO_THINKING_EXTRA_BODY,
+        )
+    return await collect_observations_in_chunks(
+        client=client,
+        lift=lift,
+        images=images,
+        prompts_dir=prompts_dir,
+        model=model,
+        max_images_per_call=limit,
+    )
+
+
 async def collect_observations_in_chunks(
     *,
     client: "NebiusChatClient",
@@ -219,8 +382,8 @@ async def collect_observations_in_chunks(
         text = await client.create_chat_completion(
             messages=messages,
             model=model,
-            max_tokens=1500,
-            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+            max_tokens=DEFAULT_VISION_MAX_TOKENS,
+            extra_body=NO_THINKING_EXTRA_BODY,
         )
         observations_parts.append(f"[Chunk {idx}/{len(chunks)}]\n{text}")
     return "\n\n".join(observations_parts)

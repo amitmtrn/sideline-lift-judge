@@ -14,6 +14,19 @@ venv/
 # Node (if any frontend build in future)
 node_modules/
 
+# Media and course material are never committed (spec §12, AC-8)
+samples/
+# score_session.py writes cut clips and extracted frames here
+out/
+*.jpg
+*.jpeg
+*.mp4
+*.mov
+*.mkv
+*.avi
+*.heic
+*.pdf
+
 # OS files
 .DS_Store
 Thumbs.db
