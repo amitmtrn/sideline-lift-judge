@@ -1,0 +1,23 @@
+The images below are consecutive frames from ONE short window of a longer training video, labelled "Frame 1", "Frame 2" and so on in time order. Report only what you can see in THESE frames. Do not guess what happened before the first frame or after the last one, and do not name a lift.
+
+For EVERY frame, say where the barbell is, using exactly one of these words:
+- "floor": the bar is on the ground or just above it
+- "knees": the bar hangs in the athlete's hands, somewhere between the floor and the hips
+- "shoulders": the bar is at chin or shoulder height with the ELBOWS BENT, resting on the shoulders or chest — this is still "shoulders" when the athlete stands up straight, and when the athlete sits in a deep squat holding the bar on the shoulders
+- "overhead": the bar is ABOVE THE TOP OF THE HEAD with BOTH ARMS COMPLETELY STRAIGHT, nothing touching the shoulders
+- "not_visible": you cannot see the bar in that frame
+
+Bent elbows always mean "shoulders", never "overhead". Standing upright does not by itself mean "overhead".
+
+Reply with a single JSON object and nothing else:
+{
+  "bar_by_frame": ["<frame 1>", "<frame 2>", ...],
+  "athlete_lifting": <true if a person is holding or moving the barbell; false if the bar is idle, the platform is empty, or people are only walking, chalking, loading plates or resting>,
+  "activity": "<2-6 words describing what is visible>",
+  "confidence": <number 0-1>,
+  "notes": "<optional short note, e.g. 'bar occluded' or 'oblique angle'>"
+}
+
+"bar_by_frame" must have exactly one entry per frame, in the order the frames are given.
+
+Output JSON only. No markdown fences, no prose outside the JSON, no deliberation.

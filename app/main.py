@@ -1,4 +1,5 @@
 import base64
+import logging
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -19,6 +20,13 @@ from app.services.nebius_client import (
     assemble_vision_messages,
     request_judgment,
 )
+from app.utils.uploads import (
+    UnsupportedUpload,
+    UploadTooLarge,
+    is_supported_video_upload,
+    max_upload_bytes,
+    save_upload_to_temp,
+)
 
 
 # Load .env if present for local dev
@@ -29,6 +37,8 @@ BASE_DIR = APP_DIR.parent
 PROMPTS_DIR = BASE_DIR / "prompts"
 TEMPLATES_DIR = APP_DIR / "templates"
 STATIC_DIR = APP_DIR / "static"
+
+logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Sideline Lift Judge — MVP")
 
@@ -50,10 +60,14 @@ def bgr_frames_to_data_urls(frames_bgr: List["np.ndarray"]) -> List[str]:
     return data_urls
 
 
+class ConfigurationError(RuntimeError):
+    """Server-side misconfiguration; surfaced as a plain message, never a stack trace."""
+
+
 def get_client() -> NebiusChatClient:
     api_key = os.getenv("NEBIUS_API_KEY")
     if not api_key:
-        raise RuntimeError("NEBIUS_API_KEY is not set. See README for setup.")
+        raise ConfigurationError("The scoring service is not configured yet. Set NEBIUS_API_KEY on the server.")
     base_url = os.getenv("NEBIUS_BASE_URL") or NebiusChatClient.DEFAULT_BASE_URL
     return NebiusChatClient(api_key=api_key, base_url=base_url)
 
@@ -76,15 +90,18 @@ async def score_endpoint(
     file: UploadFile = File(...),
     num_frames: int = Form(10),
 ):
-    if file.content_type not in ("video/mp4", "video/quicktime", "video/x-matroska", "video/mpeg", "video/avi"):
-        raise HTTPException(status_code=400, detail=f"Unsupported content type: {file.content_type}")
-    # Persist upload to temp file for OpenCV
-    import tempfile
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename or "clip").suffix) as tmp:
-        data = await file.read()
-        tmp.write(data)
-        tmp_path = Path(tmp.name)
+    if not is_supported_video_upload(file.content_type, file.filename):
+        raise HTTPException(
+            status_code=400,
+            detail="That file is not a video. Upload a clip filmed on your phone (MP4 or MOV).",
+        )
+    # Stream to a temp file for OpenCV, enforcing the size limit while writing.
+    try:
+        tmp_path = await save_upload_to_temp(file, max_bytes=max_upload_bytes())
+    except UploadTooLarge as exc:
+        raise HTTPException(status_code=413, detail=str(exc))
+    except UnsupportedUpload as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
     try:
         frames = sample_video_frames_bgr(str(tmp_path), target_count=max(8, min(16, int(num_frames))))
@@ -127,6 +144,19 @@ async def score_endpoint(
             model=judge_model,
         )
         return JSONResponse(content=judgment.model_dump())
+    except HTTPException:
+        raise
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:
+        # Both stages run against a remote provider, so a failure here is usually
+        # an upstream error or a reply we could not validate. Log the detail,
+        # show the user a sentence.
+        logger.exception("Scoring failed for lift=%s", getattr(lift, "value", lift))
+        raise HTTPException(
+            status_code=502,
+            detail="Scoring failed. The model service may be busy — wait a moment and try the clip again.",
+        ) from exc
     finally:
         try:
             os.unlink(tmp_path)

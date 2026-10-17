@@ -128,6 +128,116 @@ def test_judge_request_retries_once_when_reply_has_no_json():
     assert post.call_count == 2
 
 
+def _good_judge_response(lift: str = "snatch") -> Mock:
+    m = Mock()
+    m.status_code = 200
+    m.json.return_value = {
+        "choices": [
+            {
+                "message": {
+                    "content": '{"lift":"%s","score":6,"band":"mixed","max_horizontal_drift":"forward loop in the second pull",'
+                    '"cues":["keep the bar close to the body"],"confidence":0.5}' % lift
+                }
+            }
+        ]
+    }
+    return m
+
+
+def _api_error_response() -> Mock:
+    m = Mock()
+    m.status_code = 503
+    m.text = "upstream unavailable"
+    return m
+
+
+def test_judge_falls_back_to_second_model_when_primary_fails():
+    # AC-7 / FR-6: Ultra errors out, Super answers. A failing call costs two posts
+    # because the client retries once without the no-thinking hint.
+    client = NebiusChatClient(api_key="x", base_url="https://example.test/v1")
+    import asyncio
+    with patch(
+        "app.services.nebius_client.requests.post",
+        side_effect=[_api_error_response(), _api_error_response(), _good_judge_response()],
+    ) as post:
+        judgment = asyncio.get_event_loop().run_until_complete(
+            request_judgment(
+                client=client,
+                lift="snatch",
+                observations="Bar loops forward off the floor.",
+                prompts_dir="prompts",
+                model="nvidia/Nemotron-3-Ultra-550b-a55b",
+                fallback_model="nvidia/nemotron-3-super-120b-a12b",
+            )
+        )
+    assert judgment.score == 6
+    assert post.call_count == 3
+    models = [call.kwargs["json"]["model"] for call in post.call_args_list]
+    assert models[:2] == ["nvidia/Nemotron-3-Ultra-550b-a55b"] * 2
+    assert models[2] == "nvidia/nemotron-3-super-120b-a12b"
+
+
+def test_judge_falls_back_when_primary_never_returns_json():
+    client = NebiusChatClient(api_key="x", base_url="https://example.test/v1")
+    prose = Mock()
+    prose.status_code = 200
+    prose.json.return_value = {"choices": [{"message": {"content": "Let me think about the observations"}}]}
+    import asyncio
+    with patch(
+        "app.services.nebius_client.requests.post",
+        side_effect=[prose, prose, _good_judge_response("clean")],
+    ) as post:
+        judgment = asyncio.get_event_loop().run_until_complete(
+            request_judgment(
+                client=client,
+                lift="clean",
+                observations="Bar close through the first pull.",
+                prompts_dir="prompts",
+                model="nvidia/Nemotron-3-Ultra-550b-a55b",
+                fallback_model="nvidia/nemotron-3-super-120b-a12b",
+            )
+        )
+    # Primary: first reply + repair retry, both prose. Fallback: valid JSON.
+    assert judgment.lift.value == "clean"
+    assert post.call_count == 3
+    assert post.call_args_list[2].kwargs["json"]["model"] == "nvidia/nemotron-3-super-120b-a12b"
+
+
+def test_judge_raises_primary_error_when_fallback_disabled():
+    client = NebiusChatClient(api_key="x", base_url="https://example.test/v1")
+    import asyncio
+    import pytest
+
+    with patch(
+        "app.services.nebius_client.requests.post",
+        side_effect=[_api_error_response(), _api_error_response()],
+    ) as post:
+        with pytest.raises(RuntimeError):
+            asyncio.get_event_loop().run_until_complete(
+                request_judgment(
+                    client=client,
+                    lift="snatch",
+                    observations="obs",
+                    prompts_dir="prompts",
+                    model="nvidia/Nemotron-3-Ultra-550b-a55b",
+                    fallback_model="",
+                )
+            )
+    assert post.call_count == 2
+
+
+def test_judge_fallback_model_env_override(monkeypatch):
+    from app.services.nebius_client import DEFAULT_JUDGE_FALLBACK_MODEL, judge_fallback_model
+
+    monkeypatch.delenv("NEBIUS_JUDGE_FALLBACK_MODEL", raising=False)
+    assert judge_fallback_model() == DEFAULT_JUDGE_FALLBACK_MODEL
+    monkeypatch.setenv("NEBIUS_JUDGE_FALLBACK_MODEL", "nvidia/other-judge")
+    assert judge_fallback_model() == "nvidia/other-judge"
+    # Empty value is the documented way to turn the fallback off.
+    monkeypatch.setenv("NEBIUS_JUDGE_FALLBACK_MODEL", "")
+    assert judge_fallback_model() == ""
+
+
 def test_vision_chunking_makes_multiple_calls_when_over_limit():
     client = NebiusChatClient(api_key="x", base_url="https://example.test/v1")
     # Build 12 tiny images → should split into 2 calls when max_images=10
