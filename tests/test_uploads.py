@@ -79,7 +79,7 @@ def test_max_upload_bytes_env(monkeypatch):
 
 def test_save_upload_writes_file_under_limit():
     upload = FakeUpload(b"x" * 2048)
-    path = asyncio.new_event_loop().run_until_complete(save_upload_to_temp(upload, max_bytes=1024 * 1024))
+    path = asyncio.run(save_upload_to_temp(upload, max_bytes=1024 * 1024))
     try:
         assert path.exists()
         assert path.read_bytes() == b"x" * 2048
@@ -90,16 +90,14 @@ def test_save_upload_writes_file_under_limit():
 
 def test_save_upload_rejects_oversized_clip_and_cleans_up(tmp_path):
     upload = FakeUpload(b"y" * 4096)
-    loop = asyncio.new_event_loop()
     with pytest.raises(UploadTooLarge):
-        loop.run_until_complete(save_upload_to_temp(upload, max_bytes=1024, dir=str(tmp_path)))
+        asyncio.run(save_upload_to_temp(upload, max_bytes=1024, dir=str(tmp_path)))
     # The partial file must not be left behind.
     assert list(tmp_path.iterdir()) == []
 
 
 def test_save_upload_rejects_empty_file(tmp_path):
     upload = FakeUpload(b"")
-    loop = asyncio.new_event_loop()
     with pytest.raises(UnsupportedUpload):
-        loop.run_until_complete(save_upload_to_temp(upload, max_bytes=1024, dir=str(tmp_path)))
+        asyncio.run(save_upload_to_temp(upload, max_bytes=1024, dir=str(tmp_path)))
     assert list(tmp_path.iterdir()) == []

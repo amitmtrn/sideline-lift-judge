@@ -26,6 +26,11 @@ class LiftJudgment(BaseModel):
     confidence: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     notes: Optional[str] = Field(default=None)
 
+    # Set by the server after the judge replies, never by the model itself:
+    # clip-quality warnings (FR-8) and the rendered replay (FR-10).
+    warnings: List[str] = Field(default_factory=list)
+    annotated_video_url: Optional[str] = Field(default=None)
+
     @model_validator(mode="after")
     def validate_cues(self) -> "LiftJudgment":
         # Allow 0 cues only when band unknown (media problem)

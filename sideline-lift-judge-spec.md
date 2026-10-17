@@ -191,6 +191,9 @@ All of this runs on Nebius Token Factory, with an NVIDIA Nemotron model as the j
 | `confidence` | float 0–1 | How much to trust the score, based on clip quality, angle and phase clarity |
 | `notes` | string | Caveats: angle, mixed lifts, occlusion, and so on |
 | `annotated_video_url` | string (MVP addition) | Link to the iOS-safe MP4 replay |
+| `warnings` | string[] (MVP addition) | Clip-quality warnings shown next to the score (FR-8) |
+
+`score` and `confidence` are `null` and `band` is `unknown` when the media is unusable — the one case where `cues` may be empty.
 
 ### Example: first real run (clean & jerk clip, scored as `clean`)
 ```json
@@ -213,20 +216,20 @@ All of this runs on Nebius Token Factory, with an NVIDIA Nemotron model as the j
 
 | ID | Requirement | Priority |
 |---|---|---|
-| FR-1 | Accept a video upload or in-browser camera capture, plus a lift selection | P0 |
-| FR-2 | Trim the clip to start/end on the server before frame sampling | P0 |
+| FR-1 | Accept a video upload or in-browser camera capture, plus a lift selection | P0 (done) |
+| FR-2 | Trim the clip to start/end on the server before frame sampling | P0 (done) |
 | FR-3 | Sample 8–16 frames (default 10), resize to ~768 px, and normalize rotation metadata | P0 (exists) |
 | FR-4 | **Stage 1:** send frames to the vision model (≤ 10 images/request, chunk if more) and get a bar-path description for each phase; strip or disable `<think>` output | P0 (exists) |
 | FR-5 | **Stage 2:** send the observation plus the lift-specific rubric prompt to the Nemotron judge; parse and validate against the Pydantic schema; retry or repair once on invalid JSON | P0 (exists) |
 | FR-6 | Fall back to `nemotron-3-super-120b-a12b` if Ultra fails or times out | P0 (exists) |
-| FR-7 | Return 1–2 cues tied to the observed fault and grounded in the biomechanics principles (§14) | P0 |
-| FR-8 | **Angle-aware confidence:** lower confidence for non-side views, portrait video, missing bar, multiple lifts or unclear phases; show a matching warning in `notes` and the UI | P0 |
-| FR-9 | Detect a likely mixed clean & jerk and prompt the user to trim or split it | P1 |
-| FR-10 | Render an annotated replay MP4 (H.264, iOS-safe) with inline playback, download and share | P0 (MVP addition) |
-| FR-11 | Mobile-first responsive UI + PWA manifest, icon and installability | P0 |
-| FR-12 | Filming guide overlay or screen before capture | P0 |
+| FR-7 | Return 1–2 cues tied to the observed fault and grounded in the biomechanics principles (§14) | P0 (done) |
+| FR-8 | **Angle-aware confidence:** lower confidence for non-side views, portrait video, missing bar, multiple lifts or unclear phases; show a matching warning in `notes` and the UI | P0 (done — `app/services/confidence.py`) |
+| FR-9 | Detect a likely mixed clean & jerk and prompt the user to trim or split it | P1 (done — it is split and both lifts scored) |
+| FR-10 | Render an annotated replay MP4 (H.264, iOS-safe) with inline playback, download and share | P0 (done) |
+| FR-11 | Mobile-first responsive UI + PWA manifest, icon and installability | P0 (done) |
+| FR-12 | Filming guide overlay or screen before capture | P0 (done — guide screen before the camera opens) |
 | FR-13 | CLI `score_clip.py --lift --frames --debug` stays in sync with the web pipeline | P0 (exists) |
-| FR-14 | Support for Jerk (`user_jerk.txt`), and clean & jerk scored as two calls | P2 |
+| FR-14 | Support for Jerk (`user_jerk.txt`), and clean & jerk scored as two calls | P2 (done) |
 
 ## 12. Non-functional requirements
 
@@ -279,9 +282,13 @@ All of this runs on Nebius Token Factory, with an NVIDIA Nemotron model as the j
 | `NEBIUS_BASE_URL` | Token Factory endpoint | `https://api.tokenfactory.nebius.com/v1` |
 | `NEBIUS_VISION_MODEL` | Stage 1 vision model | `openbmb/MiniCPM-V-4_5` |
 | `NEBIUS_JUDGE_MODEL` | Stage 2 judge model | `nvidia/Nemotron-3-Ultra-550b-a55b` |
-| `NEBIUS_JUDGE_FALLBACK_MODEL` | Judge fallback | `nvidia/nemotron-3-super-120b-a12b` |
+| `NEBIUS_JUDGE_FALLBACK_MODEL` | Judge fallback (empty disables) | `nvidia/nemotron-3-super-120b-a12b` |
+| `NEBIUS_VISION_MAX_IMAGES` | Images per vision request | `10` |
+| `NEBIUS_JUDGE_MAX_TOKENS` | Judge completion budget | `2048` |
+| `MAX_UPLOAD_MB` | Upload ceiling; `0` disables | `200` |
+| `JOB_TTL_SECONDS` | How long a job and its replay are kept | `1800` |
 
-> Check the exact variable names against `nebius_client.py` and `.env.example`. `NEBIUS_VISION_MODEL` and `NEBIUS_JUDGE_MODEL` are confirmed; the others are proposed. Suggested extras: upload size limit, temp-file TTL, frame count default.
+> All of the above are implemented and read in `nebius_client.py`, `uploads.py` and `jobs.py`, and are listed in `.env.example`.
 
 ## 14. Biomechanics basis
 
@@ -295,15 +302,15 @@ Course PDFs are **never committed** or redistributed.
 ## 15. Acceptance criteria & demo script
 
 ### Acceptance criteria
-- [ ] **AC-1 (mobile):** a judge opens the demo URL **on a phone**, films or uploads a clip, and gets the score, cues and annotated video **without using a desktop**.
-- [ ] AC-2: a side-view, trimmed **snatch** clip returns schema-valid JSON with every field filled and 1–2 cues.
-- [ ] AC-3: a clean clip works the same way.
-- [ ] AC-4: a portrait or non-side-view clip, or a mixed clean & jerk clip, returns **visibly lower confidence** and a warning. This would have caught the 0.85 case.
-- [ ] AC-5: portrait phone video from iOS and Android is rotated correctly.
-- [ ] AC-6: the annotated MP4 plays inline in iOS Safari and Android Chrome and can be downloaded or shared.
-- [ ] AC-7: the Ultra → Super fallback works when the primary model fails (tested with a mocked failure).
-- [ ] AC-8: the repo contains no API keys, videos or course PDFs; tests pass.
-- [ ] AC-9: all text in the UI and output is in English.
+- [ ] **AC-1 (mobile):** a judge opens the demo URL **on a phone**, films or uploads a clip, and gets the score, cues and annotated video **without using a desktop**. The app is built and verified end to end at phone width in headless Chromium; **this stays open until the HTTPS deploy exists and a real phone has run it**.
+- [x] AC-2: a side-view, trimmed **snatch** clip returns schema-valid JSON with every field filled and 1–2 cues. *(covered by `tests/test_api.py::test_single_lift_round_trip`; still to be run against a real clip.)*
+- [x] AC-3: a clean clip works the same way, and a clean & jerk is split into two scored lifts. *(`tests/test_api.py::test_clean_and_jerk_comes_back_as_two_scored_lifts`.)*
+- [x] AC-4: a portrait or non-side-view clip, or a mixed clean & jerk clip, returns **visibly lower confidence** and a warning. *(`app/services/confidence.py`; `tests/test_confidence.py` and `test_api.py::test_mixed_clip_that_cannot_be_split_lowers_confidence` pin the 0.85 case.)*
+- [ ] AC-5: portrait phone video from iOS and Android is rotated correctly. **Needs real device clips** (rotation is read via ffprobe and applied; untested on real iOS/Android footage).
+- [ ] AC-6: the annotated MP4 plays inline in iOS Safari and Android Chrome and can be downloaded or shared. **Needs real devices** (encoding is H.264/yuv420p/faststart and verified by `tests/test_replay.py`; inline playback verified in headless Chromium only).
+- [x] AC-7: the Ultra → Super fallback works when the primary model fails. *(`tests/test_pipeline_mock.py::test_judge_falls_back_to_second_model_when_primary_fails`.)*
+- [x] AC-8 (partly): tests pass and nothing new is committed — `samples/` and media extensions are gitignored. **The 43 MB `samples/clip.mp4` remains in git history at `225bf51`** by decision; purging it needs a force-push.
+- [x] AC-9: all text in the UI and output is in English.
 
 ### Demo script (≤ 3-minute video)
 1. **0:00–0:20 The problem:** "Bar path decides the lift, and you can't see it in real time."

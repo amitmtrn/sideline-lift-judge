@@ -1,24 +1,38 @@
-## Sideline Lift Judge — MVP
+## Sideline Lift Judge
 
-First working MVP for the Nebius x NVIDIA Global AI Hackathon.
+Film one Olympic lift from the side on your phone and get back a **1–10 bar-path efficiency
+score**, a band, the **maximum horizontal bar drift**, a **confidence** value, notes and **1–2
+coaching cues** — plus an annotated replay you can download or share. Mobile-first, so a coach
+can use it from the side of the platform.
 
-- Simple upload UI (FastAPI) + CLI
-- Evenly samples ~8–16 frames and runs a two-stage pipeline on Nebius Token Factory (OpenAI-compatible)
-- Validates the model’s JSON output against a strict schema and retries once on parse failure
+Built for the Nebius × NVIDIA Global AI Hackathon. The judge is an **NVIDIA Nemotron 3 Ultra**
+model, and both stages run on **Nebius Token Factory**.
+
+- Mobile-first web app, installable as a PWA — film or upload, trim, score, share
+- Two-stage pipeline: a vision model describes the bar path, Nemotron applies the rubric
+- Clean & jerk is detected and scored as **two separate lifts**
+- Confidence drops, with a visible warning, on portrait, off-axis or mixed-lift clips
+- Schema-validated JSON, a repair retry, and a fallback judge model
+- Two CLIs for one clip and for a whole session
 
 ### Stack
-- FastAPI + Jinja2 (single-page upload UI)
-- OpenCV for frame extraction
+- FastAPI + Jinja2, mobile-first templates, web app manifest and a service worker
+- OpenCV for the motion scan and frame extraction; ffmpeg for trimming and the annotated replay
 - OpenAI-compatible HTTP calls to Nebius Token Factory
 - Pydantic for JSON schema validation
-- Pytest for unit tests (frame sampling, JSON validation, API call mocked)
+- Pytest throughout, with every Token Factory call mocked
 
 ### Nebius Token Factory models (two-stage)
 - Base URL: `https://api.tokenfactory.nebius.com/v1`
 - API key: `NEBIUS_API_KEY` (required)
 - Stage 1 (vision/perception): `openbmb/MiniCPM-V-4_5` (configurable via `NEBIUS_VISION_MODEL`) — receives sampled frames and outputs factual observations only (no scores).
 - Stage 2 (judge/reasoning): `nvidia/Nemotron-3-Ultra-550b-a55b` (configurable via `NEBIUS_JUDGE_MODEL`) — receives the rubric + per-lift prompt and the Stage‑1 observations, and returns the validated JSON score.
-- Judge fallback: `nvidia/nemotron-3-super-120b-a12b` (configurable via `NEBIUS_JUDGE_FALLBACK_MODEL`). If the primary judge errors, times out, or never returns valid JSON — even after the one repair retry — the same prompt is sent to this model. Set the variable to an empty value to turn the fallback off.\n- Cosmos models are not currently served on Token Factory in this account. If needed later, Cosmos on AI Cloud is a future option outside Token Factory.
+- Judge fallback: `nvidia/nemotron-3-super-120b-a12b` (configurable via `NEBIUS_JUDGE_FALLBACK_MODEL`). If the primary judge errors, times out, or never returns valid JSON — even after the one repair retry — the same prompt is sent to this model. Set the variable to an empty value to turn the fallback off.
+- Cosmos models are not currently served on Token Factory in this account. If needed later, Cosmos on AI Cloud is a future option outside Token Factory.
+
+The NVIDIA Nemotron models on this account reject image input, so the perception stage runs on
+MiniCPM‑V. All reasoning and scoring — the rubric, the band, the drift call, the cues — is the
+NVIDIA model's, and both stages are served by Token Factory.
 
 Notes:
 - Models listing: use `GET /v1/models` to verify availability in your workspace.
@@ -39,6 +53,7 @@ Environment variables:
 - `NEBIUS_JUDGE_FALLBACK_MODEL` (default `nvidia/nemotron-3-super-120b-a12b`; empty disables)
 - `NEBIUS_JUDGE_MAX_TOKENS` (default `2048`)
 - `MAX_UPLOAD_MB` (default `200`; `0` disables the upload size check)
+- `JOB_TTL_SECONDS` (default `1800`) — how long a finished job and its replay are kept
 
 Both stages request `chat_template_kwargs.enable_thinking = false`. The judge models are
 reasoning models: left to think, they spend the whole completion budget on reasoning, get cut
@@ -74,24 +89,75 @@ The prompts are fixed, stored under `prompts/`:
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --reload
 ```
-Open `http://localhost:8000`:
-- Choose lift type (snatch / clean / jerk)
-- Upload a short side-view clip
-- The app extracts ~10 frames by default (clamped to 8–16), auto-rotates based on phone metadata (when available) and downsizes frames to ~768px long side, then:
-  - Stage 1 (MiniCPM‑V): produces plain-English observations only.
-  - Stage 2 (Nemotron): produces the final JSON (score 1–10, band, max horizontal drift, 1–2 cues, confidence, optional notes). If Stage‑1 notes occlusion/oblique angle, confidence is lowered accordingly.
+Open `http://localhost:8000`. The flow is four screens:
+
+1. **Choose the lift** — snatch, clean, jerk, or *Find them* to scan a longer clip for every attempt.
+2. **Filming guide** — shown *before* the camera opens, not after a bad result.
+3. **Film or upload, then trim** — start/end sliders with a preview loop; trim times go to the
+   server, so nothing is re-encoded on the phone.
+4. **Score** — staged progress while it works, then the verdict.
+
+The result screen shows the score and band in large type, the max horizontal drift, a confidence
+meter with any warnings next to it, 1–2 cue cards, collapsible notes, and the annotated replay
+with download and share buttons.
+
+Under the hood each run: samples 8–16 frames (default 10) from the trimmed window, applies phone
+rotation metadata, downsizes to ~768 px, then asks the vision model what the bar did, asks the
+Nemotron judge to score it against the rubric, caps the confidence against clip quality, and
+renders the replay.
+
+**Camera capture and PWA install both require HTTPS** (`localhost` is exempt). Behind a reverse
+proxy, terminate TLS there and allow a request body at least as large as `MAX_UPLOAD_MB`.
+
+#### Installing it on a phone
+The app ships a web app manifest, a maskable icon and a service worker that caches the shell, so
+it installs to the home screen and opens full-screen. Android Chrome offers an install prompt;
+iOS has none, so use Share → *Add to Home Screen* (the app shows a hint). Scoring always needs the
+network — nothing under `/api` is ever cached.
+
+#### Asynchronous scoring
+The upload returns a job id and the page polls it, so a slow or dropped mobile connection cannot
+lose a result:
+
+| Endpoint | Purpose |
+|---|---|
+| `POST /api/jobs` | `video`, `lift`, `mode`, `trim_start`, `trim_end`, `frames` → `202 {id, poll_url}` |
+| `GET /api/jobs/{id}` | status, stage, message, progress, and the lifts once done |
+| `GET /api/jobs/{id}/replay/{n}.mp4` | the annotated replay for lift *n* |
+| `POST /api/score` | synchronous one-shot scoring, for scripts |
+
+Jobs and their replays are deleted after `JOB_TTL_SECONDS` (default 30 minutes), and the uploaded
+clip is deleted as soon as scoring finishes.
+
+### Filming guide
+The score is only as good as the angle. The app shows this before the camera opens, and it is
+worth repeating here:
+
+- Film **square to the side** — not in front, not at an angle. Drift is measured sideways.
+- **3–5 m away**, camera at **hip height**.
+- **Landscape** preferred. Portrait works but lowers the confidence value.
+- Keep the **whole bar and both plates in frame** for the entire lift.
+- **One lift per clip.** Trim it on the trim screen; a clean & jerk is scored as two lifts.
 
 ### CLI (no UI)
 ```bash
 python score_clip.py /path/to/clip.mp4 --lift snatch
+python score_clip.py clip.mp4 --lift clean --trim-start 2.5 --trim-end 7 --debug
+python score_clip.py clip.mp4 --lift snatch --replay-dir out/
 ```
 Options:
+- `--lift snatch|clean|jerk`, or `--auto` to let the vision model find the lifts
 - `--frames 10` (clamped to 8–16; at most 10 images per vision call; extra frames are chunked)
-- `--prompts_dir prompts/`
-- `--debug` (prints Stage‑1 observations)
+- `--trim-start` / `--trim-end` in seconds
+- `--no-split` to skip the triage call that separates a clean & jerk
+- `--replay-dir DIR` to render the annotated MP4
+- `--prompts-dir prompts/` (`--prompts_dir` still works)
+- `--debug` (Stage‑1 observations to stderr), `--progress` (stages to stderr)
 
-Outputs the validated JSON to stdout. Retries once if the first response is invalid JSON,
-then falls back to the secondary judge model if the primary one still fails.
+Outputs the validated JSON to stdout. It runs the **same pipeline as the web app**, so a result
+here and a result on the phone cannot drift apart: triage, observations, the judge with its
+repair retry and fallback model, and the clip-quality confidence rule. A clip holding a clean &
+jerk prints both lifts.
 
 ### Session CLI — split a clip into exercises, then rank them
 `score_clip.py` judges one lift in one clip. `score_session.py` takes a clip holding several
@@ -156,6 +222,33 @@ quiet/busy contrast at all falls back to a single window, so a plain one-lift cl
 One exercise failing to score never sinks the run — the error lands in that exercise's `error`
 field and the rest still rank.
 
+### Confidence, and when not to trust a score
+The judge only ever reads a text description of the clip, so it cannot tell that the camera was
+off to one side or that the window held two lifts. Left alone it once returned **0.85 on a clip
+that mixed a clean and a jerk**. So the server caps confidence from facts it can check, and every
+cap comes with a warning shown next to the score:
+
+| Problem | Confidence capped at |
+|---|---|
+| The window holds more than one lift and could not be split | 0.35 |
+| The bar was not visible in part of the clip | 0.40 |
+| Camera not square to the side | 0.50 |
+| Occlusion, darkness or motion blur | 0.55 |
+| Filmed in portrait | 0.60 |
+| Phases not clearly separable | 0.60 |
+| Clip too short to hold a lift | 0.60 |
+| Only a few frames readable | 0.70 |
+
+Caps are ceilings, never floors — a judge that is already unsure stays unsure. The worst
+applicable cap wins. A clean & jerk that *was* split is noted, not penalised.
+
+### Annotated replay
+Each scored lift gets an MP4 with the verdict burnt in — lift, score, band, confidence and the
+first cue — so the file still carries the score after it goes through a share sheet. Encoding is
+deliberately conservative so iOS Safari plays it inline: H.264, `yuv420p`, even dimensions, AAC or
+no audio, `+faststart`, long side capped at 720 px. If no usable font is found, it falls back to
+the same clip without the overlay rather than to no replay at all. Requires ffmpeg.
+
 ### Upload limits and errors
 - Uploads are streamed to disk and rejected over `MAX_UPLOAD_MB` (HTTP 413) with a message
   asking you to trim the clip; the partial file is removed.
@@ -199,10 +292,38 @@ Coverage in this MVP:
   usual two calls per scored exercise. `--lift` skips triage; `--split-only` calls nothing.
 - Token estimate: depends on provider accounting for multi-image inputs; exact tokenization is provider-specific and not documented here. Treat as unknown and verify in your Nebius Token Factory usage dashboard.
 
+### Limitations
+Read these before trusting a number.
+
+- **Scores are indicative.** Bar path is read from 8–16 sampled frames by a vision model, not
+  from pose estimation or bar tracking. There is no pixel measurement of drift, and no calibration
+  against a known distance — the "max horizontal drift" is a description, not a measurement.
+- **Angle decides everything.** A clip that is not square to the side cannot show horizontal drift
+  honestly. The confidence value reflects this, but it cannot rescue a bad angle.
+- **One lift per clip works best.** A clean & jerk is detected and split, but the split relies on
+  the athlete being briefly still between the two lifts.
+- **Only snatch, clean and jerk.** Squats, deadlifts, presses and partial lifts are out of scope
+  and are skipped rather than scored.
+- **No accounts, no history.** Results live for `JOB_TTL_SECONDS` and are then deleted. Nothing is
+  stored between sessions.
+- **Rotation needs ffprobe.** Without it, portrait clips may be judged sideways.
+- **Jobs live in one process.** The store is in-memory, so the MVP runs as a single instance; it
+  does not scale horizontally as-is.
+- **Latency** is roughly a minute on a normal connection. That is a target observed in testing,
+  not a guarantee — it depends on Token Factory load and clip length.
+
 ### Deployment
-The app is deliberately small to ease later deployment (container, serverless, or a managed app platform). It requires only:
-- `NEBIUS_API_KEY` (and optionally `NEBIUS_BASE_URL`, `NEBIUS_VISION_MODEL`, `NEBIUS_JUDGE_MODEL`)
-- A Python runtime
+The app is deliberately small to ease deployment (container, serverless, or a managed app
+platform). It needs:
+- `NEBIUS_API_KEY` (and optionally the other variables above)
+- A Python runtime and **ffmpeg** on the PATH
+- **HTTPS**, which camera capture and PWA install both require
+- A reverse-proxy body limit at least as large as `MAX_UPLOAD_MB`, and generous read timeouts
+- One instance: jobs are held in memory, so sticky routing or a single replica is required
+
+### Demo video
+The narration script for the ≤3-minute submission video, with per-beat timings, shot directions
+and a pre-recording checklist, is in [docs/demo-script.md](docs/demo-script.md).
 
 ### License
 MIT (already present in this repository).

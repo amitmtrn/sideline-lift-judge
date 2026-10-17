@@ -44,12 +44,11 @@ def test_two_stage_pipeline_mocks_requests():
     }
     import asyncio
     with patch("app.services.nebius_client.requests.post", side_effect=[m1, m2]) as post:
-        loop = asyncio.get_event_loop()
-        # Stage 1
-        obs_text = loop.run_until_complete(client.create_chat_completion(messages=v_msgs, model="openbmb/MiniCPM-V-4_5"))
+                # Stage 1
+        obs_text = asyncio.run(client.create_chat_completion(messages=v_msgs, model="openbmb/MiniCPM-V-4_5"))
         assert "Observed" in obs_text
         # Stage 2
-        out = loop.run_until_complete(client.create_chat_completion(messages=j_msgs, model="nvidia/Nemotron-3-Ultra-550b-a55b"))
+        out = asyncio.run(client.create_chat_completion(messages=j_msgs, model="nvidia/Nemotron-3-Ultra-550b-a55b"))
         assert '"lift":"snatch"' in out
         assert post.call_count == 2
 
@@ -81,7 +80,7 @@ def test_judge_request_disables_thinking_and_raises_token_budget():
     }
     import asyncio
     with patch("app.services.nebius_client.requests.post", return_value=m) as post:
-        judgment = asyncio.get_event_loop().run_until_complete(
+        judgment = asyncio.run(
             request_judgment(
                 client=client,
                 lift="snatch",
@@ -115,7 +114,7 @@ def test_judge_request_retries_once_when_reply_has_no_json():
     }
     import asyncio
     with patch("app.services.nebius_client.requests.post", side_effect=[truncated, good]) as post:
-        judgment = asyncio.get_event_loop().run_until_complete(
+        judgment = asyncio.run(
             request_judgment(
                 client=client,
                 lift="jerk",
@@ -160,7 +159,7 @@ def test_judge_falls_back_to_second_model_when_primary_fails():
         "app.services.nebius_client.requests.post",
         side_effect=[_api_error_response(), _api_error_response(), _good_judge_response()],
     ) as post:
-        judgment = asyncio.get_event_loop().run_until_complete(
+        judgment = asyncio.run(
             request_judgment(
                 client=client,
                 lift="snatch",
@@ -187,7 +186,7 @@ def test_judge_falls_back_when_primary_never_returns_json():
         "app.services.nebius_client.requests.post",
         side_effect=[prose, prose, _good_judge_response("clean")],
     ) as post:
-        judgment = asyncio.get_event_loop().run_until_complete(
+        judgment = asyncio.run(
             request_judgment(
                 client=client,
                 lift="clean",
@@ -213,7 +212,7 @@ def test_judge_raises_primary_error_when_fallback_disabled():
         side_effect=[_api_error_response(), _api_error_response()],
     ) as post:
         with pytest.raises(RuntimeError):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 request_judgment(
                     client=client,
                     lift="snatch",
@@ -246,7 +245,7 @@ def test_vision_chunking_makes_multiple_calls_when_over_limit():
     m2 = Mock(); m2.status_code = 200; m2.json.return_value = {"choices": [{"message": {"content": "obs2"}}]}
     with patch("app.services.nebius_client.requests.post", side_effect=[m1, m2]) as post:
         import asyncio
-        text = asyncio.get_event_loop().run_until_complete(
+        text = asyncio.run(
             collect_observations_in_chunks(
                 client=client,
                 lift="snatch",

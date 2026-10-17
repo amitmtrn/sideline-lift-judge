@@ -1,24 +1,28 @@
-import base64
 import logging
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, Dict, Optional
 
+from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from dotenv import load_dotenv
 
-from app.schemas.judgment import LiftJudgment, LiftType
-from app.utils.frames import sample_video_frames_bgr
-from app.utils.video_meta import get_rotation_degrees
-from app.utils.image_ops import rotate_by_degrees, resize_long_side
-from app.services.nebius_client import (
-    NO_THINKING_EXTRA_BODY,
-    NebiusChatClient,
-    assemble_vision_messages,
-    request_judgment,
+from app.schemas.judgment import LiftType
+from app.services.jobs import Job, get_store, job_ttl_seconds
+from app.services.nebius_client import NebiusChatClient
+from app.services.pipeline import (
+    DEFAULT_FRAMES,
+    MAX_FRAMES,
+    MIN_FRAMES,
+    ScoreOutcome,
+    ScoreRequest,
+    ScoredLift,
+    TrimError,
+    clamp_frames,
+    run_scoring,
 )
 from app.utils.uploads import (
     UnsupportedUpload,
@@ -27,7 +31,7 @@ from app.utils.uploads import (
     max_upload_bytes,
     save_upload_to_temp,
 )
-
+from app.utils.video_meta import probe_video
 
 # Load .env if present for local dev
 load_dotenv()
@@ -40,24 +44,21 @@ STATIC_DIR = APP_DIR / "static"
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Sideline Lift Judge — MVP")
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    yield
+    # Never leave uploaded clips or replays behind (spec §12).
+    get_store().shutdown()
+
+
+app = FastAPI(title="Sideline Lift Judge", lifespan=lifespan)
 
 # Mount static and templates
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-
-def bgr_frames_to_data_urls(frames_bgr: List["np.ndarray"]) -> List[str]:
-    # Lazy import to avoid cv2 dependency on import path for test discovery
-    import cv2  # type: ignore
-    data_urls: List[str] = []
-    for frame in frames_bgr:
-        success, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        if not success:
-            continue
-        b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
-        data_urls.append(f"data:image/jpeg;base64,{b64}")
-    return data_urls
+LIFT_CHOICES = [lift.value for lift in LiftType]
 
 
 class ConfigurationError(RuntimeError):
@@ -75,96 +76,295 @@ def get_client() -> NebiusChatClient:
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(
+        request,
         "index.html",
         {
-            "request": request,
             "default_lift": "snatch",
+            "lifts": LIFT_CHOICES,
+            "min_frames": MIN_FRAMES,
+            "max_frames": MAX_FRAMES,
+            "default_frames": DEFAULT_FRAMES,
+            "max_upload_mb": max_upload_bytes() // (1024 * 1024),
         },
     )
 
 
-@app.post("/api/score")
-async def score_endpoint(
-    request: Request,
-    lift: LiftType = Form(...),
-    file: UploadFile = File(...),
-    num_frames: int = Form(10),
-):
-    if not is_supported_video_upload(file.content_type, file.filename):
+@app.get("/manifest.webmanifest", include_in_schema=False)
+async def manifest() -> FileResponse:
+    # Served from the root so the PWA scope covers the whole app.
+    return FileResponse(STATIC_DIR / "manifest.webmanifest", media_type="application/manifest+json")
+
+
+@app.get("/service-worker.js", include_in_schema=False)
+async def service_worker() -> FileResponse:
+    # A worker can only control pages at or below its own path, so this must not
+    # live under /static.
+    return FileResponse(
+        STATIC_DIR / "service-worker.js",
+        media_type="application/javascript",
+        headers={"Cache-Control": "no-cache"},
+    )
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon() -> FileResponse:
+    return FileResponse(STATIC_DIR / "icons" / "icon-192.png", media_type="image/png")
+
+
+def _resolve_upload(video: Optional[UploadFile], file: Optional[UploadFile]) -> UploadFile:
+    """Spec §10 names the field `video`; `file` is kept for the original API."""
+    upload = video or file
+    if upload is None or not getattr(upload, "filename", None):
+        raise HTTPException(status_code=400, detail="No clip was uploaded.")
+    return upload
+
+
+def _parse_optional_float(value: Optional[str], label: str) -> Optional[float]:
+    if value is None or str(value).strip() == "":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{label} must be a number of seconds.")
+
+
+def _parse_lift(value: Optional[str]) -> Optional[LiftType]:
+    if value is None or str(value).strip() == "" or str(value).strip().lower() == "auto":
+        return None
+    try:
+        return LiftType(str(value).strip().lower())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Unknown lift: {value}. Choose snatch, clean or jerk.")
+
+
+async def _store_upload(upload: UploadFile, destination_dir: Optional[Path] = None) -> Path:
+    if not is_supported_video_upload(upload.content_type, upload.filename):
         raise HTTPException(
             status_code=400,
             detail="That file is not a video. Upload a clip filmed on your phone (MP4 or MOV).",
         )
-    # Stream to a temp file for OpenCV, enforcing the size limit while writing.
     try:
-        tmp_path = await save_upload_to_temp(file, max_bytes=max_upload_bytes())
+        return await save_upload_to_temp(
+            upload,
+            max_bytes=max_upload_bytes(),
+            dir=str(destination_dir) if destination_dir else None,
+        )
     except UploadTooLarge as exc:
         raise HTTPException(status_code=413, detail=str(exc))
     except UnsupportedUpload as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    try:
-        frames = sample_video_frames_bgr(str(tmp_path), target_count=max(8, min(16, int(num_frames))))
-        if not frames:
-            raise HTTPException(status_code=400, detail="Could not decode frames from the uploaded video.")
-        # Orientation + downscale to ~768 long side
-        rotation_deg = get_rotation_degrees(str(tmp_path))
-        processed = [resize_long_side(rotate_by_degrees(f, rotation_deg), 768) for f in frames]
-        images = bgr_frames_to_data_urls(processed)
-        client = get_client()
-        # Stage 1: vision observations (MiniCPM-V) with chunking when needed
-        vision_model = os.getenv("NEBIUS_VISION_MODEL") or "openbmb/MiniCPM-V-4_5"
-        max_images = int(os.getenv("NEBIUS_VISION_MAX_IMAGES") or "10")
-        if len(images) <= max_images:
-            v_messages = assemble_vision_messages(lift=lift, images=images, prompts_dir=str(PROMPTS_DIR))
-            observations = await client.create_chat_completion(
-                messages=v_messages,
-                model=vision_model,
-                max_tokens=1500,
-                extra_body=NO_THINKING_EXTRA_BODY,
-            )
+
+def _lift_payload(item: ScoredLift, *, job_id: Optional[str] = None) -> Dict[str, Any]:
+    body: Dict[str, Any] = {
+        "index": item.index,
+        "lift": item.lift.value,
+        "start_sec": item.start_sec,
+        "end_sec": item.end_sec,
+        "was_split": item.was_split,
+    }
+    if item.error:
+        body["error"] = item.error
+    if item.judgment is not None:
+        body.update(item.judgment.model_dump())
+        if item.replay_path and job_id:
+            body["annotated_video_url"] = f"/api/jobs/{job_id}/replay/{item.index}.mp4"
         else:
-            from app.services.nebius_client import collect_observations_in_chunks
-            observations = await collect_observations_in_chunks(
-                client=client,
-                lift=lift,
-                images=images,
-                prompts_dir=str(PROMPTS_DIR),
-                model=vision_model,
-                max_images_per_call=max_images,
-            )
-        # Stage 2: judge (Nemotron)
-        judge_model = os.getenv("NEBIUS_JUDGE_MODEL") or "nvidia/Nemotron-3-Ultra-550b-a55b"
-        # Call with one automatic retry on parse failure
-        judgment = await request_judgment(
+            body["annotated_video_url"] = None
+    if item.observations:
+        body["observations"] = item.observations
+    return body
+
+
+def _outcome_payload(outcome: ScoreOutcome, *, job_id: Optional[str] = None) -> Dict[str, Any]:
+    return {
+        "lifts": [_lift_payload(item, job_id=job_id) for item in outcome.lifts],
+        "split_detected": outcome.split_detected,
+        "candidate_windows": outcome.candidate_windows,
+        "skipped": outcome.skipped,
+        "duration_sec": round(outcome.duration_sec, 2),
+        "start_sec": round(outcome.start_sec, 2),
+        "end_sec": round(outcome.end_sec, 2),
+    }
+
+
+@app.post("/api/jobs")
+async def create_job(
+    video: Optional[UploadFile] = File(default=None),
+    file: Optional[UploadFile] = File(default=None),
+    lift: Optional[str] = Form(default=None),
+    mode: str = Form(default="single"),
+    trim_start: Optional[str] = Form(default=None),
+    trim_end: Optional[str] = Form(default=None),
+    frames: Optional[int] = Form(default=None),
+    num_frames: Optional[int] = Form(default=None),
+    debug: bool = Form(default=False),
+):
+    """
+    Accept a clip and start scoring in the background (spec §13). Returns the job
+    id to poll, so a slow or dropped mobile connection cannot lose the result.
+    """
+    upload = _resolve_upload(video, file)
+    selected_lift = _parse_lift(lift)
+    start = _parse_optional_float(trim_start, "Trim start")
+    end = _parse_optional_float(trim_end, "Trim end")
+    mode = "auto" if str(mode).strip().lower() == "auto" else "single"
+
+    # Fail before touching the network if the service is not configured.
+    try:
+        client = get_client()
+    except ConfigurationError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    store = get_store()
+    job = store.create()
+    try:
+        source = await _store_upload(upload, job.workdir)
+    except HTTPException:
+        store.purge_expired(ttl=0)
+        raise
+    job.source_path = source
+
+    info = probe_video(str(source))
+    request_model = ScoreRequest(
+        video_path=str(source),
+        lift=selected_lift,
+        trim_start=start,
+        trim_end=end,
+        frames=clamp_frames(frames if frames is not None else num_frames),
+        mode=mode,
+        render_replay=True,
+        replay_dir=str(job.workdir),
+        keep_observations=bool(debug),
+    )
+    # Validate the trim window now so the user hears about it immediately.
+    try:
+        from app.services.pipeline import resolve_trim
+
+        resolve_trim(duration_sec=info.duration_sec, trim_start=start, trim_end=end)
+    except TrimError as exc:
+        store.purge_expired(ttl=0)
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    async def runner(current: Job) -> None:
+        outcome = await run_scoring(
+            request_model,
             client=client,
-            lift=lift,
-            observations=observations,
             prompts_dir=str(PROMPTS_DIR),
-            model=judge_model,
+            progress=current.set_progress,
         )
-        return JSONResponse(content=judgment.model_dump())
+        current.replays = {
+            item.index: Path(item.replay_path) for item in outcome.lifts if item.replay_path
+        }
+        current.payload = _outcome_payload(outcome, job_id=current.id)
+        if not outcome.scored:
+            first_error = next((item.error for item in outcome.lifts if item.error), None)
+            if first_error:
+                raise RuntimeError(first_error)
+            current.set_progress("done", "No snatch, clean or jerk found in this clip.", 1.0)
+            return
+        current.set_progress("done", "Done.", 1.0)
+
+    store.start(job, runner)
+    return JSONResponse(status_code=202, content={"id": job.id, "poll_url": f"/api/jobs/{job.id}"})
+
+
+@app.get("/api/jobs/{job_id}")
+async def read_job(job_id: str):
+    job = get_store().get(job_id)
+    if job is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"That result has expired. Results are kept for {job_ttl_seconds() // 60} minutes.",
+        )
+    return JSONResponse(content=job.as_dict())
+
+
+@app.get("/api/jobs/{job_id}/replay/{index}.mp4")
+async def read_replay(job_id: str, index: int):
+    job = get_store().get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="That replay has expired.")
+    path = job.replays.get(index)
+    if path is None or not Path(path).is_file():
+        raise HTTPException(status_code=404, detail="No replay for that lift.")
+    # Inline so iOS Safari plays it in the page; the download button adds its own
+    # filename via the anchor.
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        headers={"Content-Disposition": f'inline; filename="lift-{index}.mp4"'},
+    )
+
+
+@app.post("/api/score")
+async def score_endpoint(
+    video: Optional[UploadFile] = File(default=None),
+    file: Optional[UploadFile] = File(default=None),
+    lift: Optional[str] = Form(default=None),
+    mode: str = Form(default="single"),
+    trim_start: Optional[str] = Form(default=None),
+    trim_end: Optional[str] = Form(default=None),
+    frames: Optional[int] = Form(default=None),
+    num_frames: Optional[int] = Form(default=None),
+    debug: bool = Form(default=False),
+):
+    """
+    Synchronous scoring: one request, one verdict. Kept for scripts and for
+    parity with the CLI; the web UI uses /api/jobs so it can show progress.
+    """
+    upload = _resolve_upload(video, file)
+    selected_lift = _parse_lift(lift)
+    start = _parse_optional_float(trim_start, "Trim start")
+    end = _parse_optional_float(trim_end, "Trim end")
+
+    source = await _store_upload(upload)
+    try:
+        client = get_client()
+        outcome = await run_scoring(
+            ScoreRequest(
+                video_path=str(source),
+                lift=selected_lift,
+                trim_start=start,
+                trim_end=end,
+                frames=clamp_frames(frames if frames is not None else num_frames),
+                mode="auto" if str(mode).strip().lower() == "auto" else "single",
+                render_replay=False,
+                keep_observations=bool(debug),
+            ),
+            client=client,
+            prompts_dir=str(PROMPTS_DIR),
+        )
+        scored = outcome.scored
+        if not scored:
+            first_error = next((item.error for item in outcome.lifts if item.error), None)
+            raise HTTPException(
+                status_code=422,
+                detail=first_error or "No snatch, clean or jerk could be scored in this clip.",
+            )
+        payload = _outcome_payload(outcome)
+        # One lift stays backwards compatible: the verdict is the top-level body.
+        if len(scored) == 1 and len(outcome.lifts) == 1:
+            body = _lift_payload(scored[0])
+            body["split_detected"] = outcome.split_detected
+            return JSONResponse(content=body)
+        return JSONResponse(content=payload)
     except HTTPException:
         raise
+    except TrimError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     except ConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except Exception as exc:
-        # Both stages run against a remote provider, so a failure here is usually
-        # an upstream error or a reply we could not validate. Log the detail,
-        # show the user a sentence.
-        logger.exception("Scoring failed for lift=%s", getattr(lift, "value", lift))
+        logger.exception("Scoring failed")
         raise HTTPException(
             status_code=502,
             detail="Scoring failed. The model service may be busy — wait a moment and try the clip again.",
         ) from exc
     finally:
-        try:
-            os.unlink(tmp_path)
-        except Exception:
-            pass
+        Path(source).unlink(missing_ok=True)
 
 
 @app.get("/healthz")
 async def healthz():
     return {"ok": True}
-
