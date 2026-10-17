@@ -20,7 +20,7 @@ def test_nebius_client_extracts_message_text():
     m.status_code = 200
     m.json.return_value = fake_resp
     with patch("app.services.nebius_client.requests.post", return_value=m) as _post:
-        text = asyncio.get_event_loop().run_until_complete(
+        text = asyncio.run(
             client.create_chat_completion(messages=[{"role": "user", "content": "hi"}], model=None)
         )
         assert '"lift":"snatch"' in text

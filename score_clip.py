@@ -1,106 +1,184 @@
 #!/usr/bin/env python3
+"""
+Score one clip from the command line.
+
+Runs exactly the pipeline the web app runs (FR-13), so a result here and a
+result on the phone cannot drift apart: triage, Stage-1 observations, the
+Nemotron judge with its fallback, and the clip-quality confidence rule. A clip
+holding a clean & jerk is split and scored as two lifts.
+
+    python score_clip.py clip.mp4 --lift snatch
+    python score_clip.py clip.mp4 --lift clean --trim-start 2.5 --trim-end 7 --debug
+    python score_clip.py session.mp4 --auto --replay-dir out/
+"""
+from __future__ import annotations
+
 import argparse
 import asyncio
-import base64
+import json
 import os
+import sys
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from dotenv import load_dotenv
 
 from app.schemas.judgment import LiftType
-from app.services.nebius_client import (
-    NO_THINKING_EXTRA_BODY,
-    NebiusChatClient,
-    assemble_vision_messages,
-    request_judgment,
+from app.services.nebius_client import NebiusChatClient
+from app.services.pipeline import (
+    DEFAULT_FRAMES,
+    MAX_FRAMES,
+    MIN_FRAMES,
+    ScoreOutcome,
+    ScoreRequest,
+    TrimError,
+    clamp_frames,
+    run_scoring,
 )
-from app.utils.frames import sample_video_frames_bgr
-from app.utils.video_meta import get_rotation_degrees
-from app.utils.image_ops import rotate_by_degrees, resize_long_side
 
 
-def bgr_frames_to_data_urls(frames_bgr: List["np.ndarray"]) -> List[str]:
-    import cv2  # type: ignore
-    data_urls: List[str] = []
-    for frame in frames_bgr:
-        ok, buf = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        if not ok:
-            continue
-        b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
-        data_urls.append(f"data:image/jpeg;base64,{b64}")
-    return data_urls
-
-
-async def main() -> int:
-    parser = argparse.ArgumentParser(description="Score a lift clip with Nebius Token Factory (NVIDIA vision model)")
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Score a lift clip with Nebius Token Factory (NVIDIA Nemotron judge).",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
     parser.add_argument("video", type=str, help="Path to video file")
-    parser.add_argument("--lift", type=str, choices=[e.value for e in LiftType], required=True, help="Lift type")
-    parser.add_argument("--frames", type=int, default=10, help="Frames to sample (8–16)")
-    parser.add_argument("--prompts_dir", type=str, default=str(Path(__file__).parent / "prompts"), help="Prompts directory")
-    parser.add_argument("--debug", action="store_true", help="Print Stage 1 vision observations")
-    args = parser.parse_args()
+    parser.add_argument(
+        "--lift",
+        type=str,
+        choices=[lift.value for lift in LiftType],
+        default=None,
+        help="Which lift this clip holds. Omit with --auto to let the vision model decide",
+    )
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="Scan a longer clip and score every attempt found in it",
+    )
+    parser.add_argument("--frames", type=int, default=DEFAULT_FRAMES, help=f"Frames to sample ({MIN_FRAMES}-{MAX_FRAMES})")
+    parser.add_argument("--trim-start", type=float, default=None, help="Start of the window to judge, in seconds")
+    parser.add_argument("--trim-end", type=float, default=None, help="End of the window to judge, in seconds")
+    parser.add_argument(
+        "--no-split",
+        action="store_true",
+        help="Skip the triage call that separates a clean & jerk into two lifts",
+    )
+    parser.add_argument(
+        "--replay-dir",
+        type=str,
+        default=None,
+        help="Render the annotated replay MP4 into this directory",
+    )
+    parser.add_argument(
+        "--prompts-dir",
+        "--prompts_dir",
+        dest="prompts_dir",
+        type=str,
+        default=str(Path(__file__).parent / "prompts"),
+        help="Prompts directory",
+    )
+    parser.add_argument("--debug", action="store_true", help="Print Stage-1 vision observations to stderr")
+    parser.add_argument("--progress", action="store_true", help="Print pipeline stages to stderr as they run")
+    return parser.parse_args(argv)
+
+
+def build_payload(outcome: ScoreOutcome) -> object:
+    """
+    One lift prints the verdict object, as this CLI always has. Several lifts —
+    a clean & jerk, or an --auto session — print the whole run.
+    """
+    def one(item) -> dict:
+        body = item.judgment.model_dump() if item.judgment else {"error": item.error}
+        body.update(
+            {
+                "start_sec": item.start_sec,
+                "end_sec": item.end_sec,
+                "was_split": item.was_split,
+            }
+        )
+        if item.observations:
+            body["observations"] = item.observations
+        if item.replay_path:
+            body["annotated_video_url"] = item.replay_path
+        return body
+
+    if len(outcome.lifts) == 1:
+        return one(outcome.lifts[0])
+    return {
+        "lifts": [one(item) for item in outcome.lifts],
+        "split_detected": outcome.split_detected,
+        "skipped": outcome.skipped,
+        "duration_sec": round(outcome.duration_sec, 2),
+    }
+
+
+async def run(args: argparse.Namespace) -> int:
+    if not Path(args.video).is_file():
+        print(f"ERROR: no such file: {args.video}", file=sys.stderr)
+        return 2
+    if not args.lift and not args.auto:
+        print("ERROR: pass --lift snatch|clean|jerk, or --auto to detect the lifts.", file=sys.stderr)
+        return 2
+    if args.frames < MIN_FRAMES or args.frames > MAX_FRAMES:
+        print(f"NOTE: clamping frames to [{MIN_FRAMES}, {MAX_FRAMES}]", file=sys.stderr)
 
     load_dotenv()
     api_key = os.getenv("NEBIUS_API_KEY")
     if not api_key:
-        print("ERROR: NEBIUS_API_KEY is not set. See README for setup.", flush=True)
+        print("ERROR: NEBIUS_API_KEY is not set. See README for setup.", file=sys.stderr)
         return 2
-    base_url = os.getenv("NEBIUS_BASE_URL") or NebiusChatClient.DEFAULT_BASE_URL
-    vision_model = os.getenv("NEBIUS_VISION_MODEL") or "openbmb/MiniCPM-V-4_5"
-    judge_model = os.getenv("NEBIUS_JUDGE_MODEL") or "nvidia/Nemotron-3-Ultra-550b-a55b"
-    max_images = int(os.getenv("NEBIUS_VISION_MAX_IMAGES") or "10")
-
-    if args.frames < 8 or args.frames > 16:
-        print("NOTE: clamping frames to [8, 16]")
-    frames = sample_video_frames_bgr(args.video, target_count=max(8, min(16, args.frames)))
-    if not frames:
-        print("ERROR: Failed to read frames from the video.")
-        return 3
-    # Handle rotation metadata and downscale
-    rot = get_rotation_degrees(args.video)
-    processed = [resize_long_side(rotate_by_degrees(f, rot), 768) for f in frames]
-    images = bgr_frames_to_data_urls(processed)
-
-    client = NebiusChatClient(api_key=api_key, base_url=base_url)
-    # Stage 1: vision observations
-    # Clamp or chunk to max_images
-    if len(images) <= max_images:
-        v_messages = assemble_vision_messages(lift=args.lift, images=images, prompts_dir=args.prompts_dir)
-        observations = await client.create_chat_completion(
-            messages=v_messages,
-            model=vision_model,
-            max_tokens=1500,
-            extra_body=NO_THINKING_EXTRA_BODY,
-        )
-    else:
-        from app.services.nebius_client import collect_observations_in_chunks
-        observations = await collect_observations_in_chunks(
-            client=client,
-            lift=args.lift,
-            images=images,
-            prompts_dir=args.prompts_dir,
-            model=vision_model,
-            max_images_per_call=max_images,
-        )
-    if args.debug:
-        print("=== Stage 1: Vision observations ===")
-        print(observations)
-        print("=== End observations ===")
-    # Stage 2: judge
-    judgment = await request_judgment(
-        client=client,
-        lift=args.lift,
-        observations=observations,
-        prompts_dir=args.prompts_dir,
-        model=judge_model,
+    client = NebiusChatClient(
+        api_key=api_key,
+        base_url=os.getenv("NEBIUS_BASE_URL") or NebiusChatClient.DEFAULT_BASE_URL,
     )
 
-    import json as _json
-    print(_json.dumps(judgment.model_dump(), indent=2, ensure_ascii=False))
-    return 0
+    if args.replay_dir:
+        Path(args.replay_dir).mkdir(parents=True, exist_ok=True)
+
+    def progress(stage: str, message: str, fraction: float) -> None:
+        if args.progress:
+            print(f"[{fraction:5.0%}] {message}", file=sys.stderr)
+
+    request = ScoreRequest(
+        video_path=args.video,
+        lift=LiftType(args.lift) if args.lift else None,
+        trim_start=args.trim_start,
+        trim_end=args.trim_end,
+        frames=clamp_frames(args.frames),
+        mode="auto" if args.auto else "single",
+        render_replay=bool(args.replay_dir),
+        replay_dir=args.replay_dir,
+        keep_observations=bool(args.debug),
+        detect_split=not args.no_split,
+    )
+
+    try:
+        outcome = await run_scoring(request, client=client, prompts_dir=args.prompts_dir)
+    except TrimError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
+
+    if args.debug:
+        for item in outcome.lifts:
+            if item.observations:
+                print(f"=== Stage 1 observations — {item.lift.value} ===", file=sys.stderr)
+                print(item.observations, file=sys.stderr)
+        print("=== End observations ===", file=sys.stderr)
+
+    if not outcome.lifts:
+        print("No snatch, clean or jerk found in this clip.", file=sys.stderr)
+        return 5
+
+    print(json.dumps(build_payload(outcome), indent=2, ensure_ascii=False))
+    for item in outcome.lifts:
+        if item.error:
+            print(f"WARNING: {item.lift.value}: {item.error}", file=sys.stderr)
+    return 0 if outcome.scored else 6
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    return asyncio.run(run(parse_args(argv)))
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
-
+    raise SystemExit(main())
