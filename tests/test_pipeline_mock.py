@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 
 import numpy as np  # type: ignore
 
-from app.services.nebius_client import (
+from server.services.nebius_client import (
     NebiusChatClient,
     assemble_vision_messages,
     assemble_judge_messages,
@@ -43,7 +43,7 @@ def test_two_stage_pipeline_mocks_requests():
         ]
     }
     import asyncio
-    with patch("app.services.nebius_client.requests.post", side_effect=[m1, m2]) as post:
+    with patch("server.services.nebius_client.requests.post", side_effect=[m1, m2]) as post:
                 # Stage 1
         obs_text = asyncio.run(client.create_chat_completion(messages=v_msgs, model="openbmb/MiniCPM-V-4_5"))
         assert "Observed" in obs_text
@@ -56,7 +56,7 @@ def test_two_stage_pipeline_mocks_requests():
 def test_assemble_accepts_lift_type_enum():
     # The web form binds lift as LiftType; str(LiftType.snatch) is "LiftType.snatch",
     # which used to be interpolated straight into the prompt filename.
-    from app.schemas.judgment import LiftType
+    from server.schemas.judgment import LiftType
 
     j_msgs = assemble_judge_messages(lift=LiftType.snatch, observations="obs", prompts_dir="prompts")
     assert any("snatch" in str(m["content"]) for m in j_msgs)
@@ -79,7 +79,7 @@ def test_judge_request_disables_thinking_and_raises_token_budget():
         ]
     }
     import asyncio
-    with patch("app.services.nebius_client.requests.post", return_value=m) as post:
+    with patch("server.services.nebius_client.requests.post", return_value=m) as post:
         judgment = asyncio.run(
             request_judgment(
                 client=client,
@@ -113,7 +113,7 @@ def test_judge_request_retries_once_when_reply_has_no_json():
         ]
     }
     import asyncio
-    with patch("app.services.nebius_client.requests.post", side_effect=[truncated, good]) as post:
+    with patch("server.services.nebius_client.requests.post", side_effect=[truncated, good]) as post:
         judgment = asyncio.run(
             request_judgment(
                 client=client,
@@ -156,7 +156,7 @@ def test_judge_falls_back_to_second_model_when_primary_fails():
     client = NebiusChatClient(api_key="x", base_url="https://example.test/v1")
     import asyncio
     with patch(
-        "app.services.nebius_client.requests.post",
+        "server.services.nebius_client.requests.post",
         side_effect=[_api_error_response(), _api_error_response(), _good_judge_response()],
     ) as post:
         judgment = asyncio.run(
@@ -183,7 +183,7 @@ def test_judge_falls_back_when_primary_never_returns_json():
     prose.json.return_value = {"choices": [{"message": {"content": "Let me think about the observations"}}]}
     import asyncio
     with patch(
-        "app.services.nebius_client.requests.post",
+        "server.services.nebius_client.requests.post",
         side_effect=[prose, prose, _good_judge_response("clean")],
     ) as post:
         judgment = asyncio.run(
@@ -208,7 +208,7 @@ def test_judge_raises_primary_error_when_fallback_disabled():
     import pytest
 
     with patch(
-        "app.services.nebius_client.requests.post",
+        "server.services.nebius_client.requests.post",
         side_effect=[_api_error_response(), _api_error_response()],
     ) as post:
         with pytest.raises(RuntimeError):
@@ -226,7 +226,7 @@ def test_judge_raises_primary_error_when_fallback_disabled():
 
 
 def test_judge_fallback_model_env_override(monkeypatch):
-    from app.services.nebius_client import DEFAULT_JUDGE_FALLBACK_MODEL, judge_fallback_model
+    from server.services.nebius_client import DEFAULT_JUDGE_FALLBACK_MODEL, judge_fallback_model
 
     monkeypatch.delenv("NEBIUS_JUDGE_FALLBACK_MODEL", raising=False)
     assert judge_fallback_model() == DEFAULT_JUDGE_FALLBACK_MODEL
@@ -243,7 +243,7 @@ def test_vision_chunking_makes_multiple_calls_when_over_limit():
     images = [_single_image_data_url() for _ in range(12)]
     m1 = Mock(); m1.status_code = 200; m1.json.return_value = {"choices": [{"message": {"content": "obs1"}}]}
     m2 = Mock(); m2.status_code = 200; m2.json.return_value = {"choices": [{"message": {"content": "obs2"}}]}
-    with patch("app.services.nebius_client.requests.post", side_effect=[m1, m2]) as post:
+    with patch("server.services.nebius_client.requests.post", side_effect=[m1, m2]) as post:
         import asyncio
         text = asyncio.run(
             collect_observations_in_chunks(

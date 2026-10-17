@@ -17,8 +17,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence
 
 if TYPE_CHECKING:
-    from app.schemas.judgment import LiftJudgment
-    from app.utils.video_meta import VideoInfo
+    from server.schemas.judgment import LiftJudgment
+    from server.utils.video_meta import VideoInfo
 
 # Ceilings per problem, worst first. A mixed clip is the case the spec calls out
 # by name, so it caps hardest.

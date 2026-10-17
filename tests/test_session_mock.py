@@ -6,9 +6,9 @@ from unittest.mock import Mock, patch
 
 import pytest
 
-from app.schemas.judgment import LiftType
-from app.schemas.segment import ExerciseReport, SegmentTriage, SessionReport, parse_triage_json
-from app.utils.segmentation import CandidateSegment, MotionProfile
+from server.schemas.judgment import LiftType
+from server.schemas.segment import ExerciseReport, SegmentTriage, SessionReport, parse_triage_json
+from server.utils.segmentation import CandidateSegment, MotionProfile
 from tests.test_segmentation import _write_session_video
 
 import score_session
@@ -22,7 +22,7 @@ def test_triage_messages_label_every_frame():
     Unlabelled frames made the model name the lift the scene reminded it of;
     numbered frames make it answer per frame.
     """
-    from app.services.nebius_client import assemble_triage_messages
+    from server.services.nebius_client import assemble_triage_messages
 
     messages = assemble_triage_messages(images=["data:image/jpeg;base64,x", "data:image/jpeg;base64,y"], prompts_dir="prompts")
     content = messages[1]["content"]
@@ -84,13 +84,13 @@ def test_triage_coerces_percent_confidence():
     ],
 )
 def test_lifts_from_bar_path(path, expected):
-    from app.schemas.segment import lifts_from_bar_path
+    from server.schemas.segment import lifts_from_bar_path
 
     assert lifts_from_bar_path(path) == [LiftType(name) for name in expected]
 
 
 def test_single_stray_frame_does_not_promote_a_clean_to_a_jerk():
-    from app.schemas.segment import lifts_from_bar_path
+    from server.schemas.segment import lifts_from_bar_path
 
     # One frame misread as overhead at the end of a clean: the rest of the
     # window says the bar stayed on the shoulders.
@@ -121,7 +121,7 @@ def test_unreadable_bar_path_falls_back_to_the_named_lift():
 
 
 def test_bar_level_synonyms():
-    from app.schemas.segment import FLOOR, KNEES, NOT_VISIBLE, OVERHEAD, SHOULDERS, bar_level
+    from server.schemas.segment import FLOOR, KNEES, NOT_VISIBLE, OVERHEAD, SHOULDERS, bar_level
 
     assert bar_level("Floor") == FLOOR
     assert bar_level("on the ground") == FLOOR
@@ -308,7 +308,7 @@ def test_session_run_splits_triages_scores_and_ranks(session_clip, monkeypatch, 
         ],
         scores=[9, 5],
     )
-    with patch("app.services.nebius_client.requests.post", side_effect=fake):
+    with patch("server.services.nebius_client.requests.post", side_effect=fake):
         code = score_session.main(
             [video_path, "--out-dir", out_dir, "--concurrency", "1", "--no-clips", "--frames", "8"]
         )
@@ -341,7 +341,7 @@ def test_session_forced_lift_skips_triage(session_clip, monkeypatch):
     video_path, td = session_clip
     monkeypatch.setenv("NEBIUS_API_KEY", "test-key")
     fake = FakeNebius(triage_replies=[], scores=[8, 8, 8])
-    with patch("app.services.nebius_client.requests.post", side_effect=fake):
+    with patch("server.services.nebius_client.requests.post", side_effect=fake):
         code = score_session.main(
             [video_path, "--lift", "clean", "--concurrency", "1", "--json", os.path.join(td, "r.json")]
         )
@@ -354,7 +354,7 @@ def test_session_forced_lift_skips_triage(session_clip, monkeypatch):
 
 def test_session_split_only_makes_no_model_calls(session_clip, capsys):
     video_path, _ = session_clip
-    with patch("app.services.nebius_client.requests.post", side_effect=AssertionError("no API call expected")):
+    with patch("server.services.nebius_client.requests.post", side_effect=AssertionError("no API call expected")):
         code = score_session.main([video_path, "--split-only"])
     assert code == 0
     out = capsys.readouterr().out
@@ -374,7 +374,7 @@ def test_session_reports_judge_failure_per_exercise(session_clip, monkeypatch):
             return _response("- bar drifts forward")
         return _response("I need to think about this more")  # never valid JSON
 
-    with patch("app.services.nebius_client.requests.post", side_effect=flaky):
+    with patch("server.services.nebius_client.requests.post", side_effect=flaky):
         code = score_session.main([video_path, "--concurrency", "1", "--json", os.path.join(td, "r.json")])
     # Nothing scored, but the run completes and records why.
     assert code == 6
@@ -401,7 +401,7 @@ def test_session_judge_fallback_model_is_used(session_clip, monkeypatch):
             return _response("still thinking")
         return _response(json_dumps_judgment(lift="snatch", score=6))
 
-    with patch("app.services.nebius_client.requests.post", side_effect=by_model):
+    with patch("server.services.nebius_client.requests.post", side_effect=by_model):
         code = score_session.main(
             [video_path, "--concurrency", "1", "--max-segments", "1", "--json", os.path.join(td, "r.json")]
         )
@@ -417,7 +417,7 @@ def test_session_cuts_clip_files(session_clip, monkeypatch):
     monkeypatch.setenv("NEBIUS_API_KEY", "test-key")
     out_dir = os.path.join(td, "cuts")
     fake = FakeNebius(triage_replies=[SNATCH_PATH], scores=[7])
-    with patch("app.services.nebius_client.requests.post", side_effect=fake):
+    with patch("server.services.nebius_client.requests.post", side_effect=fake):
         code = score_session.main(
             [video_path, "--out-dir", out_dir, "--max-segments", "1", "--concurrency", "1", "--no-frames"]
         )

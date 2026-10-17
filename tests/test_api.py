@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.services.jobs import JobStore, reset_store
+from server.services.jobs import JobStore, reset_store
 from tests.conftest import judge_reply, observation_reply, triage_reply, write_lift_video
 
 SNATCH_PATH = ["floor", "knees", "overhead", "overhead", "overhead", "overhead"]
@@ -21,7 +21,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("NEBIUS_API_KEY", "test-key")
     monkeypatch.setenv("MAX_UPLOAD_MB", "5")
     reset_store(JobStore(root=tmp_path / "jobs"))
-    from app.main import app
+    from server.main import app
 
     with TestClient(app) as test_client:
         yield test_client
@@ -37,7 +37,7 @@ def upload(client, clip, responses, **fields):
     data = {"lift": "snatch", "mode": "single"}
     data.update(fields)
     with open(clip, "rb") as handle:
-        with patch("app.services.nebius_client.requests.post", side_effect=responses):
+        with patch("server.services.nebius_client.requests.post", side_effect=responses):
             response = client.post(
                 "/api/jobs",
                 data=data,
@@ -218,7 +218,7 @@ def test_clean_and_jerk_comes_back_as_two_scored_lifts(client, clip):
 
 def test_mixed_clip_that_cannot_be_split_lowers_confidence(client, clip, monkeypatch):
     # AC-4: the 0.85-on-a-mixed-clip case must not happen again.
-    monkeypatch.setattr("app.services.pipeline.split_segment_at_valley", lambda *a, **k: None)
+    monkeypatch.setattr("server.services.pipeline.split_segment_at_valley", lambda *a, **k: None)
     _, payload = upload(
         client,
         clip,
@@ -258,7 +258,7 @@ def test_trim_window_is_passed_through(client, clip):
 
 
 def test_the_uploaded_clip_is_deleted_once_scoring_ends(client, clip):
-    from app.services.jobs import get_store
+    from server.services.jobs import get_store
 
     _, payload = upload(
         client,
@@ -292,7 +292,7 @@ def test_replay_for_an_unknown_lift_is_404(client, clip):
 def test_sync_endpoint_returns_one_verdict(client, clip):
     with open(clip, "rb") as handle:
         with patch(
-            "app.services.nebius_client.requests.post",
+            "server.services.nebius_client.requests.post",
             side_effect=[triage_reply(SNATCH_PATH), observation_reply(), judge_reply("snatch", 9, "elite", 0.9)],
         ):
             response = client.post(
@@ -310,7 +310,7 @@ def test_sync_endpoint_still_accepts_the_original_file_field(client, clip):
     # (triage, two observation chunks, judge).
     with open(clip, "rb") as handle:
         with patch(
-            "app.services.nebius_client.requests.post",
+            "server.services.nebius_client.requests.post",
             side_effect=[triage_reply(SNATCH_PATH), observation_reply(), observation_reply(), judge_reply()],
         ) as post:
             response = client.post(

@@ -15,7 +15,7 @@ from pathlib import Path
 import cv2  # type: ignore
 import numpy as np  # type: ignore
 
-STATIC_ICONS = Path(__file__).resolve().parent.parent / "app" / "static" / "icons"
+STATIC_ICONS = Path(__file__).resolve().parent.parent / "client" / "static" / "icons"
 
 # BGR, matching the palette in styles.css.
 STEEL = (18, 15, 12)        # #0c0f12 (--steel-900)

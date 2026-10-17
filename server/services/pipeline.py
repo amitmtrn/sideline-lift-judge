@@ -21,10 +21,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Protocol, Tuple
 
-from app.schemas.judgment import LiftJudgment, LiftType
-from app.schemas.segment import SegmentTriage
-from app.services.confidence import assess_clip_quality, apply_quality
-from app.services.nebius_client import (
+from server.schemas.judgment import LiftJudgment, LiftType
+from server.schemas.segment import SegmentTriage
+from server.services.confidence import assess_clip_quality, apply_quality
+from server.services.nebius_client import (
     NebiusChatClient,
     classify_segment,
     collect_observations,
@@ -33,17 +33,17 @@ from app.services.nebius_client import (
     vision_max_images,
     vision_model,
 )
-from app.services.replay import render_annotated_replay
-from app.utils.frames import sample_frames_in_range_bgr
-from app.utils.image_ops import frames_to_data_urls, prepare_frames
-from app.utils.segmentation import (
+from server.services.replay import render_annotated_replay
+from server.utils.frames import sample_frames_in_range_bgr
+from server.utils.image_ops import frames_to_data_urls, prepare_frames
+from server.utils.segmentation import (
     CandidateSegment,
     MotionProfile,
     compute_motion_profile,
     detect_segments,
     split_segment_at_valley,
 )
-from app.utils.video_meta import VideoInfo, probe_video
+from server.utils.video_meta import VideoInfo, probe_video
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +450,6 @@ def _encode_frames(frames, rotation_deg: int, long_side: int) -> List[str]:
 
 
 def _stamp(window: CandidateSegment) -> str:
-    from app.utils.clips import format_timestamp
+    from server.utils.clips import format_timestamp
 
     return f"{format_timestamp(window.start_sec)}–{format_timestamp(window.end_sec)}"

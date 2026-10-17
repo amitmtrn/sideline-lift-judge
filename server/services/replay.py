@@ -15,12 +15,12 @@ import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Sequence
 
-from app.utils.video_meta import probe_video
+from server.utils.video_meta import probe_video
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from app.schemas.judgment import LiftJudgment
+    from server.schemas.judgment import LiftJudgment
 
 # Fonts vary by host; the first that exists wins. Without any of them drawtext
 # cannot render, and we fall back to an un-annotated (but still playable) clip.

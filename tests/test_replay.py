@@ -5,8 +5,8 @@ import subprocess
 
 import pytest
 
-from app.schemas.judgment import LiftJudgment
-from app.services.replay import (
+from server.schemas.judgment import LiftJudgment
+from server.services.replay import (
     MAX_LONG_SIDE,
     _scale_filter,
     build_overlay_filters,
@@ -192,14 +192,14 @@ def test_rendered_replay_actually_carries_the_overlay(lift_video, tmp_path):
 
 @needs_ffmpeg
 def test_render_falls_back_when_the_font_is_missing(lift_video, tmp_path, monkeypatch):
-    monkeypatch.setattr("app.services.replay.find_font", lambda: None)
+    monkeypatch.setattr("server.services.replay.find_font", lambda: None)
     out = tmp_path / "plain.mp4"
     assert render_annotated_replay(lift_video, judgment(), str(out)) is not None
     assert out.exists()
 
 
 def test_render_without_ffmpeg_returns_none(lift_video, tmp_path, monkeypatch):
-    monkeypatch.setattr("app.services.replay.shutil.which", lambda name: None)
+    monkeypatch.setattr("server.services.replay.shutil.which", lambda name: None)
     assert render_annotated_replay(lift_video, judgment(), str(tmp_path / "none.mp4")) is None
 
 

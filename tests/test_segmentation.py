@@ -4,8 +4,8 @@ from typing import List, Tuple
 
 import numpy as np  # type: ignore
 
-from app.utils.clips import format_timestamp
-from app.utils.segmentation import (
+from server.utils.clips import format_timestamp
+from server.utils.segmentation import (
     MotionProfile,
     compute_motion_profile,
     detect_segments,
@@ -120,7 +120,7 @@ def test_empty_profile_yields_no_segments():
 
 
 def test_split_segment_at_valley_cuts_at_the_quiet_moment():
-    from app.utils.segmentation import CandidateSegment
+    from server.utils.segmentation import CandidateSegment
 
     times = [i * 0.1 for i in range(101)]
     # Two humps of motion with a trough at ~5.0s: a clean, then a jerk.
@@ -137,7 +137,7 @@ def test_split_segment_at_valley_cuts_at_the_quiet_moment():
 
 
 def test_split_segment_at_valley_refuses_short_window():
-    from app.utils.segmentation import CandidateSegment
+    from server.utils.segmentation import CandidateSegment
 
     profile = MotionProfile(times=[0.0, 0.5, 1.0], energy=[1.0, 0.2, 1.0], duration_sec=1.0, sample_fps=2.0)
     assert split_segment_at_valley(profile, CandidateSegment(index=1, start_sec=0.0, end_sec=1.5)) is None

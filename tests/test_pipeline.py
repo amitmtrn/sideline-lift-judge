@@ -4,9 +4,9 @@ from unittest.mock import patch
 
 import pytest
 
-from app.schemas.judgment import LiftType
-from app.services.nebius_client import NebiusChatClient
-from app.services.pipeline import (
+from server.schemas.judgment import LiftType
+from server.services.nebius_client import NebiusChatClient
+from server.services.pipeline import (
     DEFAULT_FRAMES,
     MAX_FRAMES,
     MIN_FRAMES,
@@ -34,7 +34,7 @@ def client() -> NebiusChatClient:
 
 def score(video, responses, **kwargs):
     request = ScoreRequest(video_path=video, **kwargs)
-    with patch("app.services.nebius_client.requests.post", side_effect=responses) as post:
+    with patch("server.services.nebius_client.requests.post", side_effect=responses) as post:
         outcome = run(run_scoring(request, client=client(), prompts_dir="prompts"))
     return outcome, post
 

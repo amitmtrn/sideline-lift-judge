@@ -2,7 +2,7 @@ import asyncio
 
 import pytest
 
-from app.utils.uploads import (
+from server.utils.uploads import (
     DEFAULT_MAX_UPLOAD_MB,
     UploadTooLarge,
     UnsupportedUpload,

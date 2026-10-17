@@ -11,8 +11,8 @@ import re
 from pydantic import ValidationError
 
 if TYPE_CHECKING:
-    from app.schemas.judgment import LiftJudgment
-    from app.schemas.segment import SegmentTriage
+    from server.schemas.judgment import LiftJudgment
+    from server.schemas.segment import SegmentTriage
 
 
 class ChatMessage(TypedDict, total=False):
@@ -191,7 +191,7 @@ async def classify_segment(
     a second failure returns an empty triage so one bad window cannot abort a
     whole session run.
     """
-    from app.schemas.segment import SegmentTriage, parse_triage_json
+    from server.schemas.segment import SegmentTriage, parse_triage_json
 
     messages = assemble_triage_messages(images=images, prompts_dir=prompts_dir)
     first = await client.create_chat_completion(
@@ -254,7 +254,7 @@ async def _judge_with_model(
     """
     One judge model, with a single repair retry when the reply is not valid JSON.
     """
-    from app.schemas.judgment import parse_and_validate_json
+    from server.schemas.judgment import parse_and_validate_json
 
     first = await client.create_chat_completion(
         messages=messages,

@@ -23,9 +23,9 @@ from typing import List, Optional
 
 from dotenv import load_dotenv
 
-from app.schemas.judgment import LiftType
-from app.services.nebius_client import NebiusChatClient
-from app.services.pipeline import (
+from server.schemas.judgment import LiftType
+from server.services.nebius_client import NebiusChatClient
+from server.services.pipeline import (
     DEFAULT_FRAMES,
     MAX_FRAMES,
     MIN_FRAMES,
