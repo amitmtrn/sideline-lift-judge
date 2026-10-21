@@ -26,3 +26,69 @@ def test_nebius_client_extracts_message_text():
         assert '"lift":"snatch"' in text
         _post.assert_called_once()
 
+
+
+def _reply(status, content='{"ok":true}'):
+    m = Mock()
+    m.status_code = status
+    m.text = content
+    m.json.return_value = {"choices": [{"message": {"content": content}}]}
+    return m
+
+
+def test_client_uses_a_connect_and_read_timeout(monkeypatch):
+    from server.services import nebius_client
+
+    monkeypatch.setenv("NEBIUS_TIMEOUT_SECONDS", "12")
+    client = NebiusChatClient(api_key="k", base_url="https://example.test/v1")
+    with patch("server.services.nebius_client.requests.post", return_value=_reply(200)) as post:
+        asyncio.run(client.create_chat_completion(messages=[{"role": "user", "content": "hi"}], model="m"))
+    assert post.call_args.kwargs["timeout"] == (nebius_client.CONNECT_TIMEOUT_SECONDS, 12.0)
+
+
+def test_a_busy_provider_gets_exactly_one_more_try(monkeypatch):
+    from server.services import nebius_client
+
+    monkeypatch.setattr(nebius_client, "RETRY_BACKOFF_SECONDS", 0.0)
+    client = NebiusChatClient(api_key="k", base_url="https://example.test/v1")
+    with patch("server.services.nebius_client.requests.post", side_effect=[_reply(503, "down"), _reply(200)]) as post:
+        text = asyncio.run(client.create_chat_completion(messages=[{"role": "user", "content": "hi"}], model="m"))
+    assert text == '{"ok":true}' and post.call_count == 2
+
+    with patch("server.services.nebius_client.requests.post", side_effect=[_reply(503, "down"), _reply(503, "down")]) as post:
+        import pytest
+
+        with pytest.raises(nebius_client.NebiusAPIError) as failure:
+            asyncio.run(client.create_chat_completion(messages=[{"role": "user", "content": "hi"}], model="m"))
+    assert failure.value.status == 503 and post.call_count == 2
+
+
+def test_only_an_unknown_parameter_drops_the_no_thinking_hint(monkeypatch):
+    from server.services import nebius_client
+
+    monkeypatch.setattr(nebius_client, "RETRY_BACKOFF_SECONDS", 0.0)
+    client = NebiusChatClient(api_key="k", base_url="https://example.test/v1")
+    extra = nebius_client.NO_THINKING_EXTRA_BODY
+    with patch("server.services.nebius_client.requests.post", side_effect=[_reply(400, "unknown field"), _reply(200)]) as post:
+        asyncio.run(client.create_chat_completion(messages=[{"role": "user", "content": "hi"}], model="m", extra_body=extra))
+    assert "chat_template_kwargs" in post.call_args_list[0].kwargs["json"]
+    assert "chat_template_kwargs" not in post.call_args_list[1].kwargs["json"]
+    # A 503 is not about the parameter: the retry keeps the hint.
+    with patch("server.services.nebius_client.requests.post", side_effect=[_reply(503, "down"), _reply(200)]) as post:
+        asyncio.run(client.create_chat_completion(messages=[{"role": "user", "content": "hi"}], model="m", extra_body=extra))
+    assert all("chat_template_kwargs" in call.kwargs["json"] for call in post.call_args_list)
+
+
+def test_judge_messages_carry_the_measurement_when_there_is_one():
+    from server.services.nebius_client import assemble_judge_messages
+
+    without = assemble_judge_messages(lift="snatch", observations="obs", prompts_dir="prompts")
+    with_measurement = assemble_judge_messages(
+        lift="snatch", observations="obs", prompts_dir="prompts", measurement="Bar-path measurement: 0.2 plate diameters"
+    )
+    assert len(with_measurement) == len(without) + 1
+    assert with_measurement[-1]["role"] == "user"
+    assert "0.2 plate diameters" in with_measurement[-1]["content"]
+    guidance = with_measurement[1]["content"]
+    assert "prefer the measurement" in guidance
+    assert "prefer the measurement" not in without[1]["content"]

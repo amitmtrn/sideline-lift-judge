@@ -131,7 +131,8 @@ def test_start_records_a_failure_instead_of_raising(store):
 
     run(drive())
     assert job.status == "error"
-    assert "upstream exploded" in job.error
+    # The phone gets a plain sentence, never the exception's text.
+    assert job.error and "upstream exploded" not in job.error
     # The clip is deleted whether the run succeeded or failed.
     assert not upload.exists()
 

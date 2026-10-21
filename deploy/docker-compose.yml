@@ -1,0 +1,41 @@
+# The app behind Caddy, which gets and renews the TLS certificate itself.
+#
+#   cp .env.example .env            # fill in NEBIUS_API_KEY and the demo caps
+#   DOMAIN=lift.example.com docker compose -f deploy/docker-compose.yml up -d --build
+#
+# DOMAIN must already point at this machine (an A record) and ports 80 and
+# 443 must be open; Caddy does the rest. One app replica, by design: jobs and
+# the demo counters live in the process.
+services:
+  app:
+    build:
+      context: ..
+    env_file:
+      - ../.env
+    environment:
+      PORT: "8000"
+    expose:
+      - "8000"
+    restart: unless-stopped
+    # The cached sample clip (tools/make_demo_sample.py), if you made one.
+    # volumes:
+    #   - ../demo_sample:/app/demo_sample:ro
+
+  caddy:
+    image: caddy:2.9
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the hostname judges will open}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  caddy_data:
+  caddy_config:

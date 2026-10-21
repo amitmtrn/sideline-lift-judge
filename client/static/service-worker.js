@@ -3,7 +3,9 @@
  * renders without a connection. Scoring itself needs the network, so nothing
  * under /api is ever cached — a stale verdict would be worse than an error.
  */
-const CACHE = "lift-judge-v1";
+// Bump this with every change to the shell files below: they are served
+// cache-first, so an installed app keeps the old script until the name changes.
+const CACHE = "lift-judge-v3";
 const SHELL = [
   "/",
   "/static/styles.css",

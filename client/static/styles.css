@@ -315,6 +315,52 @@ button:disabled {
   grid-template-columns: 1fr 1fr;
 }
 
+/* A text field: the access code, nothing else so far. */
+.field {
+  margin-top: 22px;
+}
+
+.field label {
+  display: block;
+  margin-bottom: 6px;
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--chalk-dim);
+}
+
+input[type="text"] {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 12px 14px;
+  font-family: var(--font-body);
+  font-size: 18px;
+  letter-spacing: 0.06em;
+  color: var(--chalk);
+  background: var(--steel-850);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+input[type="text"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+input[type="text"]::placeholder {
+  color: var(--chalk-faint);
+}
+
+.field-hint {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--chalk-faint);
+}
+
 /* The primary action sits where a thumb already is. */
 .dock {
   position: sticky;
@@ -638,6 +684,23 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .drift .k {
+  display: block;
+  margin-bottom: 2px;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--chalk-faint);
+}
+
+/* The tracker's own number, under the judge's words for the same drift. */
+.measured {
+  margin: 8px 0 0;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--chalk-dim);
+}
+
+.measured .k {
   display: block;
   margin-bottom: 2px;
   font-size: 11px;

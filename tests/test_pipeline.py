@@ -132,8 +132,12 @@ def test_split_lifts_are_noted_rather_than_penalised(lift_video):
         render_replay=False,
     )
     for item in outcome.scored:
-        assert item.judgment.confidence == 0.7
+        # The split itself never caps. On this tiny synthetic clip the tracker
+        # may not follow the block through a half, and that cap (0.65) is the
+        # only thing allowed to lower the judge's 0.7.
+        assert item.judgment.confidence == (0.7 if item.bar_path_tracked else 0.65)
         assert any("scored on its own" in warning for warning in item.judgment.warnings)
+        assert not any("more than one lift" in warning for warning in item.judgment.warnings)
 
 
 def test_triage_that_finds_nothing_falls_back_to_the_chosen_lift(lift_video):
@@ -181,7 +185,28 @@ def test_a_failing_judge_marks_only_that_lift(lift_video):
     )
     assert outcome.scored == []
     assert len(outcome.lifts) == 1
-    assert "Nebius API error 503" in outcome.lifts[0].error
+    # The user gets one plain sentence; the raw error is kept for logs and --debug.
+    failed = outcome.lifts[0]
+    assert "busy" in failed.error and "503" not in failed.error
+    assert "Nebius API error 503" in failed.error_detail
+
+
+def test_the_judge_is_given_the_tracker_measurement(lift_video):
+    from server.services.pipeline import ScoreRequest
+
+    responses = [triage_reply(SNATCH_PATH), observation_reply(), judge_reply("snatch", 7, "solid", 0.8)]
+    request = ScoreRequest(video_path=lift_video, lift=LiftType.snatch, render_replay=False)
+    with patch("server.services.nebius_client.requests.post", side_effect=responses) as post:
+        outcome = run(run_scoring(request, client=client(), prompts_dir="prompts"))
+    scored = outcome.scored[0]
+    assert scored.measurement is not None
+    judge_call = post.call_args_list[-1].kwargs["json"]
+    evidence = "\n".join(str(message["content"]) for message in judge_call["messages"])
+    assert "Bar-path measurement from the local plate tracker" in evidence
+    if scored.measurement.tracked:
+        assert "plate diameters" in evidence
+    else:
+        assert "NOT tracked" in evidence
 
 
 def test_trim_window_limits_what_is_judged(lift_video):
@@ -207,3 +232,62 @@ def test_observations_are_kept_only_when_asked(lift_video):
         keep_observations=True,
     )
     assert outcome.scored[0].observations == "Bar close throughout."
+
+
+# ---------- splitting a window triage calls a clean & jerk ----------
+
+
+def _window(start, end, index=1):
+    from server.utils.segmentation import CandidateSegment
+
+    return CandidateSegment(index=index, start_sec=start, end_sec=end)
+
+
+def _tracked(points):
+    from server.utils.bar_track import BarPoint, LiftWindow
+
+    return LiftWindow(
+        start_sec=points[0][0], end_sec=points[-1][0], rise=0.4, peak_sec=points[-1][0], radius=40,
+        points=[BarPoint(t=t, x=0.5, y=y) for t, y in points], frame_width=640, frame_height=1138,
+    )
+
+
+def _rise(t0, t1, y0, y1, n=20):
+    return [(t0 + (t1 - t0) * k / (n - 1), y0 + (y1 - y0) * k / (n - 1)) for k in range(n)]
+
+
+def _hold(t0, t1, y, n=10):
+    return [(t0 + (t1 - t0) * k / (n - 1), y) for k in range(n)]
+
+
+def test_two_rises_split_between_them():
+    from server.services.pipeline import _split_by_rises
+
+    tracked = _tracked(_rise(0, 1.5, 0.85, 0.5) + _hold(1.5, 4.0, 0.5) + _rise(4.0, 5.0, 0.5, 0.2) + _hold(5.0, 6.0, 0.2))
+    parts, lifts = _split_by_rises(_window(0.0, 6.0), tracked, [LiftType.clean, LiftType.jerk])
+    assert [l.value for l in lifts] == ["clean", "jerk"]
+    assert len(parts) == 2
+    cut = parts[0].end_sec
+    assert 1.5 < cut < 4.0  # between the clean's top and the jerk's drive
+    assert parts[1].start_sec == cut
+
+
+def test_one_rise_is_left_to_the_valley_split():
+    from server.services.pipeline import _split_by_rises
+
+    tracked = _tracked(_rise(0, 1.5, 0.85, 0.4) + _hold(1.5, 4.0, 0.4))
+    parts, lifts = _split_by_rises(_window(0.0, 4.0), tracked, [LiftType.clean, LiftType.jerk])
+    assert parts == []
+    assert len(lifts) == 2  # caller decides, with the motion profile
+
+
+def test_a_second_rise_too_short_to_be_a_lift_does_not_split():
+    from server.services.pipeline import MIN_SPLIT_PART, _split_by_rises
+
+    # Second rise right at the end: the "jerk" part would be 0.6 s long, so the
+    # window stays whole and is sized as one lift by its total travel.
+    tracked = _tracked(_rise(0, 1.5, 0.85, 0.5) + _hold(1.5, 3.0, 0.5) + _rise(3.0, 3.4, 0.5, 0.2, n=6))
+    parts, lifts = _split_by_rises(_window(0.0, 3.6), tracked, [LiftType.clean, LiftType.jerk])
+    assert parts == [] and len(lifts) == 2
+    assert MIN_SPLIT_PART > 0.6
+

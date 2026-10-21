@@ -35,6 +35,7 @@ from server.utils.clips import cut_segment, format_timestamp, has_ffmpeg, write_
 from server.utils.frames import sample_frames_in_range_bgr
 from server.utils.image_ops import frames_to_data_urls, prepare_frames
 from server.utils.video_meta import probe_video, rotation_still_needed
+from server.utils.bar_track import detect_lift_windows
 from server.utils.segmentation import (
     DEFAULT_MAX_DURATION,
     DEFAULT_MERGE_GAP,
@@ -283,24 +284,34 @@ async def run(args: argparse.Namespace) -> int:
         print(f"ERROR: no such file: {video_path}", file=sys.stderr)
         return 2
 
-    # Stage 0a: motion scan (local, no API cost)
+    # Stage 0a: find the lifts locally, no API cost. The motion profile is
+    # still needed to split a clean & jerk at its quiet moment; the windows
+    # themselves come from where the plate rises, the same as the web app.
     profile = compute_motion_profile(video_path, sample_fps=args.sample_fps)
     if not profile and profile.duration_sec <= 0:
         print("ERROR: could not decode the video.", file=sys.stderr)
         return 3
-    segments = detect_segments(
-        profile,
-        sensitivity=args.sensitivity,
-        min_duration=args.min_duration,
-        max_duration=args.max_duration,
-        merge_gap=args.merge_gap,
-        pad=args.pad,
-        max_segments=args.max_segments,
-    )
+    rises = detect_lift_windows(video_path, duration_sec=profile.duration_sec, max_windows=args.max_segments or 8)
+    segments = [
+        CandidateSegment(index=position, start_sec=w.start_sec, end_sec=w.end_sec, peak_sec=w.peak_sec)
+        for position, w in enumerate(rises, start=1)
+    ]
+    how = "Bar tracking"
+    if not segments:
+        how = "Motion scan (nothing tracked)"
+        segments = detect_segments(
+            profile,
+            sensitivity=args.sensitivity,
+            min_duration=args.min_duration,
+            max_duration=args.max_duration,
+            merge_gap=args.merge_gap,
+            pad=args.pad,
+            max_segments=args.max_segments,
+        )
     if not segments:
         print("No exercise windows found. Try a lower --sensitivity or --min-duration.", file=sys.stderr)
         return 4
-    print(f"Motion scan: {len(segments)} candidate window(s) in {format_timestamp(profile.duration_sec)}", file=sys.stderr)
+    print(f"{how}: {len(segments)} candidate window(s) in {format_timestamp(profile.duration_sec)}", file=sys.stderr)
 
     if args.split_only:
         print_segment_table(segments)

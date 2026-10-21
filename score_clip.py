@@ -173,6 +173,8 @@ async def run(args: argparse.Namespace) -> int:
     for item in outcome.lifts:
         if item.error:
             print(f"WARNING: {item.lift.value}: {item.error}", file=sys.stderr)
+            if args.debug and item.error_detail:
+                print(f"         {item.error_detail}", file=sys.stderr)
     return 0 if outcome.scored else 6
 
 

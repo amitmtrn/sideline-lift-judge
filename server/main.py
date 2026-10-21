@@ -11,19 +11,30 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from server.schemas.judgment import LiftType
+from server.services.demo_guard import (
+    DemoRefused,
+    access_required,
+    check_access,
+    client_ip,
+    enforce_clip_length,
+    get_guard,
+    max_clip_seconds,
+)
+from server.services.errors import UserFacingError
 from server.services.jobs import Job, get_store, job_ttl_seconds
-from server.services.nebius_client import NebiusChatClient
+from server.services.nebius_client import NebiusChatClient, judge_display_name
 from server.services.pipeline import (
     DEFAULT_FRAMES,
-    MAX_FRAMES,
     MIN_FRAMES,
-    ScoreOutcome,
     ScoreRequest,
-    ScoredLift,
     TrimError,
     clamp_frames,
+    max_frames,
+    resolve_trim,
     run_scoring,
 )
+from server.services.results import lift_payload, outcome_payload
+from server.services.sample import load_sample
 from server.utils.uploads import (
     UnsupportedUpload,
     UploadTooLarge,
@@ -68,6 +79,20 @@ class ConfigurationError(RuntimeError):
     """Server-side misconfiguration; surfaced as a plain message, never a stack trace."""
 
 
+@app.exception_handler(DemoRefused)
+async def demo_refused(_: Request, exc: DemoRefused) -> JSONResponse:
+    """
+    A demo limit, as one plain sentence plus a reason the page can act on
+    (offer the sample clip, ask for the access code) and a Retry-After.
+    """
+    headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+    return JSONResponse(
+        status_code=exc.status,
+        content={"detail": exc.detail, "reason": exc.reason},
+        headers=headers,
+    )
+
+
 def get_client() -> NebiusChatClient:
     api_key = os.getenv("NEBIUS_API_KEY")
     if not api_key:
@@ -85,9 +110,13 @@ async def index(request: Request):
             "default_lift": "snatch",
             "lifts": LIFT_CHOICES,
             "min_frames": MIN_FRAMES,
-            "max_frames": MAX_FRAMES,
+            "max_frames": max_frames(),
             "default_frames": DEFAULT_FRAMES,
             "max_upload_mb": max_upload_bytes() // (1024 * 1024),
+            "max_clip_seconds": max_clip_seconds(),
+            "access_required": access_required(),
+            "sample_available": load_sample() is not None,
+            "judge_name": judge_display_name(),
         },
     )
 
@@ -140,6 +169,11 @@ def _parse_lift(value: Optional[str]) -> Optional[LiftType]:
         raise HTTPException(status_code=400, detail=f"Unknown lift: {value}. Choose snatch, clean or jerk.")
 
 
+def _access_code(request: Request, form_value: Optional[str]) -> Optional[str]:
+    """The page sends the code as a header; scripts may send it as a form field."""
+    return request.headers.get("x-access-code") or form_value
+
+
 async def _store_upload(upload: UploadFile, destination_dir: Optional[Path] = None) -> Path:
     if not is_supported_video_upload(upload.content_type, upload.filename):
         raise HTTPException(
@@ -158,42 +192,22 @@ async def _store_upload(upload: UploadFile, destination_dir: Optional[Path] = No
         raise HTTPException(status_code=400, detail=str(exc))
 
 
-def _lift_payload(item: ScoredLift, *, job_id: Optional[str] = None) -> Dict[str, Any]:
-    body: Dict[str, Any] = {
-        "index": item.index,
-        "lift": item.lift.value,
-        "start_sec": item.start_sec,
-        "end_sec": item.end_sec,
-        "was_split": item.was_split,
-        "bar_path_tracked": item.bar_path_tracked,
-    }
-    if item.error:
-        body["error"] = item.error
-    if item.judgment is not None:
-        body.update(item.judgment.model_dump())
-        if item.replay_path and job_id:
-            body["annotated_video_url"] = f"/api/jobs/{job_id}/replay/{item.index}.mp4"
-        else:
-            body["annotated_video_url"] = None
-    if item.observations:
-        body["observations"] = item.observations
-    return body
-
-
-def _outcome_payload(outcome: ScoreOutcome, *, job_id: Optional[str] = None) -> Dict[str, Any]:
-    return {
-        "lifts": [_lift_payload(item, job_id=job_id) for item in outcome.lifts],
-        "split_detected": outcome.split_detected,
-        "candidate_windows": outcome.candidate_windows,
-        "skipped": outcome.skipped,
-        "duration_sec": round(outcome.duration_sec, 2),
-        "start_sec": round(outcome.start_sec, 2),
-        "end_sec": round(outcome.end_sec, 2),
-    }
+def _check_window(source: Path, start: Optional[float], end: Optional[float]) -> None:
+    """
+    Validate the trim window against the clip now, so the user hears about it
+    immediately, and hold it to the demo's clip-length cap.
+    """
+    info = probe_video(str(source))
+    try:
+        window_start, window_end, _ = resolve_trim(duration_sec=info.duration_sec, trim_start=start, trim_end=end)
+    except TrimError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    enforce_clip_length(window_start, window_end)
 
 
 @app.post("/api/jobs")
 async def create_job(
+    request: Request,
     video: Optional[UploadFile] = File(default=None),
     file: Optional[UploadFile] = File(default=None),
     lift: Optional[str] = Form(default=None),
@@ -203,11 +217,13 @@ async def create_job(
     frames: Optional[int] = Form(default=None),
     num_frames: Optional[int] = Form(default=None),
     debug: bool = Form(default=False),
+    access_code: Optional[str] = Form(default=None),
 ):
     """
     Accept a clip and start scoring in the background (spec §13). Returns the job
     id to poll, so a slow or dropped mobile connection cannot lose the result.
     """
+    check_access(_access_code(request, access_code))
     upload = _resolve_upload(video, file)
     selected_lift = _parse_lift(lift)
     start = _parse_optional_float(trim_start, "Trim start")
@@ -221,15 +237,19 @@ async def create_job(
         raise HTTPException(status_code=503, detail=str(exc))
 
     store = get_store()
+    guard = get_guard()
     job = store.create()
     try:
         source = await _store_upload(upload, job.workdir)
-    except HTTPException:
-        store.purge_expired(ttl=0)
+        job.source_path = source
+        _check_window(source, start, end)
+        # Everything free has passed; only now does the clip count against the
+        # caller's allowance, so a rejected window never costs them a turn.
+        guard.admit(client_ip(request))
+    except (HTTPException, DemoRefused):
+        store.discard(job)
         raise
-    job.source_path = source
 
-    info = probe_video(str(source))
     request_model = ScoreRequest(
         video_path=str(source),
         lift=selected_lift,
@@ -241,33 +261,30 @@ async def create_job(
         replay_dir=str(job.workdir),
         keep_observations=bool(debug),
     )
-    # Validate the trim window now so the user hears about it immediately.
-    try:
-        from server.services.pipeline import resolve_trim
-
-        resolve_trim(duration_sec=info.duration_sec, trim_start=start, trim_end=end)
-    except TrimError as exc:
-        store.purge_expired(ttl=0)
-        raise HTTPException(status_code=400, detail=str(exc))
 
     async def runner(current: Job) -> None:
-        outcome = await run_scoring(
-            request_model,
-            client=client,
-            prompts_dir=str(PROMPTS_DIR),
-            progress=current.set_progress,
-        )
-        current.replays = {
-            item.index: Path(item.replay_path) for item in outcome.lifts if item.replay_path
-        }
-        current.payload = _outcome_payload(outcome, job_id=current.id)
-        if not outcome.scored:
-            first_error = next((item.error for item in outcome.lifts if item.error), None)
-            if first_error:
-                raise RuntimeError(first_error)
-            current.set_progress("done", "No snatch, clean or jerk found in this clip.", 1.0)
-            return
-        current.set_progress("done", "Done.", 1.0)
+        try:
+            outcome = await run_scoring(
+                request_model,
+                client=client,
+                prompts_dir=str(PROMPTS_DIR),
+                progress=current.set_progress,
+            )
+            current.replays = {
+                item.index: Path(item.replay_path) for item in outcome.lifts if item.replay_path
+            }
+            current.payload = outcome_payload(
+                outcome, replay_url=lambda index: f"/api/jobs/{current.id}/replay/{index}.mp4"
+            )
+            if not outcome.scored:
+                first_error = next((item.error for item in outcome.lifts if item.error), None)
+                if first_error:
+                    raise UserFacingError(first_error)
+                current.set_progress("done", "No snatch, clean or jerk found in this clip.", 1.0)
+                return
+            current.set_progress("done", "Done.", 1.0)
+        finally:
+            guard.release()
 
     store.start(job, runner)
     return JSONResponse(status_code=202, content={"id": job.id, "poll_url": f"/api/jobs/{job.id}"})
@@ -301,8 +318,38 @@ async def read_replay(job_id: str, index: int):
     )
 
 
+@app.get("/api/sample")
+async def read_sample():
+    """
+    The cached, pre-scored sample clip: free to serve, no access code, not
+    counted against any limit. What a judge sees when the budget is spent.
+    """
+    sample = load_sample()
+    if sample is None:
+        raise HTTPException(status_code=404, detail="No sample clip is set up on this server.")
+    return JSONResponse(content=sample.payload)
+
+
+@app.get("/api/sample/replay/{index}.mp4")
+async def read_sample_replay(index: int):
+    sample = load_sample()
+    path = sample.replays.get(index) if sample is not None else None
+    if path is None:
+        raise HTTPException(status_code=404, detail="No replay for that sample lift.")
+    return FileResponse(
+        path,
+        media_type="video/mp4",
+        headers={
+            "Content-Disposition": f'inline; filename="sample-lift-{index}.mp4"',
+            # The same file every time: let the phone keep it.
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
 @app.post("/api/score")
 async def score_endpoint(
+    request: Request,
     video: Optional[UploadFile] = File(default=None),
     file: Optional[UploadFile] = File(default=None),
     lift: Optional[str] = Form(default=None),
@@ -312,19 +359,26 @@ async def score_endpoint(
     frames: Optional[int] = Form(default=None),
     num_frames: Optional[int] = Form(default=None),
     debug: bool = Form(default=False),
+    access_code: Optional[str] = Form(default=None),
 ):
     """
     Synchronous scoring: one request, one verdict. Kept for scripts and for
     parity with the CLI; the web UI uses /api/jobs so it can show progress.
     """
+    check_access(_access_code(request, access_code))
     upload = _resolve_upload(video, file)
     selected_lift = _parse_lift(lift)
     start = _parse_optional_float(trim_start, "Trim start")
     end = _parse_optional_float(trim_end, "Trim end")
 
     source = await _store_upload(upload)
+    guard = get_guard()
+    admitted = False
     try:
         client = get_client()
+        _check_window(source, start, end)
+        guard.admit(client_ip(request))
+        admitted = True
         outcome = await run_scoring(
             ScoreRequest(
                 video_path=str(source),
@@ -346,14 +400,14 @@ async def score_endpoint(
                 status_code=422,
                 detail=first_error or "No snatch, clean or jerk could be scored in this clip.",
             )
-        payload = _outcome_payload(outcome)
+        payload = outcome_payload(outcome)
         # One lift stays backwards compatible: the verdict is the top-level body.
         if len(scored) == 1 and len(outcome.lifts) == 1:
-            body = _lift_payload(scored[0])
+            body = lift_payload(scored[0])
             body["split_detected"] = outcome.split_detected
             return JSONResponse(content=body)
         return JSONResponse(content=payload)
-    except HTTPException:
+    except (HTTPException, DemoRefused):
         raise
     except TrimError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -366,6 +420,8 @@ async def score_endpoint(
             detail="Scoring failed. The model service may be busy — wait a moment and try the clip again.",
         ) from exc
     finally:
+        if admitted:
+            guard.release()
         Path(source).unlink(missing_ok=True)
 
 

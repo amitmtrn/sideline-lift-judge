@@ -65,6 +65,24 @@
             </label>
           </div>
 
+          <div class="field" id="access-field" {% if not access_required %}hidden{% endif %}>
+            <label for="access-code">Access code</label>
+            <input
+              id="access-code"
+              type="text"
+              inputmode="text"
+              autocomplete="off"
+              autocapitalize="characters"
+              spellcheck="false"
+              placeholder="From the submission page"
+            />
+            <p class="field-hint">
+              Scoring is gated so the model budget lasts for the judges. The code is on the submission
+              page, or open the link that already carries it.
+            </p>
+          </div>
+          <p id="access-error" class="notice" hidden></p>
+
           <div class="dock">
             <button type="button" data-go="guide">Next</button>
           </div>
@@ -98,8 +116,14 @@
           <div class="actions">
             <button type="button" data-pick="camera">🎥 Film now</button>
             <button type="button" class="ghost" data-pick="gallery">🖼 Upload from gallery</button>
+            {% if sample_available %}
+            <button type="button" class="ghost" data-action="sample">▶ Try a sample clip</button>
+            {% endif %}
             <button type="button" class="ghost" data-go="lift">Back</button>
           </div>
+          {% if sample_available %}
+          <p class="field-hint">The sample is already scored: it shows the whole result at no model cost.</p>
+          {% endif %}
           <p id="pick-error" class="notice" hidden></p>
         </section>
 
@@ -127,6 +151,7 @@
           </div>
 
           <p id="size-warning" class="notice hint" hidden></p>
+          <p id="cap-warning" class="notice" hidden></p>
 
           <div class="actions pair">
             <button type="button" class="ghost" data-action="preview-window">▶ Preview</button>
@@ -157,6 +182,9 @@
           <p id="progress-error" class="notice" hidden></p>
           <div class="actions" id="progress-actions" hidden>
             <button type="button" class="ghost" data-action="retry">Try again</button>
+            {% if sample_available %}
+            <button type="button" class="ghost" data-action="sample">▶ Watch the sample clip instead</button>
+            {% endif %}
             <button type="button" class="ghost" data-go="lift">Start over</button>
           </div>
         </section>
@@ -166,8 +194,9 @@
           <h2 id="result-title" class="sr-only">Result</h2>
           <div id="results"></div>
           <p class="disclaimer">
-            Scores are indicative. They read bar path from sampled frames, not from pose tracking,
-            and a clip that is angled, dark or holds more than one lift lowers the confidence above.
+            Scores are indicative. They combine a vision model's read of sampled frames with a
+            drift tracked from one plate, scaled by its size and not calibrated to the scene. A clip
+            that is angled, dark or holds more than one lift lowers the confidence above.
           </p>
           <div class="dock">
             <button type="button" data-go="lift">Score another lift</button>
@@ -177,7 +206,7 @@
 
       <footer>
         <span id="install-hint" hidden>Add to Home Screen for a full-screen app. </span>
-        Two-stage pipeline on Nebius Token Factory · judged by NVIDIA Nemotron 3 Ultra ·
+        Two-stage pipeline on Nebius Token Factory · judged by {{ judge_name }} ·
         <a href="https://github.com/amitmtrn/sideline-lift-judge">source (MIT)</a>
       </footer>
     </div>
@@ -187,7 +216,10 @@
         maxUploadMb: {{ max_upload_mb }},
         defaultFrames: {{ default_frames }},
         minFrames: {{ min_frames }},
-        maxFrames: {{ max_frames }}
+        maxFrames: {{ max_frames }},
+        maxClipSeconds: {{ max_clip_seconds }},
+        accessRequired: {{ "true" if access_required else "false" }},
+        sampleAvailable: {{ "true" if sample_available else "false" }}
       };
     </script>
     <script src="/static/app.js"></script>

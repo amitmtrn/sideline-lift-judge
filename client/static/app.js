@@ -10,6 +10,10 @@
 
   const CONFIG = window.LIFT_JUDGE_CONFIG || {};
   const MAX_UPLOAD_MB = CONFIG.maxUploadMb || 200;
+  // Demo caps, all optional: 0 means no clip-length cap, false means no code.
+  const MAX_CLIP_SECONDS = Number(CONFIG.maxClipSeconds) || 0;
+  const ACCESS_REQUIRED = Boolean(CONFIG.accessRequired);
+  const ACCESS_CODE_KEY = "liftJudgeAccessCode";
   const POLL_INTERVAL_MS = 1400;
   const STAGE_ORDER = ["uploading", "splitting", "observing", "judging", "rendering"];
   const STAGE_INDEX = {
@@ -30,6 +34,7 @@
     start: 0,
     end: 0,
     trimAvailable: true,
+    capHintShown: false,
     jobId: null,
     polling: null,
     previewTimer: null,
@@ -41,6 +46,54 @@
   const preview = $("#preview");
   const startSlider = $("#trim-start");
   const endSlider = $("#trim-end");
+  const accessInput = $("#access-code");
+
+  /* ---------- Access code ---------- */
+
+  // Judges get a link with ?code=… in it. Keep the code on the device and take
+  // it out of the address bar so it is not in every screenshot and share.
+  function storedAccessCode() {
+    try {
+      return window.localStorage.getItem(ACCESS_CODE_KEY) || "";
+    } catch (error) {
+      return "";
+    }
+  }
+
+  function rememberAccessCode(code) {
+    try {
+      if (code) window.localStorage.setItem(ACCESS_CODE_KEY, code);
+      else window.localStorage.removeItem(ACCESS_CODE_KEY);
+    } catch (error) {
+      /* private mode: the field still holds it for this visit */
+    }
+  }
+
+  function adoptAccessCodeFromUrl() {
+    const url = new URL(window.location.href);
+    const fromUrl = (url.searchParams.get("code") || "").trim();
+    if (fromUrl) {
+      rememberAccessCode(fromUrl);
+      url.searchParams.delete("code");
+      window.history.replaceState(null, "", url.pathname + (url.search || "") + url.hash);
+    }
+    if (accessInput) accessInput.value = fromUrl || storedAccessCode();
+  }
+
+  function currentAccessCode() {
+    const code = accessInput ? accessInput.value.trim() : storedAccessCode();
+    rememberAccessCode(code);
+    return code;
+  }
+
+  function askForAccessCode(message) {
+    $("#access-field").hidden = false;
+    fail($("#access-error"), message);
+    show("lift");
+    if (accessInput) accessInput.focus();
+  }
+
+  adoptAccessCodeFromUrl();
 
   /* ---------- Navigation ---------- */
 
@@ -74,6 +127,9 @@
       case "retry":
         submit();
         break;
+      case "sample":
+        loadSample();
+        break;
     }
   });
 
@@ -100,6 +156,8 @@
     $("#results").textContent = "";
     hide($("#progress-error"));
     hide($("#pick-error"));
+    hide($("#access-error"));
+    hide($("#cap-warning"));
     $("#progress-actions").hidden = true;
   }
 
@@ -168,6 +226,16 @@
         $("#size-warning"),
         "Could not read this clip's length in the browser — it will be scored whole unless you trim it on the server."
       );
+    } else if (MAX_CLIP_SECONDS && duration > MAX_CLIP_SECONDS + 0.05) {
+      // Start inside the cap so the first thing the user does is slide to the
+      // lift, not read a refusal.
+      state.end = MAX_CLIP_SECONDS;
+      endSlider.value = String(MAX_CLIP_SECONDS);
+      state.capHintShown = true;
+      fail(
+        $("#size-warning"),
+        `This demo scores up to ${MAX_CLIP_SECONDS} s at a time, so the end handle starts at ${MAX_CLIP_SECONDS} s. Drag both handles to the one lift.`
+      );
     }
     renderWindow();
   });
@@ -220,11 +288,29 @@
     $("#start-value").textContent = stamp(state.start);
     $("#end-value").textContent = stamp(state.end);
     const length = Math.max(0, state.end - state.start);
-    $("#window-length").textContent = `${length.toFixed(1)} s selected`;
+    $("#window-length").textContent = MAX_CLIP_SECONDS
+      ? `${length.toFixed(1)} s selected · max ${MAX_CLIP_SECONDS} s`
+      : `${length.toFixed(1)} s selected`;
     const total = state.duration || 1;
     const selection = $("#window-sel");
     selection.style.left = `${(state.start / total) * 100}%`;
     selection.style.width = `${Math.max(1, (length / total) * 100)}%`;
+
+    // The server refuses a window over the cap; say so here, before the upload.
+    const overCap = Boolean(MAX_CLIP_SECONDS) && state.trimAvailable && state.duration > 0 && length > MAX_CLIP_SECONDS + 0.05;
+    const scoreButton = document.querySelector('[data-action="score"]');
+    if (scoreButton) scoreButton.disabled = overCap;
+    if (overCap) {
+      if (state.capHintShown) {
+        // The hint has done its job; let the warning take its place rather
+        // than stack beneath it, under the sticky button.
+        hide($("#size-warning"));
+        state.capHintShown = false;
+      }
+      fail($("#cap-warning"), `${length.toFixed(1)} s selected — bring it under ${MAX_CLIP_SECONDS} s to score it.`);
+    } else {
+      hide($("#cap-warning"));
+    }
   }
 
   function playWindow() {
@@ -262,6 +348,11 @@
       show("guide");
       return;
     }
+    const accessCode = currentAccessCode();
+    if (ACCESS_REQUIRED && !accessCode) {
+      askForAccessCode("Enter the access code first — it is on the submission page.");
+      return;
+    }
     hide($("#progress-error"));
     $("#progress-actions").hidden = true;
     setStage("uploading", "Uploading the clip…", 0.02);
@@ -283,6 +374,7 @@
 
     const request = new XMLHttpRequest();
     request.open("POST", "/api/jobs");
+    if (accessCode) request.setRequestHeader("X-Access-Code", accessCode);
     request.upload.addEventListener("progress", (event) => {
       if (!event.lengthComputable) return;
       setStage("uploading", "Uploading the clip…", 0.02 + 0.16 * (event.loaded / event.total));
@@ -298,6 +390,8 @@
         state.jobId = payload.id;
         setStage("splitting", "Reading the clip…", 0.2);
         poll();
+      } else if (payload.reason === "access_code") {
+        askForAccessCode(payload.detail || "This demo needs an access code.");
       } else {
         showFailure(payload.detail || `Upload failed (HTTP ${request.status}).`);
       }
@@ -368,6 +462,33 @@
     show("progress");
   }
 
+  /* ---------- The cached sample clip ---------- */
+
+  // Scored once ahead of time and served from disk: no model call, no code,
+  // not counted against any limit. What a judge sees when the budget is spent.
+  async function loadSample() {
+    stopPolling();
+    state.jobId = null;
+    hide($("#progress-error"));
+    $("#progress-actions").hidden = true;
+    setStage("done", "Loading the sample…", 1);
+    show("progress");
+    let payload;
+    try {
+      const response = await fetch("/api/sample", { cache: "no-store" });
+      payload = await response.json();
+      if (!response.ok) {
+        showFailure(payload.detail || "The sample clip is not available right now.");
+        return;
+      }
+    } catch (error) {
+      showFailure("Could not load the sample clip. Check your connection and try again.");
+      return;
+    }
+    renderResults(payload);
+    show("result");
+  }
+
   /* ---------- Rendering the verdict ---------- */
 
   function element(tag, className, text) {
@@ -381,6 +502,18 @@
     const container = $("#results");
     container.textContent = "";
     const lifts = Array.isArray(payload.lifts) ? payload.lifts : [];
+
+    if (payload.sample) {
+      const banner = element("div", "split-banner");
+      banner.appendChild(element("span", "icon", "▶"));
+      const text = element("span");
+      text.appendChild(element("b", null, "Sample clip. "));
+      text.appendChild(
+        document.createTextNode("Scored earlier and cached — nothing was sent to the model just now.")
+      );
+      banner.appendChild(text);
+      container.appendChild(banner);
+    }
 
     if (payload.split_detected) {
       const banner = element("div", "split-banner");
@@ -448,6 +581,9 @@
       card.appendChild(drift);
     }
 
+    const measured = measurementLine(item.bar_path);
+    if (measured) card.appendChild(measured);
+
     card.appendChild(confidenceBlock(item.confidence));
 
     if (Array.isArray(item.warnings) && item.warnings.length) {
@@ -492,6 +628,24 @@
       card.appendChild(replayBlock(item));
     }
     return card;
+  }
+
+  // What the plate tracker measured, in plate widths — the one length whose
+  // real size is known in every clip. The same numbers went to the judge and
+  // drew the trace on the replay, so the text and the orange ring agree.
+  function measurementLine(barPath) {
+    if (!barPath || !barPath.tracked || barPath.max_drift_plate_diameters == null) return null;
+    const line = element("p", "measured");
+    line.appendChild(element("span", "k", "Tracked"));
+    const diameters = Number(barPath.max_drift_plate_diameters);
+    let text = `Bar strayed ${diameters.toFixed(2)} plate widths from its start line`;
+    if (barPath.max_drift_cm_estimate != null) text += ` (≈${barPath.max_drift_cm_estimate} cm for a 450 mm plate)`;
+    if (barPath.drift_at_rise_fraction != null) {
+      text += `, ${Math.round(barPath.drift_at_rise_fraction * 100)}% of the way up`;
+    }
+    if (barPath.coverage != null) text += `. Plate seen in ${Math.round(barPath.coverage * 100)}% of frames.`;
+    line.appendChild(document.createTextNode(text));
+    return line;
   }
 
   function confidenceBlock(confidence) {

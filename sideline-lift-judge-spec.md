@@ -252,18 +252,26 @@ All of this runs on Nebius Token Factory, with an NVIDIA Nemotron model as the j
  FastAPI + Jinja (mobile-first templates, PWA manifest, service worker)
    │
    ├─► Video prep (ffmpeg / OpenCV)
-   │     trim → rotation normalize → sample 8–16 frames → resize ~768px
+   │     trim → rotation normalize → find the lift(s): follow the plate and
+   │     window each rise (server/utils/bar_track.py) → sample 8–16 frames
+   │     from the window → resize ~768px
    │
    ├─► Stage 1 — Vision  (Token Factory)
    │     NEBIUS_VISION_MODEL = openbmb/MiniCPM-V-4_5
    │     prompt: vision_observation.txt  · ≤10 images/request, chunked
    │     → per-phase bar-path observation (think-tags stripped)
    │
+   ├─► Bar-path measurement (local, from the tracked plate)
+   │     max drift in plate diameters, where in the rise, coverage
+   │     → an evidence block for the judge (services/measurement.py)
+   │
    ├─► Stage 2 — Judge  (Token Factory, NVIDIA open model)
    │     NEBIUS_JUDGE_MODEL = nvidia/Nemotron-3-Ultra-550b-a55b
    │     fallback: nvidia/nemotron-3-super-120b-a12b
    │     prompts: system.txt + user_snatch|clean|jerk.txt
+   │     evidence: Stage-1 observations + the measurement
    │     → Pydantic-validated JSON verdict
+   │     → re-check: verdict vs. measurement caps confidence (confidence.py)
    │
    ├─► Annotated replay renderer (ffmpeg)
    │     trimmed clip + score/cue overlays → MP4 H.264 yuv420p faststart
@@ -271,7 +279,7 @@ All of this runs on Nebius Token Factory, with an NVIDIA Nemotron model as the j
    └─► Result page (score, band, drift, confidence, cues, notes, replay, share)
 ```
 
-**Key code:** `server/` holds the Python app (`services/nebius_client.py` is the Token Factory client for both stages, `services/pipeline.py` the run, `utils/frames.py` the sampler); `client/` holds everything served to the browser (`templates/`, `static/`); `prompts/` holds the model prompts (`system.txt`, `user_snatch.txt`, `user_clean.txt`, `user_jerk.txt`, `vision_observation.txt`, `vision_triage.txt`); `score_clip.py` and `score_session.py` are the CLIs; `tests/`.
+**Key code:** `server/` holds the Python app (`services/nebius_client.py` is the Token Factory client for both stages, `services/pipeline.py` the run, `utils/bar_track.py` the plate tracker that both finds the lifts and draws the trace, `utils/frames.py` the sampler); `client/` holds everything served to the browser (`templates/`, `static/`); `prompts/` holds the model prompts (`system.txt`, `user_snatch.txt`, `user_clean.txt`, `user_jerk.txt`, `vision_observation.txt`, `vision_triage.txt`); `score_clip.py` and `score_session.py` are the CLIs; `tests/`.
 
 **Deployment (Oct 20):** host the FastAPI app behind HTTPS (required for camera access and PWA install) and point it at Token Factory. Requests run as async jobs with polling so slow mobile connections don't time out.
 
@@ -287,8 +295,15 @@ All of this runs on Nebius Token Factory, with an NVIDIA Nemotron model as the j
 | `NEBIUS_JUDGE_MAX_TOKENS` | Judge completion budget | `2048` |
 | `MAX_UPLOAD_MB` | Upload ceiling; `0` disables | `200` |
 | `JOB_TTL_SECONDS` | How long a job and its replay are kept | `1800` |
+| `DEMO_ACCESS_CODE` | Gate scoring behind a code (comma-separate several); off when unset | — |
+| `DEMO_DAILY_LIMIT` | Clips scored per UTC day, everyone; off when unset | `50` |
+| `DEMO_IP_HOURLY_LIMIT` | Clips per address per rolling hour; off when unset | `3` |
+| `MAX_CONCURRENT_JOBS` | Scoring runs in flight at once; off when unset | `2` |
+| `MAX_CLIP_SECONDS` | Longest scored window (after trimming); off when unset | `15` |
+| `MAX_FRAMES` | Frames-per-lift ceiling, 8–16 | `10` for the demo |
+| `DEMO_SAMPLE_DIR` | Cached pre-scored result served free from `/api/sample` | `demo_sample` |
 
-> All of the above are implemented and read in `nebius_client.py`, `uploads.py` and `jobs.py`, and are listed in `.env.example`.
+> All of the above are implemented and read in `nebius_client.py`, `uploads.py`, `jobs.py`, `demo_guard.py` and `sample.py`, and are listed in `.env.example`.
 
 ## 14. Biomechanics basis
 
@@ -344,6 +359,7 @@ Course PDFs are **never committed** or redistributed.
 | No Cosmos; NVIDIA models are text-only | Weaker Physical AI story | Enter Best Apps and Agents; make the Nemotron judge central in the README and video |
 | Track fit gets questioned | Disqualification or a lower score | Check the rules text and confirm with the organizers before Oct 28 |
 | Token Factory latency, rate limits or outages | Demo fails | Fallback judge, retries, async jobs, a pre-recorded backup demo clip |
+| Runaway spend on the public demo URL | Credits drained by strangers or a loop | Prepaid credits only and a revocable demo-only key at the account; in the app an access code, a daily budget, a per-IP rate, a concurrency cap, a 15 s clip cap, 10 frames, a cheaper judge, and a cached sample clip that costs nothing (`server/services/demo_guard.py`, `sample.py`) |
 | Invalid JSON from the judge | Crash | Pydantic validation, one repair retry, then a graceful error |
 | iOS/HEVC/rotation quirks | Broken uploads or replays | See §9 mobile risks |
 | Leaking secrets or media | Security or licensing problem | `.gitignore`, env-only secrets, a pre-commit check, never commit videos or PDFs |
@@ -354,8 +370,15 @@ Course PDFs are **never committed** or redistributed.
 - Jerk support, plus clean & jerk auto-split into two scored calls
 - ✅ **Done.** A bar-path trace overlay drawn from per-frame bar positions on the annotated
   replay, plus the starting line and a marker at the worst drift (`server/utils/bar_track.py`).
-  Local OpenCV, no model call. Drawn only when tracking is confident; the derived
-  centimetre figure is deliberately not surfaced, as it is not validated.
+  Local OpenCV, no model call. Drawn only when tracking is confident; the drift is shown in
+  plate diameters with the centimetre figure labelled an estimate, since it assumes a 450 mm
+  plate and is not calibrated to the scene. The same tracker
+  now finds the lifts: on 39 real clips (62 labelled lifts) it measured 85% recall and 78%
+  precision on 2026-10-21 (`tests/test_lift_windows_real.py`); the trail it draws is the one
+  other trails agree with, which from an off-axis camera is the near plate, so the trace starts
+  at lift-off. Its measurement (drift in plate diameters, where in the rise) now goes to the
+  judge as evidence beside the vision observations, comes back in the API as `bar_path`, and a
+  verdict that contradicts it is flagged and capped (`services/measurement.py`, `confidence.py`).
 - Comparing two attempts side by side
 - **Native mobile app (React Native/Flutter):** 60 fps capture, locked exposure and focus, a live angle guide, on-device trimming, push notifications for finished results, an offline upload queue
 - Re-check Cosmos or another NVIDIA vision model if one becomes available on Token Factory, to run fully on NVIDIA models

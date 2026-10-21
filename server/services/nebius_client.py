@@ -32,6 +32,34 @@ DEFAULT_VISION_MODEL = "openbmb/MiniCPM-V-4_5"
 DEFAULT_JUDGE_MODEL = "nvidia/Nemotron-3-Ultra-550b-a55b"
 DEFAULT_JUDGE_FALLBACK_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
+# A healthy call answers in a few seconds (2-3 s measured for both stages), so
+# a hung one should not hold a phone for a minute: connect fast, read within
+# NEBIUS_TIMEOUT_SECONDS. The judge has its fallback model for what fails.
+CONNECT_TIMEOUT_SECONDS = 10.0
+DEFAULT_READ_TIMEOUT_SECONDS = 45.0
+# Transient provider trouble gets exactly one more try after a short pause.
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+RETRY_BACKOFF_SECONDS = 1.0
+# Status codes that mean "I do not know that parameter": the one case where
+# dropping the no-thinking hint and asking again makes sense.
+UNKNOWN_PARAMETER_STATUS = frozenset({400, 422})
+
+
+def read_timeout_seconds() -> float:
+    try:
+        value = float(os.getenv("NEBIUS_TIMEOUT_SECONDS") or DEFAULT_READ_TIMEOUT_SECONDS)
+    except ValueError:
+        return DEFAULT_READ_TIMEOUT_SECONDS
+    return value if value > 0 else DEFAULT_READ_TIMEOUT_SECONDS
+
+
+class NebiusAPIError(RuntimeError):
+    """A non-200 reply from Token Factory. `status` lets callers tell busy from broken."""
+
+    def __init__(self, status: int, body: str) -> None:
+        super().__init__(f"Nebius API error {status}: {body}")
+        self.status = status
+
 
 def vision_model() -> str:
     return os.getenv("NEBIUS_VISION_MODEL") or DEFAULT_VISION_MODEL
@@ -39,6 +67,21 @@ def vision_model() -> str:
 
 def judge_model() -> str:
     return os.getenv("NEBIUS_JUDGE_MODEL") or DEFAULT_JUDGE_MODEL
+
+
+_NEMOTRON_TIER_RE = re.compile(r"^nvidia/nemotron-3-([a-z]+)", re.IGNORECASE)
+
+
+def judge_display_name(model: Optional[str] = None) -> str:
+    """
+    What the page says it is judged by. The public demo may run a cheaper
+    judge than the default, and the footer must not claim otherwise.
+    """
+    model = model or judge_model()
+    match = _NEMOTRON_TIER_RE.match(model)
+    if match:
+        return f"NVIDIA Nemotron 3 {match.group(1).capitalize()}"
+    return model
 
 
 def judge_fallback_model() -> str:
@@ -87,18 +130,27 @@ class NebiusChatClient:
             "temperature": 0.0,
             "max_tokens": max_tokens,
         }
-        # Run in executor to avoid blocking
-        loop = asyncio.get_event_loop()
         # First attempt: include extra_body if provided
         payload = dict(base_payload)
         if extra_body:
             payload.update(extra_body)
-        response = await loop.run_in_executor(None, lambda: requests.post(url, headers=self._headers(), json=payload, timeout=60))
-        if response.status_code != 200 and extra_body:
-            # Fallback: retry once without extra_body
-            response = await loop.run_in_executor(None, lambda: requests.post(url, headers=self._headers(), json=base_payload, timeout=60))
+        timeout = (CONNECT_TIMEOUT_SECONDS, read_timeout_seconds())
+
+        def post(body: Dict[str, Any]):
+            return requests.post(url, headers=self._headers(), json=body, timeout=timeout)
+
+        # The request blocks, so it runs on a worker thread.
+        response = await asyncio.to_thread(post, payload)
+        if response.status_code in UNKNOWN_PARAMETER_STATUS and extra_body:
+            # The provider rejected a parameter it does not know: ask again
+            # without the no-thinking hint.
+            payload = base_payload
+            response = await asyncio.to_thread(post, payload)
+        if response.status_code in RETRYABLE_STATUS:
+            await asyncio.sleep(RETRY_BACKOFF_SECONDS)
+            response = await asyncio.to_thread(post, payload)
         if response.status_code != 200:
-            raise RuntimeError(f"Nebius API error {response.status_code}: {response.text}")
+            raise NebiusAPIError(response.status_code, str(response.text)[:500])
         data = response.json()
         # OpenAI-compatible shape
         try:
@@ -223,25 +275,44 @@ async def classify_segment(
         return SegmentTriage(lifts=[], activity="unclassified", notes=f"triage failed: {exc}")
 
 
-def assemble_judge_messages(*, lift: str, observations: str, prompts_dir: str) -> List[ChatMessage]:
+def assemble_judge_messages(
+    *, lift: str, observations: str, prompts_dir: str, measurement: Optional[str] = None
+) -> List[ChatMessage]:
     """
-    Judge (Stage 2): use rubric + per-lift prompt; evidence is the Stage-1 observations (no images).
-    Instruct to lower confidence when observations mention occlusion or oblique camera angle.
+    Judge (Stage 2): rubric + per-lift prompt, with two pieces of evidence and
+    no images — the Stage-1 observations, and the local tracker's measurement
+    of the bar path when there is one. Instruct to lower confidence when the
+    observations mention occlusion or an oblique camera angle.
     """
     lift = _lift_name(lift)
     system_prompt = _load_prompt(f"{prompts_dir}/system.txt")
     user_prompt = _load_prompt(f"{prompts_dir}/user_{lift}.txt")
     guidance = (
-        "Evidence is a vision-model observation summary (not raw images). "
-        "Judge bar-path efficiency ONLY from those observations. "
-        "If the observations mention occlusion, darkness, or an oblique camera angle, reflect higher uncertainty and lower confidence."
+        "Evidence is a vision-model observation summary (not raw images)"
+        + (", plus a numeric bar-path measurement from a local plate tracker. " if measurement else ". ")
+        + "Judge bar-path efficiency ONLY from that evidence. "
     )
-    return [
+    if measurement:
+        guidance += (
+            "The two sources are independent: the measurement is the better guide to HOW FAR the bar "
+            "strayed and WHERE in the rise; the observations are the better guide to direction (forward "
+            "or back), bar-body contact and the quality of each phase. If they disagree on the size of "
+            "the drift, prefer the measurement and say so in notes. Make max_horizontal_drift consistent "
+            "with the measured figure. "
+        )
+    guidance += (
+        "If the observations mention occlusion, darkness, or an oblique camera angle, reflect higher "
+        "uncertainty and lower confidence."
+    )
+    messages: List[ChatMessage] = [
         {"role": "system", "content": system_prompt},
         {"role": "system", "content": guidance},
         {"role": "user", "content": user_prompt},
         {"role": "user", "content": f"Vision observations:\n{observations}"},
     ]
+    if measurement:
+        messages.append({"role": "user", "content": measurement})
+    return messages
 
 
 async def _judge_with_model(
@@ -289,18 +360,22 @@ async def request_judgment(
     model: str,
     max_tokens: Optional[int] = None,
     fallback_model: Optional[str] = None,
+    measurement: Optional[str] = None,
 ) -> "LiftJudgment":
     """
     Judge (Stage 2) with one repair retry on invalid JSON, then one retry on a
     second judge model when the primary fails outright — an API error, a timeout,
     or no valid JSON even after the repair. Pass fallback_model="" to disable.
-    Raises the fallback's error if that one fails too.
+    Raises the fallback's error if that one fails too. `measurement` is the
+    tracker's evidence block (see services/measurement.py), if the bar was tracked.
     """
     if max_tokens is None:
         max_tokens = int(os.getenv("NEBIUS_JUDGE_MAX_TOKENS") or DEFAULT_JUDGE_MAX_TOKENS)
     if fallback_model is None:
         fallback_model = judge_fallback_model()
-    messages = assemble_judge_messages(lift=lift, observations=observations, prompts_dir=prompts_dir)
+    messages = assemble_judge_messages(
+        lift=lift, observations=observations, prompts_dir=prompts_dir, measurement=measurement
+    )
 
     try:
         return await _judge_with_model(client=client, messages=messages, model=model, max_tokens=max_tokens)

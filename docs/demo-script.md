@@ -154,7 +154,9 @@ That takes it to ~340 words ≈ 2:16, which leaves 40 seconds of footage to brea
 Every line above is true of what the code does today. Do not add to it:
 
 - The judge **is** an NVIDIA open model (Nemotron 3 Ultra) on Token Factory, with a Nemotron Super
-  fallback.
+  fallback — **by default**. The public demo URL may be configured to run Nemotron 3 Super as
+  its judge to keep the bill small, and its footer says so. Record the video against your own
+  instance with the default (Ultra) judge, so beat 6 stays true of what is on screen.
 - The vision stage is **not** an NVIDIA model — it is MiniCPM-V, because the Nemotron models on
   this account reject image input. If asked, say so plainly; the README says it too. Beat 6 is
   worded to be accurate about this: "a vision model", then NVIDIA named for the reasoning.

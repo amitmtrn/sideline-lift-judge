@@ -1,0 +1,17 @@
+# HTTPS in front of the app. Camera capture and PWA install both need it.
+{$DOMAIN} {
+    encode gzip
+
+    # A phone clip is big and scoring takes a while: allow the upload through
+    # and do not cut a long poll or replay download short.
+    request_body {
+        max_size 220MB
+    }
+
+    reverse_proxy app:8000 {
+        transport http {
+            read_timeout 600s
+            write_timeout 600s
+        }
+    }
+}

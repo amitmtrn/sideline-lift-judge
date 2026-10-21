@@ -3,61 +3,18 @@ The HTTP surface a phone talks to: PWA assets, upload, polling, replay.
 
 Model calls are mocked throughout — nothing here reaches Token Factory.
 """
-import time
 from unittest.mock import patch
 
-import pytest
-from fastapi.testclient import TestClient
-
-from server.services.jobs import JobStore, reset_store
-from tests.conftest import judge_reply, observation_reply, triage_reply, write_lift_video
-
-SNATCH_PATH = ["floor", "knees", "overhead", "overhead", "overhead", "overhead"]
-CLEAN_AND_JERK_PATH = ["floor", "knees", "shoulders", "shoulders", "overhead", "overhead"]
-
-
-@pytest.fixture
-def client(tmp_path, monkeypatch):
-    monkeypatch.setenv("NEBIUS_API_KEY", "test-key")
-    monkeypatch.setenv("MAX_UPLOAD_MB", "5")
-    reset_store(JobStore(root=tmp_path / "jobs"))
-    from server.main import app
-
-    with TestClient(app) as test_client:
-        yield test_client
-    reset_store(JobStore(root=tmp_path / "jobs-after"))
-
-
-@pytest.fixture
-def clip(tmp_path):
-    return write_lift_video(str(tmp_path / "clip.mp4"))
-
-
-def upload(client, clip, responses, **fields):
-    data = {"lift": "snatch", "mode": "single"}
-    data.update(fields)
-    with open(clip, "rb") as handle:
-        with patch("server.services.nebius_client.requests.post", side_effect=responses):
-            response = client.post(
-                "/api/jobs",
-                data=data,
-                files={"video": ("clip.mp4", handle, "video/mp4")},
-            )
-            if response.status_code != 202:
-                return response, None
-            job_id = response.json()["id"]
-            payload = wait_for(client, job_id)
-    return response, payload
-
-
-def wait_for(client, job_id, timeout=30.0):
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        body = client.get(f"/api/jobs/{job_id}").json()
-        if body["status"] in ("done", "error"):
-            return body
-        time.sleep(0.05)
-    raise AssertionError(f"job {job_id} did not finish within {timeout}s")
+from tests.conftest import (  # noqa: F401  (client and clip are fixtures)
+    CLEAN_AND_JERK_PATH,
+    SNATCH_PATH,
+    client,
+    clip,
+    judge_reply,
+    observation_reply,
+    triage_reply,
+    upload,
+)
 
 
 # ---------- the shell a judge opens on a phone ----------
@@ -241,7 +198,22 @@ def test_upstream_failure_reports_an_error_status(client, clip):
     boom = RuntimeError("Nebius API error 503: upstream unavailable")
     _, payload = upload(client, clip, [triage_reply(SNATCH_PATH), boom, boom])
     assert payload["status"] == "error"
-    assert "503" in payload["error"]
+    # One plain sentence for the phone; the provider's text stays in the log.
+    assert "busy" in payload["error"]
+    assert "503" not in payload["error"] and "upstream unavailable" not in payload["error"]
+
+
+def test_the_result_carries_what_the_tracker_measured(client, clip):
+    _, payload = upload(
+        client,
+        clip,
+        [triage_reply(SNATCH_PATH), observation_reply(), judge_reply("snatch", 7, "solid", 0.8)],
+    )
+    lift = payload["lifts"][0]
+    assert "bar_path" in lift
+    assert lift["bar_path"]["tracked"] == lift["bar_path_tracked"]
+    if lift["bar_path"]["tracked"]:
+        assert lift["bar_path"]["max_drift_plate_diameters"] >= 0
 
 
 def test_trim_window_is_passed_through(client, clip):

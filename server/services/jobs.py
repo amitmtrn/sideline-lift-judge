@@ -128,6 +128,16 @@ class JobStore:
             if job.status in ("done", "error"):
                 self._remove(job)
 
+    def discard(self, job: Job) -> None:
+        """
+        Drop a job that never got going — a rejected upload or trim window —
+        together with its directory. purge_expired() cannot do this: it only
+        touches finished jobs, and a job refused before start() is still "queued".
+        """
+        if job.task is not None and not job.task.done():
+            job.task.cancel()
+        self._remove(job)
+
     def _remove(self, job: Job) -> None:
         self._jobs.pop(job.id, None)
         job.discard_source()
@@ -157,11 +167,14 @@ class JobStore:
                 job.error = "Scoring was cancelled."
                 raise
             except Exception as exc:
+                from server.services.errors import user_message
+
+                # The traceback goes to the log; the phone gets one plain sentence.
                 logger.exception("Job %s failed", job.id)
                 job.status = "error"
                 job.stage = "error"
                 job.message = "Scoring failed."
-                job.error = str(exc)
+                job.error = user_message(exc)
             finally:
                 # The clip is never needed after the run, pass or fail.
                 job.discard_source()

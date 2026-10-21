@@ -151,3 +151,91 @@ def test_clip_quality_deduplicates_warnings():
     quality.add("same", 0.4)
     assert quality.warnings == ["same"]
     assert quality.confidence_cap == 0.4
+
+
+# ---------- the tracker as evidence ----------
+
+
+def _measurement(**overrides):
+    from server.services.measurement import BarPathMeasurement
+
+    fields = dict(
+        tracked=True,
+        coverage=0.95,
+        points=40,
+        max_drift_diameters=0.2,
+        max_drift_cm=9.0,
+        drift_at_rise_fraction=0.4,
+        sideways_range_diameters=0.3,
+        rise_diameters=3.9,
+    )
+    fields.update(overrides)
+    return BarPathMeasurement(**fields)
+
+
+def test_an_untracked_bar_caps_confidence_and_says_why():
+    from server.services.confidence import CAP_NO_TRACE
+
+    quality = assess_clip_quality(
+        observations="Bar close.", info=landscape(), frame_count=10, duration_sec=5.0,
+        measurement=_measurement(tracked=False, coverage=0.3),
+    )
+    assert quality.confidence_cap == CAP_NO_TRACE
+    assert any("could not be followed" in warning for warning in quality.warnings)
+
+
+def test_a_sparse_trace_caps_more_gently():
+    from server.services.confidence import CAP_SPARSE_TRACE
+
+    quality = assess_clip_quality(
+        observations="Bar close.", info=landscape(), frame_count=10, duration_sec=5.0,
+        measurement=_measurement(coverage=0.6),
+    )
+    assert quality.confidence_cap == CAP_SPARSE_TRACE
+    assert any("60%" in warning for warning in quality.warnings)
+
+
+def test_a_well_tracked_bar_adds_nothing():
+    quality = assess_clip_quality(
+        observations="Bar close.", info=landscape(), frame_count=10, duration_sec=5.0, measurement=_measurement()
+    )
+    assert quality.confidence_cap is None and quality.warnings == []
+
+
+def test_cross_check_flags_a_close_verdict_on_a_wide_path():
+    from server.services.confidence import CAP_VERDICT_DISAGREES, cross_check
+
+    verdict = judgment(0.9).model_copy(update={"score": 8, "band": "solid"})
+    quality = cross_check(verdict, _measurement(max_drift_diameters=0.7), ClipQuality())
+    assert quality.confidence_cap == CAP_VERDICT_DISAGREES
+    assert any("0.7 plate diameters" in warning for warning in quality.warnings)
+
+
+def test_cross_check_flags_a_poor_verdict_on_a_straight_path():
+    from server.services.confidence import CAP_VERDICT_DISAGREES, cross_check
+
+    quality = cross_check(judgment(0.9), _measurement(max_drift_diameters=0.05), ClipQuality())  # score 3
+    assert quality.confidence_cap == CAP_VERDICT_DISAGREES
+    assert any("almost no sideways travel" in warning for warning in quality.warnings)
+
+
+def test_cross_check_stays_quiet_when_verdict_and_trace_agree():
+    from server.services.confidence import cross_check
+
+    assert not cross_check(judgment(0.9), _measurement(max_drift_diameters=0.6), ClipQuality())  # poor + wide
+    verdict = judgment(0.9).model_copy(update={"score": 8, "band": "solid"})
+    assert not cross_check(verdict, _measurement(max_drift_diameters=0.1), ClipQuality())  # solid + straight
+
+
+def test_cross_check_does_not_trust_a_sparse_or_off_axis_measurement():
+    from server.services.confidence import cross_check
+
+    verdict = judgment(0.9).model_copy(update={"score": 8, "band": "solid"})
+    assert not cross_check(verdict, _measurement(max_drift_diameters=0.7, coverage=0.8), ClipQuality())
+    off_axis = assess_clip_quality(
+        observations="Oblique camera angle.", info=landscape(), frame_count=10, duration_sec=5.0
+    )
+    before = list(off_axis.warnings)
+    cross_check(verdict, _measurement(max_drift_diameters=0.7), off_axis)
+    assert off_axis.warnings == before
+    assert not cross_check(verdict, _measurement(tracked=False), ClipQuality())

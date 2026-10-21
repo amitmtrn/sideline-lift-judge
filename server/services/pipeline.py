@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Protocol, Tuple
+from typing import Dict, List, Optional, Protocol, Tuple
 
 from server.schemas.judgment import LiftJudgment, LiftType
 from server.schemas.segment import SegmentTriage
-from server.services.confidence import assess_clip_quality, apply_quality
+from server.services.confidence import assess_clip_quality, apply_quality, cross_check
+from server.services.errors import detail_of, user_message
+from server.services.measurement import BarPathMeasurement, describe, measure
 from server.services.nebius_client import (
     NebiusChatClient,
     classify_segment,
@@ -34,7 +37,7 @@ from server.services.nebius_client import (
     vision_model,
 )
 from server.services.replay import render_annotated_replay
-from server.utils.bar_track import BarPath, track_bar_path
+from server.utils.bar_track import BarPath, LiftWindow, detect_lift_windows, track_bar_path
 from server.utils.frames import sample_frames_in_range_bgr
 from server.utils.image_ops import frames_to_data_urls, prepare_frames
 from server.utils.segmentation import (
@@ -81,14 +84,30 @@ async def _offload(function, *args, **kwargs):
     return await asyncio.to_thread(function, *args)
 
 
+def max_frames() -> int:
+    """
+    Frames per lift ceiling. MAX_FRAMES in the environment lowers it (never
+    above the hard ceiling, never below the minimum): at 10 or fewer every lift
+    is one vision call, which is what the public demo wants.
+    """
+    raw = os.getenv("MAX_FRAMES")
+    if raw is None or not raw.strip():
+        return MAX_FRAMES
+    try:
+        value = int(float(raw))
+    except ValueError:
+        return MAX_FRAMES
+    return max(MIN_FRAMES, min(MAX_FRAMES, value))
+
+
 def clamp_frames(value: Optional[int]) -> int:
     if value is None:
-        return DEFAULT_FRAMES
+        return min(DEFAULT_FRAMES, max_frames())
     try:
         value = int(value)
     except (TypeError, ValueError):
-        return DEFAULT_FRAMES
-    return max(MIN_FRAMES, min(MAX_FRAMES, value))
+        return min(DEFAULT_FRAMES, max_frames())
+    return max(MIN_FRAMES, min(max_frames(), value))
 
 
 class TrimError(ValueError):
@@ -137,7 +156,12 @@ class ScoredLift:
     observations: Optional[str] = None
     replay_path: Optional[str] = None
     bar_path_tracked: bool = False
+    # What the tracker measured; goes to the judge, the API and the replay.
+    measurement: Optional[BarPathMeasurement] = None
+    # `error` is one plain sentence for the user; `error_detail` is the raw
+    # exception for logs and --debug.
     error: Optional[str] = None
+    error_detail: Optional[str] = None
 
 
 @dataclass
@@ -208,20 +232,26 @@ async def run_scoring(
 
     profile: MotionProfile = MotionProfile()
     plan: List[Tuple[CandidateSegment, LiftType, SegmentTriage, bool]] = []
+    lift_windows: Dict[int, LiftWindow] = {}
 
     if request.mode == "auto":
         progress("splitting", "Finding the lifts in this clip…", 0.12)
+        # The motion profile is still what splits a clean & jerk at its quiet
+        # moment; the windows themselves come from where the plate rises.
         profile = await _offload(compute_motion_profile, request.video_path)
-        windows = [
-            window
-            for window in detect_segments(profile, max_segments=MAX_AUTO_SEGMENTS)
-            if window.end_sec > start and window.start_sec < outcome.end_sec
-        ]
+        windows = await _lift_windows(request.video_path, start, outcome.end_sec, lift_windows)
+        if not windows:
+            # Nothing tracked — fall back to motion energy, which at least finds
+            # where something happened.
+            windows = [
+                window
+                for window in detect_segments(profile, max_segments=MAX_AUTO_SEGMENTS)
+                if window.end_sec > start and window.start_sec < outcome.end_sec
+            ]
+            for window in windows:
+                window.start_sec = max(window.start_sec, start)
+                window.end_sec = min(window.end_sec, outcome.end_sec)
         outcome.candidate_windows = len(windows)
-        for window in windows:
-            # Clip each window to the trimmed range the user asked for.
-            window.start_sec = max(window.start_sec, start)
-            window.end_sec = min(window.end_sec, outcome.end_sec)
         plan = await _plan_windows(
             client=client,
             request=request,
@@ -231,6 +261,7 @@ async def run_scoring(
             info=info,
             outcome=outcome,
             progress=progress,
+            lift_windows=lift_windows,
         )
     else:
         window = CandidateSegment(index=1, start_sec=start, end_sec=outcome.end_sec)
@@ -238,16 +269,22 @@ async def run_scoring(
         if request.detect_split:
             progress("splitting", "Checking whether this is one lift…", 0.12)
             profile = await _offload(compute_motion_profile, request.video_path)
+            # Inside what the user trimmed, narrow to where the bar actually
+            # rises so the sampled frames are the lift, not the setup — and a
+            # clean & jerk comes out as its two rises.
+            windows = await _lift_windows(request.video_path, start, outcome.end_sec, lift_windows) or [window]
+            outcome.candidate_windows = len(windows)
             plan = await _plan_windows(
                 client=client,
                 request=request,
                 prompts_dir=prompts_dir,
-                windows=[window],
+                windows=windows,
                 profile=profile,
                 info=info,
                 outcome=outcome,
                 progress=progress,
                 fallback_lift=request.lift,
+                lift_windows=lift_windows,
             )
         if not plan:
             lift = request.lift or LiftType.snatch
@@ -275,6 +312,7 @@ async def run_scoring(
             frames_wanted=frames_wanted,
             progress=progress,
             progress_span=(share_from, share_to),
+            lift_window=lift_windows.get(window.index),
         )
         outcome.lifts.append(scored)
     return outcome
@@ -291,6 +329,7 @@ async def _plan_windows(
     outcome: ScoreOutcome,
     progress: ProgressReporter,
     fallback_lift: Optional[LiftType] = None,
+    lift_windows: Optional[Dict[int, LiftWindow]] = None,
 ) -> List[Tuple[CandidateSegment, LiftType, SegmentTriage, bool]]:
     """
     Triage each window and expand it into one entry per lift. A window holding
@@ -340,10 +379,31 @@ async def _plan_windows(
             continue
 
         parts: List[CandidateSegment] = []
-        if len(lifts) == 2:
+        tracked_window = (lift_windows or {}).get(window.index)
+        if len(lifts) == 2 and tracked_window is not None:
+            # The window's own trail knows how many times the bar rose. Two
+            # rises: split between them.
+            parts, lifts = _split_by_rises(window, tracked_window, lifts)
+            if lifts != list(triage.lifts):
+                # Resolved by the bar's own travel: the confidence rule must
+                # not cap this for "holding more than one lift".
+                triage = triage.model_copy(update={"lifts": lifts})
+        if len(lifts) == 2 and not parts:
+            # One rise only (a clean & jerk so quick the two run together), or
+            # no trail: split at the quiet moment between them, as long as each
+            # half could hold a lift. A one-second "jerk" is a slice of the
+            # clean, not a lift, and then only the first lift is scored.
             split = split_segment_at_valley(profile, window)
-            if split is not None:
+            if split is not None and all(part.duration_sec >= MIN_SPLIT_PART for part in split):
                 parts = list(split)
+            else:
+                # Score the first lift only — but the frames still hold both,
+                # so triage keeps its two lifts and the confidence rule caps
+                # the verdict and says why (AC-4).
+                lifts = lifts[:1]
+        if len(lifts) == 1:
+            plan.append((parts[0] if parts else window, lifts[0], triage, False))
+            continue
         if len(parts) != len(lifts):
             # No usable quiet moment: judge the same window once per lift and
             # let the confidence rule flag that the phases may be blended.
@@ -354,6 +414,36 @@ async def _plan_windows(
         for part, lift in zip(parts, lifts):
             plan.append((part, lift, triage, True))
     return plan
+
+
+# A jerk from the rack — dip, drive, split, recovery — takes at least this long;
+# anything shorter that a split produces is a slice of the other lift.
+MIN_SPLIT_PART = 1.2
+
+
+def _split_by_rises(
+    window: CandidateSegment, tracked: LiftWindow, lifts: List[LiftType]
+) -> Tuple[List[CandidateSegment], List[LiftType]]:
+    from server.utils.bar_track import rise_episodes
+
+    episodes = [e for e in rise_episodes(tracked.points) if e.credible and e.rise >= 0.10]
+    episodes.sort(key=lambda e: e.start_sec)
+    if len(episodes) >= 2:
+        first, second = episodes[0], episodes[-1]
+        cut = (first.end_sec + second.start_sec) / 2
+        parts = [
+            CandidateSegment(index=window.index, start_sec=window.start_sec, end_sec=cut),
+            CandidateSegment(index=window.index, start_sec=cut, end_sec=window.end_sec),
+        ]
+        if all(part.duration_sec >= MIN_SPLIT_PART for part in parts):
+            return parts, lifts
+    # One rise, or none we trust: the bar's travel cannot tell a snatch from a
+    # clean & jerk done in one motion (both are ~1.5 s floor to overhead), so
+    # this is left to the caller's valley split rather than second-guessing
+    # the vision model's call.
+    return [], lifts
+
+
 
 
 async def _score_one_lift(
@@ -371,6 +461,7 @@ async def _score_one_lift(
     frames_wanted: int,
     progress: ProgressReporter,
     progress_span: Tuple[float, float],
+    lift_window: Optional[LiftWindow] = None,
 ) -> ScoredLift:
     low, high = progress_span
     label = f"{lift.value}" if total == 1 else f"{lift.value} ({index} of {total})"
@@ -395,8 +486,17 @@ async def _score_one_lift(
         return scored
     processed = await _offload(prepare_frames, frames, rotation_deg=_rotation_for(info, frames))
 
+    # Local CV first, before any model call: the tracker's numbers are evidence
+    # for the judge as well as the trace on the replay, so the drift the judge
+    # describes and the drift the replay draws are the same measurement.
+    progress("observing", f"Following the bar — {label}…", low + 0.05 * (high - low))
+    bar_path = await _offload(_trace_for, request.video_path, window, lift_window, label)
+    measurement = measure(bar_path)
+    scored.measurement = measurement
+    scored.bar_path_tracked = measurement.tracked
+
     try:
-        progress("observing", f"Reading bar path — {label}…", low + 0.1 * (high - low))
+        progress("observing", f"Reading bar path — {label}…", low + 0.15 * (high - low))
         observations = await collect_observations(
             client=client,
             lift=lift.value,
@@ -414,10 +514,12 @@ async def _score_one_lift(
             observations=observations,
             prompts_dir=prompts_dir,
             model=judge_model(),
+            measurement=describe(measurement, lift.value),
         )
     except Exception as exc:
         logger.exception("Scoring failed for %s", label)
-        scored.error = f"{type(exc).__name__}: {exc}"
+        scored.error = user_message(exc)
+        scored.error_detail = detail_of(exc)
         return scored
 
     quality = assess_clip_quality(
@@ -427,27 +529,13 @@ async def _score_one_lift(
         duration_sec=window.end_sec - window.start_sec,
         lifts_in_window=len(triage.lifts),
         was_split=was_split,
+        measurement=measurement,
     )
+    # The re-check: a verdict that contradicts the measured path is flagged.
+    quality = cross_check(judgment, measurement, quality)
     scored.judgment = apply_quality(judgment, quality)
 
     if request.render_replay and request.replay_dir:
-        progress("rendering", f"Drawing the bar path — {label}…", low + 0.7 * (high - low))
-        # Local CV, no model call: follow the plate so the replay can show the
-        # path the cue is talking about.
-        bar_path: Optional[BarPath] = None
-        try:
-            bar_path = await _offload(
-                track_bar_path,
-                request.video_path,
-                start_sec=window.start_sec,
-                end_sec=window.end_sec,
-            )
-        except Exception:
-            logger.exception("Bar tracking failed for %s", label)
-        scored.bar_path_tracked = bool(bar_path and bar_path.tracked)
-        if bar_path is not None and not bar_path.tracked:
-            logger.info("No bar trace for %s: %s", label, bar_path.reason)
-
         progress("rendering", f"Rendering replay — {label}…", low + 0.8 * (high - low))
         replay = await _offload(
             render_annotated_replay,
@@ -462,6 +550,44 @@ async def _score_one_lift(
         if replay is None:
             logger.info("Replay rendering unavailable for %s", label)
     return scored
+
+
+def _trace_for(
+    video_path: str, window: CandidateSegment, lift_window: Optional[LiftWindow], label: str
+) -> Optional[BarPath]:
+    """
+    The bar's path through this window, from local CV and no model call. The
+    trail that found the lift is used first; a second tracking pass samples
+    different frames and does not reliably agree, so it runs only when there is
+    no trail or the trail does not cover this part of the clip.
+    """
+    bar_path: Optional[BarPath] = None
+    if lift_window is not None:
+        bar_path = lift_window.bar_path(window.start_sec, window.end_sec)
+    if bar_path is None or not bar_path.tracked:
+        try:
+            bar_path = track_bar_path(video_path, start_sec=window.start_sec, end_sec=window.end_sec)
+        except Exception:
+            logger.exception("Bar tracking failed for %s", label)
+    if bar_path is not None and not bar_path.tracked:
+        logger.info("No bar trace for %s: %s", label, bar_path.reason)
+    return bar_path
+
+
+async def _lift_windows(
+    video_path: str, start_sec: float, end_sec: float, keep: Dict[int, LiftWindow]
+) -> List[CandidateSegment]:
+    """
+    Windows around each rise of the plate, as candidate segments. The LiftWindow
+    itself is kept in `keep` by segment index so the trace can be drawn from
+    the trail that found the lift.
+    """
+    found = await _offload(detect_lift_windows, video_path, start_sec=start_sec, end_sec=end_sec)
+    segments = []
+    for position, w in enumerate(found, start=1):
+        keep[position] = w
+        segments.append(CandidateSegment(index=position, start_sec=w.start_sec, end_sec=w.end_sec, peak_sec=w.peak_sec))
+    return segments
 
 
 def _rotation_for(info: VideoInfo, frames) -> int:

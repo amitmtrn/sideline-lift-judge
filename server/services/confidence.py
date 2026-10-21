@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Iterable, List, Optional, Sequence
 
 if TYPE_CHECKING:
     from server.schemas.judgment import LiftJudgment
+    from server.services.measurement import BarPathMeasurement
     from server.utils.video_meta import VideoInfo
 
 # Ceilings per problem, worst first. A mixed clip is the case the spec calls out
@@ -25,15 +26,31 @@ if TYPE_CHECKING:
 CAP_MULTIPLE_LIFTS = 0.35
 CAP_BAR_NOT_VISIBLE = 0.4
 CAP_OFF_AXIS = 0.5
+CAP_VERDICT_DISAGREES = 0.5
 CAP_OCCLUSION = 0.55
 CAP_PORTRAIT = 0.6
 CAP_UNCLEAR_PHASES = 0.6
 CAP_SHORT_CLIP = 0.6
+CAP_NO_TRACE = 0.65
 CAP_FEW_FRAMES = 0.7
+CAP_SPARSE_TRACE = 0.7
 
 # A window this short cannot hold a whole lift at any sensible frame rate.
 MIN_SENSIBLE_DURATION = 1.0
 MIN_SENSIBLE_FRAMES = 6
+# A trace that saw the plate in fewer sampled frames than this is drawn, but
+# the numbers read off it are rough.
+MIN_TRACE_COVERAGE = 0.75
+# The re-check of the verdict against the tracker (in plate diameters): a path
+# called close by the judge but measured this wide, or called poor but measured
+# this narrow, earns a warning and a cap. Only when the tracker saw nearly the
+# whole lift, and never on a clip the observations say is filmed off-axis,
+# where the measured drift is inflated by parallax.
+DISAGREE_WIDE_DIAMETERS = 0.5
+DISAGREE_NARROW_DIAMETERS = 0.1
+DISAGREE_MIN_COVERAGE = 0.9
+GOOD_SCORE = 7
+POOR_SCORE = 4
 
 
 def _phrases(*words: str) -> tuple:
@@ -143,15 +160,32 @@ def assess_clip_quality(
     lifts_in_window: int = 1,
     was_split: bool = False,
     trimmed: bool = False,
+    measurement: Optional["BarPathMeasurement"] = None,
 ) -> ClipQuality:
     """
     Turn clip facts and Stage-1 observations into caps plus plain-language
     warnings. `lifts_in_window` above 1 means triage found more than one lift in
     the window we judged; `was_split` means we separated them and scored each on
-    its own, which is the good path and only earns a note.
+    its own, which is the good path and only earns a note. `measurement` is what
+    the plate tracker made of the window: no trace, or a sparse one, means the
+    drift rests on the sampled frames alone.
     """
     quality = ClipQuality()
     text = (observations or "").lower()
+
+    if measurement is not None:
+        if not measurement.tracked:
+            quality.add(
+                "The bar could not be followed through this clip, so the drift is read from the "
+                "sampled frames alone.",
+                CAP_NO_TRACE,
+            )
+        elif measurement.coverage < MIN_TRACE_COVERAGE:
+            quality.add(
+                f"The bar was followed in only {measurement.coverage:.0%} of the sampled frames, "
+                "so the measured drift is rough.",
+                CAP_SPARSE_TRACE,
+            )
 
     if lifts_in_window > 1 and not was_split:
         quality.add(
@@ -194,6 +228,37 @@ def assess_clip_quality(
     if 0 < frame_count < MIN_SENSIBLE_FRAMES:
         quality.add("Only a few frames could be read from this clip.", CAP_FEW_FRAMES)
 
+    return quality
+
+
+def cross_check(
+    judgment: "LiftJudgment", measurement: Optional["BarPathMeasurement"], quality: ClipQuality
+) -> ClipQuality:
+    """
+    The re-check after the judge replies: does its verdict square with what the
+    tracker measured? A judge that calls the path close when the plate was
+    measured half a diameter off its line (or poor when it barely moved) has
+    leaned on the prose over the number, and the user should know.
+    """
+    if measurement is None or not measurement.tracked or judgment.score is None:
+        return quality
+    if measurement.coverage < DISAGREE_MIN_COVERAGE or measurement.max_drift_diameters is None:
+        return quality
+    if any(warning.startswith("The camera does not look square") for warning in quality.warnings):
+        return quality
+    drift = measurement.max_drift_diameters
+    if judgment.score >= GOOD_SCORE and drift >= DISAGREE_WIDE_DIAMETERS:
+        quality.add(
+            "The judge called this path close, but the tracker measured the bar "
+            f"{drift:.1f} plate diameters off its starting line. Treat the score with care.",
+            CAP_VERDICT_DISAGREES,
+        )
+    elif judgment.score <= POOR_SCORE and drift <= DISAGREE_NARROW_DIAMETERS:
+        quality.add(
+            "The judge called this path poor, but the tracker measured almost no sideways travel. "
+            "Treat the score with care.",
+            CAP_VERDICT_DISAGREES,
+        )
     return quality
 
 
