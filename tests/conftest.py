@@ -14,7 +14,10 @@ DEMO_ENV_VARS = (
     "MAX_CONCURRENT_JOBS",
     "MAX_CLIP_SECONDS",
     "MAX_FRAMES",
+    "JOB_TIMEOUT_SECONDS",
+    "TRUSTED_PROXIES",
     "NEBIUS_JUDGE_MODEL",
+    "NEBIUS_JUDGE_FALLBACK_MODEL",
 )
 
 SNATCH_PATH = ["floor", "knees", "overhead", "overhead", "overhead", "overhead"]

@@ -692,21 +692,27 @@ input[type="range"]::-moz-range-thumb {
   color: var(--chalk-faint);
 }
 
-/* The tracker's own number, under the judge's words for the same drift. */
-.measured {
-  margin: 8px 0 0;
-  font-size: 14px;
-  line-height: 1.4;
-  color: var(--chalk-dim);
+/* Who did what: tracker, vision model, judge. Small, but never hidden. */
+.provenance {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 0;
+  font-size: 12.5px;
+  line-height: 1.35;
+  color: var(--chalk-faint);
 }
 
-.measured .k {
-  display: block;
-  margin-bottom: 2px;
-  font-size: 11px;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-  color: var(--chalk-faint);
+.provenance li {
+  display: inline;
+}
+
+.provenance li + li::before {
+  content: "·";
+  margin: 0 7px;
+  color: var(--line-bright);
 }
 
 /* Confidence: honesty sits next to the score, never hidden (§8). */

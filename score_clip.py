@@ -24,6 +24,7 @@ from typing import List, Optional
 from dotenv import load_dotenv
 
 from server.schemas.judgment import LiftType
+from server.services.measurement import drift_summary
 from server.services.nebius_client import NebiusChatClient
 from server.services.pipeline import (
     DEFAULT_FRAMES,
@@ -96,6 +97,12 @@ def build_payload(outcome: ScoreOutcome) -> object:
                 "was_split": item.was_split,
             }
         )
+        if item.judgment:
+            drift = drift_summary(item.measurement, item.lift.value, item.judgment.max_horizontal_drift)
+            if drift:
+                body["drift"] = drift
+        if item.models:
+            body["models"] = dict(item.models)
         if item.observations:
             body["observations"] = item.observations
         if item.replay_path:

@@ -20,11 +20,12 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Protocol, Tuple
+from typing import Any, Dict, List, Optional, Protocol, Tuple
 
 from server.schemas.judgment import LiftJudgment, LiftType
 from server.schemas.segment import SegmentTriage
 from server.services.confidence import assess_clip_quality, apply_quality, cross_check
+from server.services.demo_guard import BudgetExhausted
 from server.services.errors import detail_of, user_message
 from server.services.measurement import BarPathMeasurement, describe, measure
 from server.services.nebius_client import (
@@ -32,6 +33,7 @@ from server.services.nebius_client import (
     classify_segment,
     collect_observations,
     judge_model,
+    model_display_name,
     request_judgment,
     vision_max_images,
     vision_model,
@@ -158,10 +160,35 @@ class ScoredLift:
     bar_path_tracked: bool = False
     # What the tracker measured; goes to the judge, the API and the replay.
     measurement: Optional[BarPathMeasurement] = None
+    # Which model did what for this verdict (see models_used), so the card can
+    # say so — and say when the fallback judge answered instead of the primary.
+    models: Dict[str, Any] = field(default_factory=dict)
     # `error` is one plain sentence for the user; `error_detail` is the raw
     # exception for logs and --debug.
     error: Optional[str] = None
     error_detail: Optional[str] = None
+    # The demo budget ran out on this lift: the run stops here, keeping the
+    # lifts before it.
+    out_of_budget: bool = False
+
+
+def models_used(judgment: Optional[LiftJudgment] = None) -> Dict[str, Any]:
+    """
+    The models behind a verdict, by id and by the name the page shows. The
+    judge is the one that actually answered when there is a verdict, which may
+    be the fallback; before one exists it is the configured primary.
+    """
+    vision = vision_model()
+    primary = judge_model()
+    answered = judgment.judged_by if judgment is not None and judgment.judged_by else None
+    judge = answered or primary
+    return {
+        "vision": vision,
+        "vision_name": model_display_name(vision),
+        "judge": judge,
+        "judge_name": model_display_name(judge),
+        "judge_fallback": bool(answered) and answered != primary,
+    }
 
 
 @dataclass
@@ -315,6 +342,10 @@ async def run_scoring(
             lift_window=lift_windows.get(window.index),
         )
         outcome.lifts.append(scored)
+        if scored.out_of_budget:
+            # Every later lift would fail the same way before its first call;
+            # do not spend the tracking and frame work on them.
+            break
     return outcome
 
 
@@ -360,6 +391,10 @@ async def _plan_windows(
                 prompts_dir=prompts_dir,
                 model=vision_model(),
             )
+        except BudgetExhausted:
+            # Not a bad window: the demo budget is spent. Say so instead of
+            # reporting that nothing was found.
+            raise
         except Exception as exc:
             logger.warning("Triage failed for %s: %s", _stamp(window), exc)
             triage = SegmentTriage(lifts=[], activity="triage failed")
@@ -472,6 +507,7 @@ async def _score_one_lift(
         end_sec=round(window.end_sec, 2),
         was_split=was_split,
         activity=triage.activity,
+        models=models_used(),
     )
 
     frames = await _offload(
@@ -516,6 +552,13 @@ async def _score_one_lift(
             model=judge_model(),
             measurement=describe(measurement, lift.value),
         )
+        scored.models = models_used(judgment)
+    except BudgetExhausted as exc:
+        logger.info("Demo budget ran out on %s: %s", label, exc.reason)
+        scored.error = exc.detail
+        scored.error_detail = detail_of(exc)
+        scored.out_of_budget = True
+        return scored
     except Exception as exc:
         logger.exception("Scoring failed for %s", label)
         scored.error = user_message(exc)

@@ -544,6 +544,15 @@
     scored.forEach((item, position) => {
       container.appendChild(verdictCard(item, position));
     });
+    // A lift that failed after others scored — the demo budget ran out
+    // part-way, say — is shown, not silently dropped.
+    lifts
+      .filter((item) => !item.band && item.error)
+      .forEach((item) => {
+        const where =
+          item.start_sec != null && item.end_sec != null ? ` ${stamp(item.start_sec)} – ${stamp(item.end_sec)}` : "";
+        container.appendChild(element("p", "notice", `${item.lift || "lift"}${where}: ${item.error}`));
+      });
     appendSkipped(container, payload);
   }
 
@@ -574,15 +583,21 @@
     row.appendChild(element("span", "band", item.band || "unknown"));
     card.appendChild(row);
 
-    if (item.max_horizontal_drift) {
-      const drift = element("p", "drift");
-      drift.appendChild(element("span", "k", "Max horizontal drift"));
-      drift.appendChild(document.createTextNode(item.max_horizontal_drift));
-      card.appendChild(drift);
+    // The drift line is written on the server from the tracker's measurement
+    // when there is one (the judge's words only lend the direction), so it
+    // cannot contradict the number. Without a trace it is the judge's read.
+    const drift = item.drift || (item.max_horizontal_drift ? { text: item.max_horizontal_drift, source: "judge" } : null);
+    if (drift && drift.text) {
+      const line = element("p", "drift");
+      line.appendChild(
+        element("span", "k", drift.source === "measurement" ? "Max drift, measured" : "Max drift, judge's read (bar not tracked)")
+      );
+      line.appendChild(document.createTextNode(drift.text));
+      card.appendChild(line);
     }
 
-    const measured = measurementLine(item.bar_path);
-    if (measured) card.appendChild(measured);
+    const provenance = provenanceLine(item);
+    if (provenance) card.appendChild(provenance);
 
     card.appendChild(confidenceBlock(item.confidence));
 
@@ -610,10 +625,14 @@
       card.appendChild(cues);
     }
 
-    if (item.notes) {
+    // The judge's own words on the drift stay readable when the measured line
+    // replaced them above, so nothing the model said is hidden.
+    const judgeDrift = drift && drift.source === "measurement" ? item.max_horizontal_drift : "";
+    if (item.notes || judgeDrift) {
       const details = element("details");
       details.appendChild(element("summary", null, "Notes"));
-      details.appendChild(element("p", null, item.notes));
+      if (judgeDrift) details.appendChild(element("p", null, `Judge on the drift: ${judgeDrift}`));
+      if (item.notes) details.appendChild(element("p", null, item.notes));
       card.appendChild(details);
     }
 
@@ -630,22 +649,29 @@
     return card;
   }
 
-  // What the plate tracker measured, in plate widths — the one length whose
-  // real size is known in every clip. The same numbers went to the judge and
-  // drew the trace on the replay, so the text and the orange ring agree.
-  function measurementLine(barPath) {
-    if (!barPath || !barPath.tracked || barPath.max_drift_plate_diameters == null) return null;
-    const line = element("p", "measured");
-    line.appendChild(element("span", "k", "Tracked"));
-    const diameters = Number(barPath.max_drift_plate_diameters);
-    let text = `Bar strayed ${diameters.toFixed(2)} plate widths from its start line`;
-    if (barPath.max_drift_cm_estimate != null) text += ` (≈${barPath.max_drift_cm_estimate} cm for a 450 mm plate)`;
-    if (barPath.drift_at_rise_fraction != null) {
-      text += `, ${Math.round(barPath.drift_at_rise_fraction * 100)}% of the way up`;
+  // Who did what for this verdict: the local tracker measured, the vision
+  // model described, the judge decided. Names come from the server, which
+  // knows which judge actually answered — the fallback, when the primary
+  // failed — so the card never implies a model that was not used.
+  function provenanceLine(item) {
+    const models = item.models || {};
+    const barPath = item.bar_path || {};
+    const parts = [];
+    if (barPath.tracked) {
+      let tracked = "Bar tracked locally (OpenCV, no model)";
+      if (barPath.coverage != null) tracked += `, plate seen in ${Math.round(barPath.coverage * 100)}% of frames`;
+      parts.push(tracked);
+    } else if (item.bar_path) {
+      parts.push("Bar not tracked: drift read from the sampled frames alone");
     }
-    if (barPath.coverage != null) text += `. Plate seen in ${Math.round(barPath.coverage * 100)}% of frames.`;
-    line.appendChild(document.createTextNode(text));
-    return line;
+    if (models.vision_name || models.vision) parts.push(`Frames read by ${models.vision_name || models.vision}`);
+    if (models.judge_name || models.judge) {
+      parts.push(`Judged by ${models.judge_name || models.judge}${models.judge_fallback ? " (fallback judge)" : ""}`);
+    }
+    if (!parts.length) return null;
+    const list = element("ul", "provenance");
+    parts.forEach((text) => list.appendChild(element("li", null, text)));
+    return list;
   }
 
   function confidenceBlock(confidence) {

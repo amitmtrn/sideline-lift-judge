@@ -1,14 +1,16 @@
+import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Awaitable, Callable, Optional, TypeVar
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import Headers
 
 from server.schemas.judgment import LiftType
 from server.services.demo_guard import (
@@ -16,13 +18,25 @@ from server.services.demo_guard import (
     access_required,
     check_access,
     client_ip,
+    daily_limit,
+    demo_caps_set,
     enforce_clip_length,
     get_guard,
+    ip_hourly_limit,
+    job_timeout_seconds,
     max_clip_seconds,
+    max_concurrent_jobs,
+    trusted_proxies,
 )
-from server.services.errors import UserFacingError
+from server.services.errors import TOO_LONG, UserFacingError
 from server.services.jobs import Job, get_store, job_ttl_seconds
-from server.services.nebius_client import NebiusChatClient, judge_display_name
+from server.services.nebius_client import (
+    NebiusChatClient,
+    judge_display_name,
+    judge_fallback_model,
+    judge_model,
+    vision_model,
+)
 from server.services.pipeline import (
     DEFAULT_FRAMES,
     MIN_FRAMES,
@@ -34,7 +48,7 @@ from server.services.pipeline import (
     run_scoring,
 )
 from server.services.results import lift_payload, outcome_payload
-from server.services.sample import load_sample
+from server.services.sample import load_sample, sample_dir
 from server.utils.uploads import (
     UnsupportedUpload,
     UploadTooLarge,
@@ -58,15 +72,104 @@ STATIC_DIR = CLIENT_DIR / "static"
 
 logger = logging.getLogger(__name__)
 
+# uvicorn configures only its own loggers. The app's go to the root logger,
+# which left alone drops everything below WARNING — including the startup
+# line that says which judge and caps are in force. LOG_LEVEL overrides.
+if not logging.getLogger().handlers:
+    logging.basicConfig(level=os.getenv("LOG_LEVEL") or "INFO", format="%(levelname)s:     %(name)s: %(message)s")
+
+# The routes that cost model calls. The access code is checked for these
+# before the request body is read (see AccessCodeMiddleware).
+GATED_PATHS = frozenset({"/api/jobs", "/api/score"})
+
+
+def _log_configuration() -> None:
+    """
+    One line at startup saying what this process will and will not do, so a
+    public deploy that is missing a cap is visible in the first screen of logs.
+    """
+    fallback = judge_fallback_model()
+    logger.info(
+        "Vision %s; judge %s (fallback: %s); run timeout %ss",
+        vision_model(),
+        judge_model(),
+        fallback or "none",
+        int(job_timeout_seconds()) or "off",
+    )
+    logger.info(
+        "Demo caps: access code %s; %s calls/day; %s calls/IP/hour; %s runs at once; clip <= %s s; "
+        "trusted proxies: %s; sample clip: %s",
+        "set" if access_required() else "OFF",
+        daily_limit() or "unlimited",
+        ip_hourly_limit() or "unlimited",
+        max_concurrent_jobs() or "unlimited",
+        int(max_clip_seconds()) or "any",
+        ", ".join(trusted_proxies()) or "none (X-Forwarded-For ignored)",
+        "present" if load_sample() is not None else f"none at {sample_dir() or 'DEMO_SAMPLE_DIR (unset)'}",
+    )
+    if demo_caps_set() and not access_required():
+        logger.warning("Demo caps are set but DEMO_ACCESS_CODE is not: scoring is open to anyone who finds the URL.")
+    if demo_caps_set() and load_sample() is None:
+        logger.warning(
+            "No sample clip is configured: once the budget is spent, visitors see nothing. "
+            "Build one with tools/make_demo_sample.py and set DEMO_SAMPLE_DIR."
+        )
+    if ip_hourly_limit() and not trusted_proxies():
+        logger.warning(
+            "DEMO_IP_HOURLY_LIMIT is set but TRUSTED_PROXIES is not: behind a reverse proxy every "
+            "visitor shares the proxy's address and its hourly allowance."
+        )
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    _log_configuration()
     yield
     # Never leave uploaded clips or replays behind (spec §12).
     get_store().shutdown()
 
 
+def _refusal_response(exc: DemoRefused) -> JSONResponse:
+    """
+    A demo limit, as one plain sentence plus a reason the page can act on
+    (offer the sample clip, ask for the access code) and a Retry-After.
+    """
+    headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+    return JSONResponse(
+        status_code=exc.status,
+        content={"detail": exc.detail, "reason": exc.reason},
+        headers=headers,
+    )
+
+
+class AccessCodeMiddleware:
+    """
+    Checks the access code on the gated routes before the request body is read.
+
+    FastAPI parses the multipart form before any route code or dependency
+    runs, so a check inside the handler happens only after the whole clip —
+    up to MAX_UPLOAD_MB of it — has been received and spooled. This runs ahead
+    of that: no code or a wrong one is answered from the headers alone, and
+    the body is never read. The code therefore travels as the X-Access-Code
+    header, which the page sends and a script can too; a form field would be
+    inside the body this is here not to read.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] == "http" and scope.get("method") == "POST" and scope.get("path") in GATED_PATHS:
+            try:
+                check_access(Headers(scope=scope).get("x-access-code"))
+            except DemoRefused as exc:
+                await _refusal_response(exc)(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 app = FastAPI(title="Sideline Lift Judge", lifespan=lifespan)
+app.add_middleware(AccessCodeMiddleware)
 
 # Mount static and templates
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
@@ -81,24 +184,34 @@ class ConfigurationError(RuntimeError):
 
 @app.exception_handler(DemoRefused)
 async def demo_refused(_: Request, exc: DemoRefused) -> JSONResponse:
-    """
-    A demo limit, as one plain sentence plus a reason the page can act on
-    (offer the sample clip, ask for the access code) and a Retry-After.
-    """
-    headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
-    return JSONResponse(
-        status_code=exc.status,
-        content={"detail": exc.detail, "reason": exc.reason},
-        headers=headers,
-    )
+    return _refusal_response(exc)
 
 
-def get_client() -> NebiusChatClient:
+def get_client(*, meter: Optional[Callable[[], None]] = None) -> NebiusChatClient:
+    """
+    The Token Factory client for one request. `meter` is charged before every
+    model call, so the demo budget counts what is actually billed.
+    """
     api_key = os.getenv("NEBIUS_API_KEY")
     if not api_key:
         raise ConfigurationError("The scoring service is not configured yet. Set NEBIUS_API_KEY on the server.")
     base_url = os.getenv("NEBIUS_BASE_URL") or NebiusChatClient.DEFAULT_BASE_URL
-    return NebiusChatClient(api_key=api_key, base_url=base_url)
+    return NebiusChatClient(api_key=api_key, base_url=base_url, meter=meter)
+
+
+T = TypeVar("T")
+
+
+async def _within_job_timeout(work: Awaitable[T]) -> T:
+    """
+    Hold a whole scoring run to JOB_TIMEOUT_SECONDS. Past it the run is
+    cancelled — no further model call is made — and the user hears that it was
+    stopped, not that the server is busy. 0 disables the limit.
+    """
+    timeout = job_timeout_seconds()
+    if not timeout:
+        return await work
+    return await asyncio.wait_for(work, timeout=timeout)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -169,11 +282,6 @@ def _parse_lift(value: Optional[str]) -> Optional[LiftType]:
         raise HTTPException(status_code=400, detail=f"Unknown lift: {value}. Choose snatch, clean or jerk.")
 
 
-def _access_code(request: Request, form_value: Optional[str]) -> Optional[str]:
-    """The page sends the code as a header; scripts may send it as a form field."""
-    return request.headers.get("x-access-code") or form_value
-
-
 async def _store_upload(upload: UploadFile, destination_dir: Optional[Path] = None) -> Path:
     if not is_supported_video_upload(upload.content_type, upload.filename):
         raise HTTPException(
@@ -217,35 +325,37 @@ async def create_job(
     frames: Optional[int] = Form(default=None),
     num_frames: Optional[int] = Form(default=None),
     debug: bool = Form(default=False),
-    access_code: Optional[str] = Form(default=None),
 ):
     """
     Accept a clip and start scoring in the background (spec §13). Returns the job
     id to poll, so a slow or dropped mobile connection cannot lose the result.
     """
-    check_access(_access_code(request, access_code))
+    # Already checked before the body was read (AccessCodeMiddleware); kept so
+    # the handler is safe on its own.
+    check_access(request.headers.get("x-access-code"))
     upload = _resolve_upload(video, file)
     selected_lift = _parse_lift(lift)
     start = _parse_optional_float(trim_start, "Trim start")
     end = _parse_optional_float(trim_end, "Trim end")
     mode = "auto" if str(mode).strip().lower() == "auto" else "single"
 
+    guard = get_guard()
+    ip = client_ip(request)
     # Fail before touching the network if the service is not configured.
     try:
-        client = get_client()
+        client = get_client(meter=guard.meter(ip))
     except ConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
 
     store = get_store()
-    guard = get_guard()
     job = store.create()
     try:
         source = await _store_upload(upload, job.workdir)
         job.source_path = source
         _check_window(source, start, end)
-        # Everything free has passed; only now does the clip count against the
-        # caller's allowance, so a rejected window never costs them a turn.
-        guard.admit(client_ip(request))
+        # Everything free has passed; only now does the run take a slot, so a
+        # rejected window never costs the caller anything.
+        guard.admit(ip)
     except (HTTPException, DemoRefused):
         store.discard(job)
         raise
@@ -264,11 +374,13 @@ async def create_job(
 
     async def runner(current: Job) -> None:
         try:
-            outcome = await run_scoring(
-                request_model,
-                client=client,
-                prompts_dir=str(PROMPTS_DIR),
-                progress=current.set_progress,
+            outcome = await _within_job_timeout(
+                run_scoring(
+                    request_model,
+                    client=client,
+                    prompts_dir=str(PROMPTS_DIR),
+                    progress=current.set_progress,
+                )
             )
             current.replays = {
                 item.index: Path(item.replay_path) for item in outcome.lifts if item.replay_path
@@ -359,13 +471,12 @@ async def score_endpoint(
     frames: Optional[int] = Form(default=None),
     num_frames: Optional[int] = Form(default=None),
     debug: bool = Form(default=False),
-    access_code: Optional[str] = Form(default=None),
 ):
     """
     Synchronous scoring: one request, one verdict. Kept for scripts and for
     parity with the CLI; the web UI uses /api/jobs so it can show progress.
     """
-    check_access(_access_code(request, access_code))
+    check_access(request.headers.get("x-access-code"))
     upload = _resolve_upload(video, file)
     selected_lift = _parse_lift(lift)
     start = _parse_optional_float(trim_start, "Trim start")
@@ -373,25 +484,28 @@ async def score_endpoint(
 
     source = await _store_upload(upload)
     guard = get_guard()
+    ip = client_ip(request)
     admitted = False
     try:
-        client = get_client()
+        client = get_client(meter=guard.meter(ip))
         _check_window(source, start, end)
-        guard.admit(client_ip(request))
+        guard.admit(ip)
         admitted = True
-        outcome = await run_scoring(
-            ScoreRequest(
-                video_path=str(source),
-                lift=selected_lift,
-                trim_start=start,
-                trim_end=end,
-                frames=clamp_frames(frames if frames is not None else num_frames),
-                mode="auto" if str(mode).strip().lower() == "auto" else "single",
-                render_replay=False,
-                keep_observations=bool(debug),
-            ),
-            client=client,
-            prompts_dir=str(PROMPTS_DIR),
+        outcome = await _within_job_timeout(
+            run_scoring(
+                ScoreRequest(
+                    video_path=str(source),
+                    lift=selected_lift,
+                    trim_start=start,
+                    trim_end=end,
+                    frames=clamp_frames(frames if frames is not None else num_frames),
+                    mode="auto" if str(mode).strip().lower() == "auto" else "single",
+                    render_replay=False,
+                    keep_observations=bool(debug),
+                ),
+                client=client,
+                prompts_dir=str(PROMPTS_DIR),
+            )
         )
         scored = outcome.scored
         if not scored:
@@ -413,6 +527,8 @@ async def score_endpoint(
         raise HTTPException(status_code=400, detail=str(exc))
     except ConfigurationError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail=TOO_LONG)
     except Exception as exc:
         logger.exception("Scoring failed")
         raise HTTPException(

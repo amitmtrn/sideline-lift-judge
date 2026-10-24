@@ -154,13 +154,19 @@ That takes it to ~340 words ≈ 2:16, which leaves 40 seconds of footage to brea
 Every line above is true of what the code does today. Do not add to it:
 
 - The judge **is** an NVIDIA open model (Nemotron 3 Ultra) on Token Factory, with a Nemotron Super
-  fallback — **by default**. The public demo URL may be configured to run Nemotron 3 Super as
-  its judge to keep the bill small, and its footer says so. Record the video against your own
-  instance with the default (Ultra) judge, so beat 6 stays true of what is on screen.
+  fallback — **in a local checkout**. The public demo (the Docker image) runs Nemotron 3 Super
+  with **no fallback** to keep the bill small; its footer and every result card name the judge
+  that actually answered. Record the video against your own local instance with the default
+  (Ultra) judge, so beat 6 stays true of what is on screen — and check the card's small
+  "Judged by" line in the shot says Ultra.
 - The vision stage is **not** an NVIDIA model — it is MiniCPM-V, because the Nemotron models on
-  this account reject image input. If asked, say so plainly; the README says it too. Beat 6 is
-  worded to be accurate about this: "a vision model", then NVIDIA named for the reasoning.
-- Scores are **indicative**. There is no pose estimation and no pixel measurement of drift — the
-  drift is a description, not a measurement. Don't call it one.
+  this account reject image input. If asked, say so plainly; the README says it too, and so does
+  the "Frames read by MiniCPM-V" line on every card. Beat 6 is worded to be accurate about this:
+  "a vision model", then NVIDIA named for the reasoning.
+- Scores are **indicative**. There is no pose estimation. The drift *is* measured — by the local
+  plate tracker, in plate widths, scaled to centimetres by assuming a 450 mm bumper — and the
+  card's drift line is written from that number. Call it a tracker estimate, not a lab
+  measurement, and if the clip in beat 4 shows "judge's read (bar not tracked)", say "the model
+  describes the drift" instead of quoting centimetres.
 - Latency is "about a minute on a normal connection" — a target seen in testing, not a guarantee.
   Beat 3 deliberately makes no timing claim.

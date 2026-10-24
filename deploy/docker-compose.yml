@@ -1,11 +1,16 @@
 # The app behind Caddy, which gets and renews the TLS certificate itself.
 #
-#   cp .env.example .env            # fill in NEBIUS_API_KEY and the demo caps
+#   cp .env.example .env            # NEBIUS_API_KEY and DEMO_ACCESS_CODE at least
+#   python tools/make_demo_sample.py samples/snatch1.mp4 --lift snatch --out demo_sample/
 #   DOMAIN=lift.example.com docker compose -f deploy/docker-compose.yml up -d --build
 #
 # DOMAIN must already point at this machine (an A record) and ports 80 and
 # 443 must be open; Caddy does the rest. One app replica, by design: jobs and
 # the demo counters live in the process.
+#
+# The spend caps are on by default — they are ENV in the Dockerfile — and the
+# sample clip is baked into the image. To change a cap, set the variable in
+# .env; the container's environment overrides the image's.
 services:
   app:
     build:
@@ -14,10 +19,16 @@ services:
       - ../.env
     environment:
       PORT: "8000"
+      # Caddy is the only thing that reaches this port (it is exposed to the
+      # compose network, never published), and it comes from the private
+      # container network — so its X-Forwarded-For is believed and the
+      # per-IP limit sees the visitor, not the proxy.
+      TRUSTED_PROXIES: private
     expose:
       - "8000"
     restart: unless-stopped
-    # The cached sample clip (tools/make_demo_sample.py), if you made one.
+    # To swap the sample without rebuilding the image, mount a directory over
+    # the baked-in one:
     # volumes:
     #   - ../demo_sample:/app/demo_sample:ro
 

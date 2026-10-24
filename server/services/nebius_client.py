@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, TypedDict
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, TypedDict
 
 import requests
 import math
@@ -70,18 +70,27 @@ def judge_model() -> str:
 
 
 _NEMOTRON_TIER_RE = re.compile(r"^nvidia/nemotron-3-([a-z]+)", re.IGNORECASE)
+_MINICPM_RE = re.compile(r"^openbmb/minicpm-v-(\d+)[_.](\d+)", re.IGNORECASE)
 
 
-def judge_display_name(model: Optional[str] = None) -> str:
+def model_display_name(model: str) -> str:
     """
-    What the page says it is judged by. The public demo may run a cheaper
-    judge than the default, and the footer must not claim otherwise.
+    A model id as the page names it. The result card says which model did
+    what, and the public demo may run a cheaper judge than the default, so
+    the names come from what is actually configured, never from a constant.
     """
-    model = model or judge_model()
     match = _NEMOTRON_TIER_RE.match(model)
     if match:
         return f"NVIDIA Nemotron 3 {match.group(1).capitalize()}"
+    match = _MINICPM_RE.match(model)
+    if match:
+        return f"MiniCPM-V {match.group(1)}.{match.group(2)}"
     return model
+
+
+def judge_display_name(model: Optional[str] = None) -> str:
+    """What the footer says the page is judged by."""
+    return model_display_name(model or judge_model())
 
 
 def judge_fallback_model() -> str:
@@ -101,11 +110,21 @@ class NebiusChatClient:
     # Verified from Nebius Token Factory docs
     DEFAULT_BASE_URL: str = "https://api.tokenfactory.nebius.com/v1"
 
-    def __init__(self, api_key: str, base_url: Optional[str] = None, default_model: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        base_url: Optional[str] = None,
+        default_model: Optional[str] = None,
+        *,
+        meter: Optional[Callable[[], None]] = None,
+    ) -> None:
         self.api_key = api_key
         self.base_url = base_url or self.DEFAULT_BASE_URL
         # default_model is optional; callers should pass model explicitly for clarity
         self.default_model = default_model
+        # Called before every HTTP attempt — retries included, since each one
+        # is billed. The public demo's budget raises here to stop the call.
+        self.meter = meter
 
     def _headers(self) -> Dict[str, str]:
         return {
@@ -139,16 +158,21 @@ class NebiusChatClient:
         def post(body: Dict[str, Any]):
             return requests.post(url, headers=self._headers(), json=body, timeout=timeout)
 
-        # The request blocks, so it runs on a worker thread.
-        response = await asyncio.to_thread(post, payload)
+        async def attempt(body: Dict[str, Any]):
+            if self.meter is not None:
+                self.meter()
+            # The request blocks, so it runs on a worker thread.
+            return await asyncio.to_thread(post, body)
+
+        response = await attempt(payload)
         if response.status_code in UNKNOWN_PARAMETER_STATUS and extra_body:
             # The provider rejected a parameter it does not know: ask again
             # without the no-thinking hint.
             payload = base_payload
-            response = await asyncio.to_thread(post, payload)
+            response = await attempt(payload)
         if response.status_code in RETRYABLE_STATUS:
             await asyncio.sleep(RETRY_BACKOFF_SECONDS)
-            response = await asyncio.to_thread(post, payload)
+            response = await attempt(payload)
         if response.status_code != 200:
             raise NebiusAPIError(response.status_code, str(response.text)[:500])
         data = response.json()
@@ -323,7 +347,9 @@ async def _judge_with_model(
     max_tokens: int,
 ) -> "LiftJudgment":
     """
-    One judge model, with a single repair retry when the reply is not valid JSON.
+    One judge model, with a single repair retry when the reply is not valid
+    JSON. The verdict records which model produced it (`judged_by`), so the
+    result can say whether the primary judge or its fallback answered.
     """
     from server.schemas.judgment import parse_and_validate_json
 
@@ -334,7 +360,7 @@ async def _judge_with_model(
         extra_body=NO_THINKING_EXTRA_BODY,
     )
     try:
-        return parse_and_validate_json(first)
+        return parse_and_validate_json(first).model_copy(update={"judged_by": model})
     except (ValueError, ValidationError):
         retry_messages = messages + [
             {
@@ -348,7 +374,7 @@ async def _judge_with_model(
             max_tokens=max_tokens,
             extra_body=NO_THINKING_EXTRA_BODY,
         )
-        return parse_and_validate_json(second)  # Let errors bubble
+        return parse_and_validate_json(second).model_copy(update={"judged_by": model})  # Let errors bubble
 
 
 async def request_judgment(

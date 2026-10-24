@@ -27,9 +27,11 @@ class LiftJudgment(BaseModel):
     notes: Optional[str] = Field(default=None)
 
     # Set by the server after the judge replies, never by the model itself:
-    # clip-quality warnings (FR-8) and the rendered replay (FR-10).
+    # clip-quality warnings (FR-8), the rendered replay (FR-10), and which
+    # model actually produced this verdict — the primary judge or its fallback.
     warnings: List[str] = Field(default_factory=list)
     annotated_video_url: Optional[str] = Field(default=None)
+    judged_by: Optional[str] = Field(default=None)
 
     @model_validator(mode="after")
     def validate_cues(self) -> "LiftJudgment":

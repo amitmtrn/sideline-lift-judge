@@ -10,6 +10,7 @@ plate diameters, the one length whose real size is known in every clip.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -92,23 +93,83 @@ def measure(path: Optional[BarPath]) -> BarPathMeasurement:
     )
 
 
-def where_in_the_rise(fraction: Optional[float], lift: str) -> str:
-    """A coach's name for a height along the rise, by lift."""
+# (upper bound of the rise fraction, the phase as a name, the phase as a place)
+_JERK_PHASES = (
+    (0.35, "the dip and the start of the drive", "in the dip and the start of the drive"),
+    (0.8, "the drive", "in the drive"),
+    (None, "the lockout", "at the lockout"),
+)
+_PULL_PHASES = (
+    (0.25, "the first pull, just off the floor", "in the first pull, just off the floor"),
+    (0.5, "around the knee, in the transition", "around the knee, in the transition"),
+    (0.75, "the second pull, around contact", "in the second pull, around contact"),
+    (None, "the turnover and catch", "at the turnover and catch"),
+)
+
+
+def where_in_the_rise(fraction: Optional[float], lift: str, *, as_place: bool = False) -> str:
+    """
+    A coach's name for a height along the rise, by lift. `as_place` returns
+    it with its preposition, to end a sentence with ("worst … in the drive").
+    """
     if fraction is None:
-        return "an unknown point of the rise"
-    if lift == "jerk":
-        if fraction < 0.35:
-            return "the dip and the start of the drive"
-        if fraction < 0.8:
-            return "the drive"
-        return "the lockout"
-    if fraction < 0.25:
-        return "the first pull, just off the floor"
-    if fraction < 0.5:
-        return "around the knee, in the transition"
-    if fraction < 0.75:
-        return "the second pull, around contact"
-    return "the turnover and catch"
+        return "" if as_place else "an unknown point of the rise"
+    phases = _JERK_PHASES if lift == "jerk" else _PULL_PHASES
+    for bound, name, place in phases:
+        if bound is None or fraction < bound:
+            return place if as_place else name
+    return phases[-1][2] if as_place else phases[-1][1]
+
+
+# Read off the judge's own drift text. The tracker measures size and height,
+# not direction, so the one thing taken from the words is forward or back.
+_FORWARD_RE = re.compile(r"\b(forward|forwards|ahead of|in front of|out in front|away from the (?:body|shins|legs|thighs|lifter|athlete))\b")
+_BACKWARD_RE = re.compile(r"\b(backward|backwards|back toward|back towards|swings back|drifts back|loops back|behind the)\b")
+
+
+def drift_direction(text: Optional[str]) -> Optional[str]:
+    """`forward`, `backward`, or None when the text says neither or both."""
+    lowered = (text or "").lower()
+    forward = bool(_FORWARD_RE.search(lowered))
+    backward = bool(_BACKWARD_RE.search(lowered))
+    if forward == backward:
+        return None
+    return "forward" if forward else "backward"
+
+
+def drift_summary(
+    measurement: Optional[BarPathMeasurement], lift: str, judge_text: Optional[str]
+) -> Optional[Dict[str, Any]]:
+    """
+    The result card's one line about the drift.
+
+    When the bar was tracked it is written from the measurement — the same
+    number the judge was given and the replay's orange ring is drawn from — so
+    the words on the card cannot contradict the figure under them. The judge's
+    text is consulted for one thing the tracker cannot know: the direction.
+    Without a trace the line is the judge's own words, labelled as such.
+    """
+    judge_text = (judge_text or "").strip()
+    if measurement is None or not measurement.tracked or measurement.max_drift_diameters is None:
+        if not judge_text:
+            return None
+        return {"text": judge_text, "source": "judge", "direction": drift_direction(judge_text)}
+
+    diameters = measurement.max_drift_diameters
+    cm = measurement.max_drift_cm if measurement.max_drift_cm is not None else diameters * PLATE_DIAMETER_M * 100.0
+    cm_text = f"about {max(1, round(cm))} cm ({diameters:.2f} plate widths)"
+    direction = drift_direction(judge_text)
+    if diameters < CLOSE_DRIFT_DIAMETERS:
+        head = "Close path" + (f", a little {direction}" if direction else "")
+        body = f"the bar stayed within {cm_text} of its start line"
+    else:
+        head = ("Noticeable drift" if diameters < LARGE_DRIFT_DIAMETERS else "Large drift") + (
+            f" {direction}" if direction else ""
+        )
+        body = f"{cm_text} off the start line"
+    where = where_in_the_rise(measurement.drift_at_rise_fraction, lift, as_place=True)
+    text = f"{head}: {body}" + (f", furthest {where}" if where else "") + "."
+    return {"text": text, "source": "measurement", "direction": direction}
 
 
 def describe(measurement: BarPathMeasurement, lift: str) -> str:

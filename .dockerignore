@@ -8,7 +8,6 @@ __pycache__
 .env
 samples
 out
-demo_sample
 docs
 tests
 *.mp4
@@ -18,3 +17,6 @@ tests
 *.jpg
 *.jpeg
 *.pdf
+# demo_sample/ is deliberately NOT listed: its sample.json and replay MP4s are
+# the cached sample the image serves for free. (The *.mp4 rule above matches
+# only the context root, not files inside it.)

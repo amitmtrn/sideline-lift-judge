@@ -18,8 +18,10 @@ node_modules/
 samples/
 # score_session.py writes cut clips and extracted frames here
 out/
-# tools/make_demo_sample.py writes the cached demo result (with its replay) here
-demo_sample/
+# tools/make_demo_sample.py writes the cached demo result (with its replay) here.
+# The directory itself is tracked (empty) so the Dockerfile can always COPY it.
+demo_sample/*
+!demo_sample/.gitkeep
 *.jpg
 *.jpeg
 *.mp4

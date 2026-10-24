@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Optional
 
+from server.services.measurement import drift_summary
 from server.services.pipeline import ScoreOutcome, ScoredLift
 
 ReplayUrl = Callable[[int], str]
@@ -33,6 +34,16 @@ def lift_payload(item: ScoredLift, *, replay_url: Optional[ReplayUrl] = None) ->
             body["annotated_video_url"] = replay_url(item.index)
         else:
             body["annotated_video_url"] = None
+        # The card's drift line: from the measurement when there is one, so it
+        # cannot contradict the number; the judge's own words stay in
+        # `max_horizontal_drift` for the record.
+        drift = drift_summary(item.measurement, item.lift.value, item.judgment.max_horizontal_drift)
+        if drift:
+            body["drift"] = drift
+    if item.models:
+        # Which model saw the frames and which one judged — the fallback, when
+        # the primary failed — so the card never implies a model it did not use.
+        body["models"] = dict(item.models)
     if item.observations:
         body["observations"] = item.observations
     return body

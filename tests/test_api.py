@@ -137,6 +137,10 @@ def test_single_lift_round_trip(client, clip):
     assert lift["cues"] and len(lift["cues"]) <= 2
     assert lift["max_horizontal_drift"]
     assert 0.0 <= lift["confidence"] <= 1.0
+    # The card says which model did what, and its drift line has a source.
+    assert lift["models"]["vision_name"] == "MiniCPM-V 4.5"
+    assert lift["models"]["judge_name"] == "NVIDIA Nemotron 3 Ultra"
+    assert lift["drift"]["source"] in ("measurement", "judge") and lift["drift"]["text"]
 
 
 def test_replay_is_served_and_playable_inline(client, clip):

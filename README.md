@@ -14,8 +14,13 @@ model, and both stages run on **Nebius Token Factory**.
 - Clean & jerk is detected and scored as **two separate lifts**
 - Confidence drops, with a visible warning, on portrait, off-axis or mixed-lift clips — and
   when the judge's verdict contradicts the measured path
+- Every verdict card says **which model did what** — the local tracker measured, MiniCPM-V
+  described, which Nemotron judged (and whether the fallback answered) — and its drift line is
+  written from the measurement, so the words cannot contradict the number
 - Schema-validated JSON, a repair retry, and a fallback judge model
 - Two CLIs for one clip and for a whole session
+- Public-demo spend caps that are **on by default in the Docker image**: access code, budgets
+  counted in model calls, a run timeout, a cheaper judge with no fallback, a free cached sample
 
 ### How a clip becomes a verdict
 
@@ -73,11 +78,14 @@ client/              everything served to the browser — no Python
   static/            styles.css, app.js, service-worker.js, manifest.webmanifest,
                      img/ (mark, filming guide), icons/ (PWA icons)
 prompts/             model prompts, shared by the server and both CLIs
-tools/               make_icons.py — regenerates the PWA icons
+tools/               make_icons.py (PWA icons), make_demo_sample.py (the cached sample)
 tests/               pytest; every Token Factory call is mocked
+demo_sample/         the cached sample the public demo serves for free (contents gitignored,
+                     baked into the image)
 score_clip.py        CLI: one clip
 score_session.py     CLI: a whole session, split into exercises
-Dockerfile           the app as one container (ffmpeg and fonts included)
+Dockerfile           the app as one container (ffmpeg and fonts included); the public demo
+                     with its spend caps on
 deploy/              docker-compose.yml + Caddyfile: HTTPS on a VM in one command
 ```
 
@@ -87,6 +95,7 @@ deploy/              docker-compose.yml + Caddyfile: HTTPS on a VM in one comman
 - Stage 1 (vision/perception): `openbmb/MiniCPM-V-4_5` (configurable via `NEBIUS_VISION_MODEL`) — receives sampled frames and outputs factual observations only (no scores).
 - Stage 2 (judge/reasoning): `nvidia/Nemotron-3-Ultra-550b-a55b` (configurable via `NEBIUS_JUDGE_MODEL`) — receives the rubric + per-lift prompt and the Stage‑1 observations, and returns the validated JSON score.
 - Judge fallback: `nvidia/nemotron-3-super-120b-a12b` (configurable via `NEBIUS_JUDGE_FALLBACK_MODEL`). If the primary judge errors, times out, or never returns valid JSON — even after the one repair retry — the same prompt is sent to this model. Set the variable to an empty value to turn the fallback off.
+- The Docker image — the public demo — inverts this: its judge is **Nemotron 3 Super with no fallback**, so a failed judge call fails rather than escalating to Ultra. The verdict carries `judged_by`, the model that actually answered, and the card shows it, so neither the footer nor a result ever claims a model that was not used.
 - Cosmos models are not currently served on Token Factory in this account. If needed later, Cosmos on AI Cloud is a future option outside Token Factory.
 
 The NVIDIA Nemotron models on this account reject image input, so the perception stage runs on
@@ -113,9 +122,12 @@ Environment variables:
 - `NEBIUS_JUDGE_MAX_TOKENS` (default `2048`)
 - `MAX_UPLOAD_MB` (default `200`; `0` disables the upload size check)
 - `JOB_TTL_SECONDS` (default `1800`) — how long a finished job and its replay are kept
-- Public-demo caps, all off until set — see [Running the public demo](#running-the-public-demo-without-a-surprise-bill):
-  `DEMO_ACCESS_CODE`, `DEMO_DAILY_LIMIT`, `DEMO_IP_HOURLY_LIMIT`, `MAX_CONCURRENT_JOBS`,
-  `MAX_CLIP_SECONDS`, `MAX_FRAMES`, `DEMO_SAMPLE_DIR`
+- `JOB_TIMEOUT_SECONDS` (default `600`; `0` disables) — wall clock one scoring run may take,
+  model calls and replay included; past it the run is cancelled and no further call is made
+- Public-demo caps, off in a checkout and **on in the Docker image** — see
+  [Running the public demo](#running-the-public-demo-without-a-surprise-bill):
+  `DEMO_ACCESS_CODE`, `DEMO_DAILY_LIMIT`, `DEMO_IP_HOURLY_LIMIT`, `TRUSTED_PROXIES`,
+  `MAX_CONCURRENT_JOBS`, `MAX_CLIP_SECONDS`, `MAX_FRAMES`, `DEMO_SAMPLE_DIR`
 
 Both stages request `chat_template_kwargs.enable_thinking = false`. The judge models are
 reasoning models: left to think, they spend the whole completion budget on reasoning, get cut
@@ -173,9 +185,22 @@ The flow is four screens:
    server, so nothing is re-encoded on the phone.
 4. **Score** — staged progress while it works, then the verdict.
 
-The result screen shows the score and band in large type, the max horizontal drift, a confidence
-meter with any warnings next to it, 1–2 cue cards, collapsible notes, and the annotated replay
-with download and share buttons.
+The result screen shows the score and band in large type, the max drift, a line saying which
+model did what, a confidence meter with any warnings next to it, 1–2 cue cards, collapsible
+notes, and the annotated replay with download and share buttons.
+
+The drift line is **written from the tracker's measurement** whenever the bar was followed —
+*"Noticeable drift forward: about 9 cm (0.21 plate widths) off the start line, furthest around
+the knee, in the transition."* — so the words on the card and the number under them are the same
+fact; the judge's text lends only the direction, which the tracker cannot know. When the bar was
+not tracked the line is the judge's own description, labelled as such. The judge's words on the
+drift are kept under *Notes* either way, so nothing the model said is hidden.
+
+Under it, in small type: *Bar tracked locally (OpenCV, no model), plate seen in 93% of frames ·
+Frames read by MiniCPM-V 4.5 · Judged by NVIDIA Nemotron 3 Super* — with *(fallback judge)*
+appended when the primary failed and the second model answered. The names come from the
+server's record of which model actually replied (`models` and `judged_by` in the result), not
+from a constant.
 
 Under the hood each run: finds where the plate rises inside the trimmed window and follows it
 (local OpenCV), samples 8–16 frames (default 10) from that lift, applies phone rotation metadata,
@@ -204,8 +229,10 @@ lose a result:
 | `GET /api/jobs/{id}/replay/{n}.mp4` | the annotated replay for lift *n* |
 | `POST /api/score` | synchronous one-shot scoring, for scripts |
 
-Jobs and their replays are deleted after `JOB_TTL_SECONDS` (default 30 minutes), and the uploaded
-clip is deleted as soon as scoring finishes.
+When the demo is gated, both `POST`s take the code as the `X-Access-Code` header (a form field
+is inside the body, which the check is there not to read). Jobs and their replays are deleted
+after `JOB_TTL_SECONDS` (default 30 minutes), the uploaded clip is deleted as soon as scoring
+finishes, and a run is cancelled after `JOB_TIMEOUT_SECONDS`.
 
 ### Filming guide
 The score is only as good as the angle. The app shows this before the camera opens, and it is
@@ -376,9 +403,12 @@ observations:
 The judge is told what each source is good for: the measurement for *how far* and *where*, the
 observations for *direction* (forward or back), bar–body contact and phase quality, and to say in
 its notes when it prefers one over the other. The same numbers come back in the result as
-`bar_path` and are shown under the drift description as *Tracked: bar strayed 0.21 plate widths…*.
-When the bar could not be followed, the judge is told that too and is asked to keep its confidence
-down, and the server caps it anyway.
+`bar_path`, and the card's drift line (`drift` in the result) is composed from them on the server
+— size band, centimetres, plate widths, where in the rise — with the judge consulted only for
+forward or back. So the judge can no longer put "minimal drift" above a ring drawn half a plate
+off the line; its words go under *Notes*, and the re-check still flags the disagreement. When
+the bar could not be followed, the judge is told that too and is asked to keep its confidence
+down, the server caps it anyway, and the card's drift line is the judge's read, labelled as such.
 
 Read the number for what it is. It is measured from one plate's apparent position, so parallax,
 an off-axis camera and the athlete moving across the frame all leak into it; the centimetre figure
@@ -441,45 +471,77 @@ The protection is in layers, so that even the worst case is a few dollars.
   touching the key you record the video with.
 - Check Token Factory usage daily until judging ends, then shut the demo down or revoke the key.
 
-**Then limit usage in the app.** Every cap below is off until its variable is set, so local
-runs, the CLIs and the tests are untouched. A refused request gets one plain sentence, a
-`Retry-After` header and a machine-readable `reason` the page acts on.
+**Then limit usage in the app — which the Docker image does by default.** In a local checkout
+every cap below is off until its variable is set, so local runs, the CLIs and the tests are
+untouched. The image is the public demo, so there the caps are `ENV` in the `Dockerfile` with
+the values in the table; a container's own environment (`--env-file`, `-e`, a platform's
+settings) overrides any of them. Only the access code has no default, because it is the secret.
+A refused request gets one plain sentence, a `Retry-After` header and a machine-readable
+`reason` the page acts on.
 
-| Layer | Variable | Suggested | What the visitor sees |
+| Layer | Variable | In the image | What the visitor sees |
 |---|---|---|---|
-| Access code | `DEMO_ACCESS_CODE` | a code only in the submission | a field on the first screen; `?code=…` in the link fills it and is then removed from the address bar |
-| Daily budget | `DEMO_DAILY_LIMIT` | `50` | "Today's demo budget … is used up" (HTTP 429, resets at UTC midnight) |
-| Per-IP rate | `DEMO_IP_HOURLY_LIMIT` | `3` | "You've scored 3 clips in the last hour … try again in N min" |
+| Access code | `DEMO_ACCESS_CODE` | **you set it** | a field on the first screen; `?code=…` in the link fills it and is then removed from the address bar. Checked from the `X-Access-Code` header **before the upload is read**, so a clip sent without the code never reaches the disk |
+| Daily budget | `DEMO_DAILY_LIMIT` | `150` model calls | "Today's demo budget (150 model calls, about 50 clips) is used up" (HTTP 429, resets at UTC midnight) |
+| Per-IP rate | `DEMO_IP_HOURLY_LIMIT` | `12` model calls | "You've used this hour's share of the demo (12 model calls, about 4 clips). Try again in N min" |
+| Whose address | `TRUSTED_PROXIES` | unset (compose sets `private`) | nothing — decides whether `X-Forwarded-For` is believed, see below |
 | In flight at once | `MAX_CONCURRENT_JOBS` | `2` | "scoring other clips right now … try again in a minute" |
+| Run time | `JOB_TIMEOUT_SECONDS` | `240` (600 anywhere else) | "Scoring took too long and was stopped. Trim the clip to one lift and try again" |
 | Clip length | `MAX_CLIP_SECONDS` | `15` | the end handle starts at 15 s and the score button waits until the window fits; the server refuses anything longer |
 | Frames per lift | `MAX_FRAMES` | `10` | nothing — one vision call per lift instead of two |
-| Cheaper judge | `NEBIUS_JUDGE_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | the footer names the judge that is actually configured |
+| Cheaper judge | `NEBIUS_JUDGE_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | the footer and every card name the judge that actually answered |
+| No fallback | `NEBIUS_JUDGE_FALLBACK_MODEL` | empty | a failed judge call is an error, never a quiet escalation to Ultra |
+| Free fallback | `DEMO_SAMPLE_DIR` | `/app/demo_sample` (baked in) | a **Try a sample clip** button, on the filming screen and next to every refusal |
 
-The cap is on the *scored window*, not the upload: a long gallery clip trimmed to one lift is
-fine. Several access codes can be comma-separated, so one can be revoked without the rest.
-Counters live in the process, like the job store, so a restart resets the day's count — which
-errs on the side of letting a judge in. The per-IP limit reads the first `X-Forwarded-For`
-entry, which a direct caller could forge; all that buys them is one address's share, and the
-daily budget still holds. The sample, the polls and the replays are never counted.
+**The budgets count model calls, not uploads.** A single-lift clip costs three (triage,
+observation, judge); a repair retry or the fallback judge adds one each, and a *Find them* clip
+adds one triage per candidate window — so an upload is anywhere from three calls to a dozen,
+and counting uploads left the bill open-ended. A run is admitted when there is room for one
+whole lift, then charged call by call (retries included, since each attempt is billed). If the
+budget runs out part-way through a clip, the run stops at that call — the lifts already scored
+are kept and the one that was not says why. The cap is on the *scored window*, not the
+upload: a long gallery clip trimmed to one lift is fine. Several access codes can be
+comma-separated, so one can be revoked without the rest. Counters live in the process, like
+the job store, so a restart resets the day's count — which errs on the side of letting a judge
+in. The sample, the polls and the replays are never counted.
+
+**Whose address the per-IP limit sees.** `X-Forwarded-For` is only believed when the
+connection comes from a proxy named in `TRUSTED_PROXIES` — addresses, CIDR ranges, `private`
+(loopback, RFC 1918, link-local: a container network or a proxy on the same host) or `*`
+(whatever reaches the port; only right when nothing but your proxy can, as on Cloud Run or
+Fly). Behind a trusted proxy the visitor is the rightmost entry the proxy appended; anything a
+client put in the header itself is ignored. Unset, the header is ignored entirely and the
+socket's peer is the visitor — a direct caller can no longer pick a fresh hourly allowance by
+forging the header, but behind a proxy *everyone* would then share the proxy's one allowance,
+which the startup log warns about. `deploy/docker-compose.yml` sets `private` for Caddy; the
+image no longer tells uvicorn to trust the header from everyone.
 
 **Have a fallback that costs nothing.** Score one clip once, ahead of time, and the app serves
-that result — replay included — from disk:
+that result — replay included — from disk. The sample is **part of the deploy**: build it before
+`docker build` and the image carries it at `/app/demo_sample`, so any host serves it with no
+volume to mount.
 
 ```bash
 python tools/make_demo_sample.py samples/snatch1.mp4 --lift snatch --out demo_sample/
-# then on the server:
-DEMO_SAMPLE_DIR=demo_sample
+docker build -t lift-judge .
 ```
 
-A **Try a sample clip** button appears on the filming screen, and again next to every refusal,
-so a judge who arrives after the budget is spent still sees the whole result screen. The sample
-needs no access code and is not counted. Pick a clip you are allowed to show in public; the
-directory holds video, so it is gitignored and deployed alongside the app, never committed.
+The button appears on the filming screen, and again next to every refusal, so a judge who
+arrives after the budget is spent still sees the whole result screen. The sample needs no
+access code and is not counted, and its card names the judge that scored it when it was made
+(Ultra, if you built it from a checkout with the defaults) — which may differ from the live
+judge, and that is the truth of it. Pick a clip you are allowed to show in public; the directory
+holds video, so its contents are gitignored and only the empty directory is committed. The
+server logs a warning at startup when caps are set and there is no sample.
 
-**Keep Ultra for your own recorded run.** The public demo can run the cheaper Nemotron 3 Super
-as its judge while the default — and the video you record locally — stays on Ultra. The page
-footer always names the judge that is actually configured, so the demo never claims a model it
-is not using.
+**Keep Ultra for your own recorded run.** The image runs Nemotron 3 Super with no fallback;
+the code defaults — what a local checkout and the video you record use — stay on Ultra with a
+Super fallback. The footer and every verdict card name the judge that actually answered, so the
+demo never claims a model it is not using.
+
+**Read the first lines of the log.** At startup the server prints which judge, fallback and
+caps are in force, which proxies are trusted and whether a sample is present, and warns when caps
+are set without an access code, without a sample, or with a per-IP limit and no trusted proxy.
 
 ### Upload limits and errors
 - Uploads are streamed to disk and rejected over `MAX_UPLOAD_MB` (HTTP 413) with a message
@@ -492,8 +554,16 @@ is not using.
   (`server/services/errors.py`).
 - Token Factory calls connect within 10 s and must answer within `NEBIUS_TIMEOUT_SECONDS`
   (default 45; a healthy call takes 2–3 s). A 429 or 5xx gets exactly one more try after a short
-  pause; the judge then falls over to its second model. Dropping the no-thinking hint and
-  asking again happens only when the provider rejects the parameter (400/422), not on an outage.
+  pause; the judge then falls over to its second model, if one is configured. Dropping the
+  no-thinking hint and asking again happens only when the provider rejects the parameter
+  (400/422), not on an outage.
+- A whole run — tracking, every model call, the replay render — must finish within
+  `JOB_TIMEOUT_SECONDS` (default 600, the image sets 240). Past that it is cancelled, no further
+  model call is made, the slot is freed, and the phone reads "Scoring took too long and was
+  stopped." The synchronous endpoint answers 504.
+- When an access code is required, it is checked from the `X-Access-Code` header in ASGI
+  middleware, before FastAPI reads the multipart body — a clip sent without the code, or with a
+  wrong one, is refused from its headers alone and never spooled to disk.
 - The uploaded clip is deleted as soon as scoring finishes, pass or fail.
 
 ### Local samples (do not commit videos)
@@ -528,51 +598,120 @@ Coverage in this MVP:
 - Frames per call: vision accepts at most 10 images per request (configurable via `NEBIUS_VISION_MAX_IMAGES`, default 10). If more frames are requested, the app chunks them across multiple vision calls and merges observations before judging.
 - A session run costs one extra vision call per candidate window (triage, 8 frames) on top of the
   usual two calls per scored exercise. `--lift` skips triage; `--split-only` calls nothing.
+- In the web app a single-lift clip is three calls (triage, observation, judge); a repair retry
+  or the fallback judge adds one each. The public demo's budgets count exactly these.
 - Token estimate: depends on provider accounting for multi-image inputs; exact tokenization is provider-specific and not documented here. Treat as unknown and verify in your Nebius Token Factory usage dashboard.
 - For a URL that is open to the public, cap the spend — see
   [Running the public demo](#running-the-public-demo-without-a-surprise-bill).
 
 ### Limitations
-Read these before trusting a number.
+Read these before trusting a number. Where a limitation has a real case behind it, the case is
+given: these are things that happened on the 39 clips, not hypotheticals.
 
+**What the score is**
 - **Scores are indicative.** The judge reads a vision model's description of 8–16 sampled frames
   plus a drift figure tracked from one plate's apparent position. That figure is scaled by the
   plate's size, not calibrated against the scene, so parallax and an off-axis camera leak into
   it; there is no pose estimation. Treat the score as a coach's first read, not a lab result.
+- **The centimetres assume a 450 mm competition bumper.** Training plates are smaller, so on
+  them the figure overstates the drift by the same ratio. The plate-width figure is the one that
+  does not depend on the assumption.
+- **Direction is not measured.** The tracker gives size and height only; whether the bar went
+  forward or back comes from the vision model's words. The card's "forward" can be wrong while
+  its centimetres are right.
 - **Angle decides everything.** A clip that is not square to the side cannot show horizontal drift
-  honestly. The confidence value reflects this, but it cannot rescue a bad angle.
+  honestly — from an oblique camera, the athlete stepping toward or away from the lens reads as
+  sideways travel. The confidence cap says so; it cannot rescue the angle.
+
+**Finding the lift (the local tracker)**
+- **Measured, not assumed: 85% recall, 78% precision** on the 39 real clips (62 hand-labelled
+  lifts, 2026-10-21). 9 lifts were missed — mostly jerks whose drive is so fast the plate is
+  motion-blurred for the whole 0.3 s at the 12 fps the tracker samples — and 11 of 51 windows were
+  junk: an athlete walking in, the bar being dropped or re-racked. Triage rejects the junk before
+  anything is scored, but each rejected window still costs one vision call. The earlier figures
+  of 92/84 did not reproduce and were corrected.
+- **A clean & jerk done fast is one rise.** Rises under ~1.5 s apart merge as the phases of one
+  lift, so a jerk that follows the clean at once lands in the clean's window and the split falls
+  back to the quiet moment in the motion profile. If no split leaves each half at least 1.2 s —
+  what a slice of the clean looks like — only the first lift is scored and the confidence is
+  capped with a warning, because the frames hold both.
+- **Round things that are not the plate.** The tracker follows moving circles, and has been seen
+  to lock onto a logo on a wall banner (a trail hopped from the logo to the plate overhead and won
+  on "biggest rise" until agreement between trails became the rule), a plate parked on a stand
+  beside the athlete, and the *far* plate on an off-axis camera — hopping from one plate to the
+  other invents a sideways move that never happened. Colour and size checks now catch most of
+  these; a gym full of circular signage is still the hard case.
+- **It gives up rather than guess**: no trace when the plate is found in under ~55% of frames,
+  barely rises, or never moves. Then the drift is read from the frames alone, the judge is told,
+  and confidence is capped at 0.65.
+
+**The models**
+- **Triage misreads a deep snatch catch.** Bar overhead, athlete in a full squat reads to
+  MiniCPM-V as "shoulders", so some snatches come back as clean & jerk. The bar's own travel
+  cannot settle it (a clean & jerk done in one motion is ~1.5 s floor to overhead, like a
+  snatch), so the model's call stands and the mixed-lift cap applies. Choosing the lift yourself
+  on the first screen avoids this entirely; *Find them* is for session clips.
+- **Asked to name the lift, the vision model names what it expects.** An earlier triage prompt
+  that asked "which lift is this?" got "clean and jerk" at confidence 1.0 for *every* window of a
+  clean & jerk clip, including the one where the athlete was only dumping the bar. The prompt now
+  asks where the bar is in each numbered frame and derives the lift in code — and at 512 px it
+  mistook a front rack for a lockout overhead, which is why triage frames are 768 px.
+- **The judge cannot see the clip.** Left alone it returned confidence 0.85 on a clip that mixed a
+  clean and a jerk. Every clip-quality cap in this README exists because the judge only ever
+  reads text; the caps are ceilings on what it says, not a second opinion on the lift.
+- **Reasoning models think instead of answering.** Without the no-thinking hint the judge spends
+  the whole completion on reasoning, hits `finish_reason: length` and never emits the JSON; with
+  it, a reply that still is not JSON gets one repair retry, then the fallback judge — and in the
+  public demo, which runs without a fallback, an honest error.
+- **The vision stage is not an NVIDIA model.** The Nemotron models on this account reject image
+  input, so perception runs on MiniCPM-V; Nemotron does all the reasoning and scoring. The card
+  says so on every verdict.
+
+**Scope and platform**
 - **One lift per clip works best.** A clean & jerk is detected and split, but the split relies on
   the athlete being briefly still between the two lifts.
 - **Only snatch, clean and jerk.** Squats, deadlifts, presses and partial lifts are out of scope
   and are skipped rather than scored.
+- **Some phone codecs will not play in the browser.** HEVC from Android Chrome, for one: the
+  server reads it fine, but the page cannot trim it, so the clip is scored whole — and a public
+  demo with a 15 s cap will refuse a long one. Trim it in the gallery app first. iOS Safari
+  reports an infinite duration for a freshly captured clip until it seeks, which the trim screen
+  works around.
 - **No accounts, no history.** Results live for `JOB_TTL_SECONDS` and are then deleted. Nothing is
   stored between sessions.
 - **Rotation needs ffprobe.** Without it, portrait clips may be judged sideways.
-- **Jobs live in one process.** The store is in-memory, so the MVP runs as a single instance; it
-  does not scale horizontally as-is.
+- **Jobs and demo counters live in one process.** The store is in-memory, so the MVP runs as a
+  single instance; a restart resets the day's budget, and it does not scale horizontally as-is.
 - **Latency** is roughly a minute on a normal connection. That is a target observed in testing,
-  not a guarantee — it depends on Token Factory load and clip length.
+  not a guarantee — it depends on Token Factory load and clip length — and a run is cut off at
+  `JOB_TIMEOUT_SECONDS` regardless.
 
 ### Deployment
 The app is one container. The `Dockerfile` installs ffmpeg and the DejaVu font the replay strip
-is drawn with, runs as a non-root user and answers `/healthz`:
+is drawn with, runs as a non-root user, answers `/healthz`, and **is the public demo**: the spend
+caps are on in it (Super judge, no fallback, budgets in model calls, a 240 s run timeout, a
+15 s clip cap) and the sample clip is baked in. Build the sample first, then the image:
 
 ```bash
+python tools/make_demo_sample.py samples/snatch1.mp4 --lift snatch --out demo_sample/
 docker build -t lift-judge .
-docker run --rm -p 8000:8000 --env-file .env lift-judge
+docker run --rm -p 8000:8000 --env-file .env -e DEMO_ACCESS_CODE=the-code lift-judge
 ```
 
 That is enough for any container host (Fly.io, Render, Cloud Run, a Nebius AI Cloud VM…) that
-terminates HTTPS for you. On a plain VM with a domain name, `deploy/` does the HTTPS too:
+terminates HTTPS for you — set `TRUSTED_PROXIES` to match the platform's proxy (`*` where
+nothing but that proxy can reach the port) so the per-IP limit sees visitors rather than the
+proxy. On a plain VM with a domain name, `deploy/` does the HTTPS too:
 
 ```bash
-cp .env.example .env            # NEBIUS_API_KEY, plus the public-demo caps above
+cp .env.example .env            # NEBIUS_API_KEY and DEMO_ACCESS_CODE at least
 DOMAIN=lift.example.com docker compose -f deploy/docker-compose.yml up -d --build
 ```
 
 Caddy obtains and renews the certificate, allows a 220 MB request body and 10-minute proxy
-timeouts, and forwards to the app. Whatever you deploy on, it needs:
-- `NEBIUS_API_KEY` (and optionally the other variables above)
+timeouts, and forwards to the app; the compose file sets `TRUSTED_PROXIES=private` for it, and
+the app port is exposed to Caddy only, never published. Whatever you deploy on, it needs:
+- `NEBIUS_API_KEY` and `DEMO_ACCESS_CODE` (the other variables have defaults in the image)
 - **HTTPS**, which camera capture and PWA install both require
 - A reverse-proxy body limit at least as large as `MAX_UPLOAD_MB`, and generous read timeouts
 - **One instance**: jobs and the demo counters are held in memory, so run a single replica (the

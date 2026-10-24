@@ -12,6 +12,8 @@ from typing import Optional
 
 import requests
 
+from server.services.demo_guard import DemoRefused
+
 logger = logging.getLogger(__name__)
 
 GENERIC = "Scoring failed on the server. Wait a moment and try the clip again."
@@ -33,6 +35,9 @@ def user_message(exc: BaseException) -> str:
     """One sentence for the user. Logging the real error is the caller's job."""
     if isinstance(exc, UserFacingError):
         return str(exc)
+    if isinstance(exc, DemoRefused):
+        # A budget that ran out mid-run: its detail was written for the user.
+        return exc.detail
     if isinstance(exc, asyncio.TimeoutError):
         return TOO_LONG
     if isinstance(exc, requests.exceptions.Timeout):

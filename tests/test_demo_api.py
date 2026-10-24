@@ -1,18 +1,21 @@
 """
 The public-demo layers over HTTP: access code, daily and per-IP budgets,
-one-or-two-at-a-time, the clip-length and frame caps, and the cached sample
-clip that costs nothing. Model calls are mocked throughout.
+one-or-two-at-a-time, the run timeout, the clip-length and frame caps, and
+the cached sample clip that costs nothing. Model calls are mocked throughout.
 """
 import asyncio
+import json
 import threading
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
+from server.services import errors
 from server.services.demo_guard import get_guard
 from server.services.jobs import get_store
 from tests.conftest import (  # noqa: F401  (client and clip are fixtures)
+    CLEAN_AND_JERK_PATH,
     SNATCH_PATH,
     client,
     clip,
@@ -59,11 +62,11 @@ def test_access_code_gates_scoring(client, clip, monkeypatch):
     assert wrong.status_code == 403
     assert wrong.json()["reason"] == "access_code"
 
-    # The page sends a header; a script may send a form field. Either code works.
     _, payload = upload(client, clip, ONE_SNATCH(), headers={"X-Access-Code": "judge-2"})
     assert payload["status"] == "done"
-    _, payload = upload(client, clip, ONE_SNATCH(), access_code="judge-1")
-    assert payload["status"] == "done"
+    # The code travels as a header only. A form field is inside the body, which
+    # is exactly what must not be read before the code is checked.
+    assert post_clip(client, clip, access_code="judge-1").status_code == 401
 
 
 def test_the_sync_endpoint_is_gated_too(client, clip, monkeypatch):
@@ -71,6 +74,61 @@ def test_the_sync_endpoint_is_gated_too(client, clip, monkeypatch):
     with open(clip, "rb") as handle:
         response = client.post("/api/score", data={"lift": "snatch"}, files={"video": ("clip.mp4", handle, "video/mp4")})
     assert response.status_code == 401
+
+
+def test_the_access_code_is_checked_before_the_body_is_read(monkeypatch):
+    """
+    FastAPI reads the whole multipart body before any route code runs, so the
+    check lives in ASGI middleware. A refusal must be answered from the
+    headers alone: `receive` is never called, so a 200 MB upload with no code
+    costs the server nothing.
+    """
+    from server.main import AccessCodeMiddleware
+
+    monkeypatch.setenv("DEMO_ACCESS_CODE", "judge-1")
+    ran = []
+
+    async def inner(scope, receive, send):
+        ran.append(scope["path"])
+        await send({"type": "http.response.start", "status": 202, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    async def receive():
+        raise AssertionError("the request body must not be read before the code is checked")
+
+    def request(path, method="POST", code=None):
+        headers = [(b"content-type", b"multipart/form-data; boundary=x")]
+        if code is not None:
+            headers.append((b"x-access-code", code.encode()))
+        return {"type": "http", "method": method, "path": path, "headers": headers}
+
+    def run(scope):
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        asyncio.run(AccessCodeMiddleware(inner)(scope, receive, send))
+        return sent[0]["status"], json.loads(sent[1]["body"] or b"{}")
+
+    assert run(request("/api/jobs")) == (401, {"detail": errors.user_message(_missing_code()), "reason": "access_code"})
+    assert run(request("/api/score", code="judge-9"))[0] == 403
+    assert ran == []
+    # The right code, and anything that costs nothing, goes through untouched.
+    assert run(request("/api/jobs", code="judge-1"))[0] == 202
+    assert run(request("/api/sample", method="GET"))[0] == 202
+    assert run(request("/api/jobs/abc", method="GET"))[0] == 202
+    assert ran == ["/api/jobs", "/api/sample", "/api/jobs/abc"]
+
+
+def _missing_code():
+    from server.services.demo_guard import DemoRefused, check_access
+
+    try:
+        check_access(None)
+    except DemoRefused as exc:
+        return exc
+    raise AssertionError("expected a refusal")
 
 
 def test_a_refused_upload_leaves_no_job_behind(client, clip, monkeypatch):
@@ -82,19 +140,21 @@ def test_a_refused_upload_leaves_no_job_behind(client, clip, monkeypatch):
     assert not root.exists() or not any(root.iterdir())
 
 
-# ---------- budgets ----------
+# ---------- budgets, in model calls ----------
 
 
-def test_daily_budget_turns_the_demo_off_for_the_day(client, clip, monkeypatch):
-    monkeypatch.setenv("DEMO_DAILY_LIMIT", "1")
+def test_daily_budget_counts_model_calls_and_turns_the_demo_off_for_the_day(client, clip, monkeypatch):
+    # One single-lift clip is three calls: triage, observation, judge.
+    monkeypatch.setenv("DEMO_DAILY_LIMIT", "3")
     _, payload = upload(client, clip, ONE_SNATCH())
     assert payload["status"] == "done"
+    assert get_guard().used_today() == 3
 
     response = post_clip(client, clip)
     assert response.status_code == 429
     body = response.json()
     assert body["reason"] == "daily_limit"
-    assert "1 clips" in body["detail"] or "budget" in body["detail"]
+    assert "3 model calls" in body["detail"] and "budget" in body["detail"]
     assert int(response.headers["retry-after"]) > 0
 
     with open(clip, "rb") as handle:
@@ -102,20 +162,95 @@ def test_daily_budget_turns_the_demo_off_for_the_day(client, clip, monkeypatch):
     assert sync.status_code == 429 and sync.json()["reason"] == "daily_limit"
 
 
-def test_per_ip_limit_reads_the_forwarded_address(client, clip, monkeypatch):
-    monkeypatch.setenv("DEMO_IP_HOURLY_LIMIT", "1")
+def test_a_budget_that_runs_out_mid_run_keeps_what_was_scored(client, clip, monkeypatch):
+    # Room for one lift admits the clip; a clean & jerk needs five calls, so
+    # the jerk's observation call is refused and the clean is kept.
+    monkeypatch.setenv("DEMO_DAILY_LIMIT", "4")
+    _, payload = upload(
+        client,
+        clip,
+        [
+            triage_reply(CLEAN_AND_JERK_PATH),
+            observation_reply(),
+            judge_reply("clean", 6, "mixed", 0.7),
+            observation_reply(),  # never reached
+            judge_reply("jerk", 5, "mixed", 0.7),
+        ],
+        lift="clean",
+    )
+    assert payload["status"] == "done"
+    assert [item["lift"] for item in payload["lifts"]] == ["clean", "jerk"]
+    assert payload["lifts"][0]["score"] == 6
+    jerk = payload["lifts"][1]
+    assert "score" not in jerk
+    assert "ran out part-way" in jerk["error"]
+    assert get_guard().used_today() == 4
+    assert get_guard().running == 0
+
+
+def test_a_retry_is_a_billed_call_and_is_counted(client, clip, monkeypatch):
+    from server.services import nebius_client
+
+    monkeypatch.setattr(nebius_client, "RETRY_BACKOFF_SECONDS", 0.0)
+    monkeypatch.setenv("DEMO_DAILY_LIMIT", "3")
+    from unittest.mock import Mock
+
+    busy = Mock()
+    busy.status_code = 503
+    busy.text = "upstream unavailable"
+    # Triage, observation, then a 503 from the judge: the retry would be a
+    # fourth call, and the budget stops it.
+    _, payload = upload(client, clip, [triage_reply(SNATCH_PATH), observation_reply(), busy, judge_reply()])
+    assert payload["status"] == "error"
+    assert "ran out part-way" in payload["error"]
+    assert get_guard().used_today() == 3
+
+
+def test_per_ip_limit_uses_the_forwarded_address_only_behind_a_trusted_proxy(client, clip, monkeypatch):
+    monkeypatch.setenv("DEMO_IP_HOURLY_LIMIT", "3")
     judge = {"X-Forwarded-For": "203.0.113.9"}
+
+    # Nothing trusted: the header is ignored and every caller on this socket
+    # shares one allowance, so a forged header buys nothing.
     _, payload = upload(client, clip, ONE_SNATCH(), headers=judge)
     assert payload["status"] == "done"
+    forged = post_clip(client, clip, headers={"X-Forwarded-For": "198.51.100.4"})
+    assert forged.status_code == 429 and forged.json()["reason"] == "ip_limit"
+    assert "3 model calls" in forged.json()["detail"] and "about 1 clips" in forged.json()["detail"]
+    assert int(forged.headers["retry-after"]) > 0
 
-    again = post_clip(client, clip, headers=judge)
-    assert again.status_code == 429 and again.json()["reason"] == "ip_limit"
-    assert "1 clips" in again.json()["detail"]
-    assert int(again.headers["retry-after"]) > 0
-
-    # A different judge is unaffected.
+    # Behind a trusted proxy the forwarded address is the visitor, and a
+    # different judge is unaffected by the first one's hour.
+    monkeypatch.setenv("TRUSTED_PROXIES", "*")
     _, payload = upload(client, clip, ONE_SNATCH(), headers={"X-Forwarded-For": "198.51.100.4"})
     assert payload["status"] == "done"
+    again = post_clip(client, clip, headers={"X-Forwarded-For": "198.51.100.4"})
+    assert again.status_code == 429 and again.json()["reason"] == "ip_limit"
+
+
+# ---------- the run timeout ----------
+
+
+def test_a_run_past_the_timeout_is_stopped_and_frees_its_slot(client, clip, monkeypatch):
+    monkeypatch.setenv("JOB_TIMEOUT_SECONDS", "0.2")
+    monkeypatch.setenv("MAX_CONCURRENT_JOBS", "1")
+
+    async def forever(*_, **__):
+        await asyncio.sleep(30)
+
+    with patch("server.main.run_scoring", side_effect=forever):
+        response = post_clip(client, clip)
+        assert response.status_code == 202
+        payload = wait_for(client, response.json()["id"])
+    assert payload["status"] == "error"
+    assert payload["error"] == errors.TOO_LONG
+    assert get_guard().running == 0
+
+    with patch("server.main.run_scoring", side_effect=forever):
+        with open(clip, "rb") as handle:
+            sync = client.post("/api/score", data={"lift": "snatch"}, files={"video": ("clip.mp4", handle, "video/mp4")})
+    assert sync.status_code == 504 and sync.json()["detail"] == errors.TOO_LONG
+    assert get_guard().running == 0
 
 
 def test_only_so_many_jobs_run_at_once(client, clip, monkeypatch):
@@ -194,7 +329,7 @@ def test_frame_cap_keeps_every_lift_to_one_vision_call(client, clip, monkeypatch
     assert post.call_count == 3
 
 
-# ---------- the judge the page claims ----------
+# ---------- which model did what ----------
 
 
 def test_the_footer_names_the_judge_that_is_configured(client, monkeypatch):
@@ -203,6 +338,59 @@ def test_the_footer_names_the_judge_that_is_configured(client, monkeypatch):
     assert "judged by NVIDIA Nemotron 3 Super" in client.get("/").text
     monkeypatch.setenv("NEBIUS_JUDGE_MODEL", "some-lab/other-judge")
     assert "judged by some-lab/other-judge" in client.get("/").text
+
+
+def test_the_verdict_says_which_model_did_what(client, clip, monkeypatch):
+    monkeypatch.setenv("NEBIUS_JUDGE_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+    monkeypatch.setenv("NEBIUS_JUDGE_FALLBACK_MODEL", "nvidia/Nemotron-3-Ultra-550b-a55b")
+    _, payload = upload(client, clip, ONE_SNATCH())
+    lift = payload["lifts"][0]
+    assert lift["judged_by"] == "nvidia/nemotron-3-super-120b-a12b"
+    assert lift["models"] == {
+        "vision": "openbmb/MiniCPM-V-4_5",
+        "vision_name": "MiniCPM-V 4.5",
+        "judge": "nvidia/nemotron-3-super-120b-a12b",
+        "judge_name": "NVIDIA Nemotron 3 Super",
+        "judge_fallback": False,
+    }
+
+
+def test_the_verdict_names_the_fallback_judge_when_it_answered(client, clip, monkeypatch):
+    monkeypatch.setenv("NEBIUS_JUDGE_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+    monkeypatch.setenv("NEBIUS_JUDGE_FALLBACK_MODEL", "nvidia/Nemotron-3-Ultra-550b-a55b")
+    prose = observation_reply("Let me think about this")  # never valid JSON
+    _, payload = upload(client, clip, [triage_reply(SNATCH_PATH), observation_reply(), prose, prose, judge_reply()])
+    lift = payload["lifts"][0]
+    assert lift["judged_by"] == "nvidia/Nemotron-3-Ultra-550b-a55b"
+    assert lift["models"]["judge_name"] == "NVIDIA Nemotron 3 Ultra"
+    assert lift["models"]["judge_fallback"] is True
+
+
+def test_with_the_fallback_disabled_a_failed_judge_is_an_error_not_a_second_model(client, clip, monkeypatch):
+    # The public demo runs Super with no fallback to Ultra: a judge that fails
+    # fails, rather than quietly escalating to the expensive model.
+    monkeypatch.setenv("NEBIUS_JUDGE_MODEL", "nvidia/nemotron-3-super-120b-a12b")
+    monkeypatch.setenv("NEBIUS_JUDGE_FALLBACK_MODEL", "")
+    prose = observation_reply("Let me think about this")
+    with patch("server.services.nebius_client.requests.post", side_effect=[triage_reply(SNATCH_PATH), observation_reply(), prose, prose, judge_reply()]) as post:
+        response = post_clip(client, clip)
+        payload = wait_for(client, response.json()["id"])
+    assert payload["status"] == "error"
+    assert payload["error"] == errors.NO_VERDICT
+    assert post.call_count == 4
+    assert "nvidia/Nemotron-3-Ultra-550b-a55b" not in [call.kwargs["json"]["model"] for call in post.call_args_list]
+
+
+def test_the_drift_line_is_written_from_the_measurement_when_the_bar_was_tracked(client, clip):
+    _, payload = upload(client, clip, ONE_SNATCH())
+    lift = payload["lifts"][0]
+    assert lift["drift"]["text"]
+    if lift["bar_path"]["tracked"]:
+        assert lift["drift"]["source"] == "measurement"
+        assert f'{lift["bar_path"]["max_drift_plate_diameters"]:.2f} plate widths' in lift["drift"]["text"]
+    else:
+        assert lift["drift"]["source"] == "judge"
+        assert lift["drift"]["text"] == lift["max_horizontal_drift"]
 
 
 # ---------- the cached sample clip ----------

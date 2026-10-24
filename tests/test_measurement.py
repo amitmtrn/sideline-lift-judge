@@ -2,6 +2,8 @@
 from server.services.measurement import (
     BarPathMeasurement,
     describe,
+    drift_direction,
+    drift_summary,
     measure,
     where_in_the_rise,
 )
@@ -83,3 +85,63 @@ def test_phase_names_follow_the_lift():
     assert "dip" in where_in_the_rise(0.1, "jerk")
     assert "lockout" in where_in_the_rise(0.9, "jerk")
     assert "unknown" in where_in_the_rise(None, "snatch")
+    # As a place, each phase carries the preposition a sentence needs.
+    assert where_in_the_rise(0.6, "snatch", as_place=True) == "in the second pull, around contact"
+    assert where_in_the_rise(0.6, "jerk", as_place=True) == "in the drive"
+    assert where_in_the_rise(0.95, "jerk", as_place=True) == "at the lockout"
+    assert where_in_the_rise(None, "jerk", as_place=True) == ""
+
+
+# ---------- the card's drift line ----------
+
+
+def tracked(diameters: float, fraction=0.4, cm=None) -> BarPathMeasurement:
+    return BarPathMeasurement(
+        tracked=True,
+        coverage=0.9,
+        points=30,
+        max_drift_diameters=diameters,
+        max_drift_cm=diameters * 45.0 if cm is None else cm,
+        drift_at_rise_fraction=fraction,
+        sideways_range_diameters=diameters,
+        rise_diameters=3.0,
+    )
+
+
+def test_direction_comes_from_the_judge_and_only_when_unambiguous():
+    assert drift_direction("small forward loop at the turnover") == "forward"
+    assert drift_direction("the bar swings back toward the shins") == "backward"
+    assert drift_direction("bar loops forward then drifts back") is None
+    assert drift_direction("stays over mid-foot") is None
+    assert drift_direction(None) is None
+
+
+def test_the_drift_line_is_written_from_the_number_when_the_bar_was_tracked():
+    # The judge said "minimal drift"; the tracker measured 0.45 diameters. The
+    # card shows the number, in the judge's direction.
+    line = drift_summary(tracked(0.45, fraction=0.6), "snatch", "minimal forward drift at the knee")
+    assert line["source"] == "measurement" and line["direction"] == "forward"
+    assert line["text"] == (
+        "Large drift forward: about 20 cm (0.45 plate widths) off the start line, "
+        "furthest in the second pull, around contact."
+    )
+    noticeable = drift_summary(tracked(0.22, fraction=0.4), "clean", "the bar stays close")
+    assert noticeable["text"].startswith("Noticeable drift: about 10 cm (0.22 plate widths) off the start line")
+    assert noticeable["direction"] is None
+    close = drift_summary(tracked(0.09, fraction=0.9), "jerk", "slightly forward at lockout")
+    assert close["text"] == (
+        "Close path, a little forward: the bar stayed within about 4 cm (0.09 plate widths) "
+        "of its start line, furthest at the lockout."
+    )
+    # No place when the tracker could not say where in the rise it happened.
+    nowhere = drift_summary(tracked(0.3, fraction=None), "snatch", "")
+    assert nowhere["text"].endswith("off the start line.")
+    # Never "about 0 cm".
+    assert "about 1 cm" in drift_summary(tracked(0.01, cm=0.4), "snatch", "")["text"]
+
+
+def test_without_a_trace_the_drift_line_is_the_judges_words_labelled_as_such():
+    judge = drift_summary(BarPathMeasurement(tracked=False, reason="only 2 detections"), "snatch", "forward loop at the catch")
+    assert judge == {"text": "forward loop at the catch", "source": "judge", "direction": "forward"}
+    assert drift_summary(None, "snatch", "forward loop")["source"] == "judge"
+    assert drift_summary(None, "snatch", "  ") is None
