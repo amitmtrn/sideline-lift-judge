@@ -733,6 +733,21 @@ is there too, so `git push heroku main` also works — but a git-push build has 
 `demo_sample/` (its contents are gitignored), so the free sample would be missing; the script's
 local build includes it. Heroku has no volumes, so the image is the only way the sample gets there.
 
+**The app must be on the container stack.** An app created without `--stack container`, or
+connected to GitHub from the dashboard, builds with Heroku's Python buildpack instead of the
+Dockerfile: the log opens with *"Python app detected"*, the buildpack picks the newest Python
+(3.14, for which pydantic-core has no wheel and fails to compile), and even if it got that far
+there would be no ffmpeg and none of the image's spend-cap defaults. The fix is one command,
+after which both `git push heroku main` and dashboard deploys build the Dockerfile via
+`heroku.yml`:
+
+```bash
+heroku stack:set container -a <app>
+```
+
+The checked-in `.python-version` (3.13, what the image and the tests run on) is only insurance
+for that buildpack path; the container does not read it.
+
 What Heroku changes:
 - **Uploads have 30 seconds.** The router gives every request a 30 s window to its first response
   byte, and the body transfer counts, so a clip that takes longer than that to upload fails with
