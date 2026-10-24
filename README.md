@@ -733,20 +733,34 @@ is there too, so `git push heroku main` also works — but a git-push build has 
 `demo_sample/` (its contents are gitignored), so the free sample would be missing; the script's
 local build includes it. Heroku has no volumes, so the image is the only way the sample gets there.
 
-**The app must be on the container stack.** An app created without `--stack container`, or
-connected to GitHub from the dashboard, builds with Heroku's Python buildpack instead of the
-Dockerfile: the log opens with *"Python app detected"*, the buildpack picks the newest Python
-(3.14, for which pydantic-core has no wheel and fails to compile), and even if it got that far
-there would be no ffmpeg and none of the image's spend-cap defaults. The fix is one command,
-after which both `git push heroku main` and dashboard deploys build the Dockerfile via
-`heroku.yml`:
+**Two build paths.** Heroku builds the Dockerfile only on the *container* stack
+(`heroku stack:set container -a <app>`; `heroku.yml` points at it). An app on the default stack —
+what `heroku create` without `--stack container` and the dashboard's GitHub connection give you —
+builds with Heroku's **Python buildpack** instead; its log opens with *"Python app detected"*.
+That path works too, with three files in the repo and one setting in the dashboard:
+- `.python-version` pins 3.13. The buildpack's default is the newest Python (3.14), for which
+  pydantic-core has no wheel, so the build tries to compile it and fails — the error you get
+  without the pin.
+- `Procfile` starts `deploy/heroku-web.sh`, which applies the same demo defaults the image has as
+  `ENV` (Super judge, no fallback, budgets, timeout, clip cap), so the demo is capped the same way
+  on both paths, plus the Heroku-specific ones: `TRUSTED_PROXIES=*`, one run at a time, a 60 MB
+  upload cap. A config var set in the dashboard always wins over a default.
+- `Aptfile` installs ffmpeg, which the stack image lacks (it does have glib and the DejaVu font).
+  It needs the apt buildpack **ahead of** the Python one: in the dashboard, *Settings →
+  Buildpacks → Add* `heroku-community/apt` and drag it to the top, or
+  `heroku buildpacks:add --index 1 heroku-community/apt -a <app>`. Without it the app runs, but
+  with no annotated replay and portrait clips judged sideways; the startup log says so.
 
-```bash
-heroku stack:set container -a <app>
-```
+On either path set `NEBIUS_API_KEY` and `DEMO_ACCESS_CODE` as config vars. Neither path ships
+the sample clip, because a build from git sees an empty `demo_sample/`; only the script's local
+image build does.
 
-The checked-in `.python-version` (3.13, what the image and the tests run on) is only insurance
-for that buildpack path; the container does not read it.
+**"Application Error" on the URL** is Heroku's own page for an app with no dyno answering, and
+`heroku logs --tail -a <app>` (or the dashboard's *More → View logs*) names the cause.
+`H14 No web processes running` means the last build defined no web process — a buildpack build
+before the `Procfile` existed — or the app is scaled to zero (`heroku ps:scale web=1`).
+`H10 App crashed` means the process died on boot, and the lines above it say why. A failed build
+leaves the previous release running or, on a new app, nothing at all.
 
 What Heroku changes:
 - **Uploads have 30 seconds.** The router gives every request a 30 s window to its first response

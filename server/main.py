@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Awaitable, Callable, Optional, TypeVar
@@ -118,6 +119,13 @@ def _log_configuration() -> None:
         logger.warning(
             "DEMO_IP_HOURLY_LIMIT is set but TRUSTED_PROXIES is not: behind a reverse proxy every "
             "visitor shares the proxy's address and its hourly allowance."
+        )
+    missing = [tool for tool in ("ffmpeg", "ffprobe") if not shutil.which(tool)]
+    if missing:
+        logger.warning(
+            "%s not found on PATH: no annotated replays, and portrait clips may be judged sideways. "
+            "The Docker image has them; a Heroku buildpack deploy needs the apt buildpack (Aptfile).",
+            " and ".join(missing),
         )
 
 

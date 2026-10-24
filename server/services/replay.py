@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 # cannot render, and we fall back to an un-annotated (but still playable) clip.
 FONT_CANDIDATES: Sequence[str] = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    # Where Heroku's apt buildpack puts the same package (Aptfile).
+    "/app/.apt/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
     "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
     "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",

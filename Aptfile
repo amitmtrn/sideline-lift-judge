@@ -1,0 +1,7 @@
+# For a Heroku *buildpack* deploy (Procfile path), installed by the apt
+# buildpack, which must run before the Python one:
+#   heroku buildpacks:add --index 1 heroku-community/apt -a <app>
+# The stack image already has glib and the DejaVu font; ffmpeg (with ffprobe)
+# is what the replay, trimming and rotation metadata need. The Docker image
+# installs the same thing itself and ignores this file.
+ffmpeg
