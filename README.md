@@ -717,6 +717,41 @@ the app port is exposed to Caddy only, never published. Whatever you deploy on, 
 - **One instance**: jobs and the demo counters are held in memory, so run a single replica (the
   image starts one uvicorn worker on purpose)
 
+#### Heroku
+The same image runs on Heroku's container stack. Log in once, then one script creates the app,
+sets the config vars, builds the image locally, pushes and releases it on one dyno:
+
+```bash
+heroku login
+APP=lift-judge-demo DEMO_ACCESS_CODE=the-code deploy/heroku.sh
+```
+
+The script reads `NEBIUS_API_KEY` from the environment or `.env` (use a key made just for the
+demo), sets `TRUSTED_PROXIES=*`, `MAX_CONCURRENT_JOBS=1` and `MAX_UPLOAD_MB=60`, and prints the
+app's URL and the startup lines that list the caps in force. Re-run it to redeploy. `heroku.yml`
+is there too, so `git push heroku main` also works — but a git-push build has an empty
+`demo_sample/` (its contents are gitignored), so the free sample would be missing; the script's
+local build includes it. Heroku has no volumes, so the image is the only way the sample gets there.
+
+What Heroku changes:
+- **Uploads have 30 seconds.** The router gives every request a 30 s window to its first response
+  byte, and the body transfer counts, so a clip that takes longer than that to upload fails with
+  an H12 before the app sees it. The page's upload bar just stops. Film short clips, or trim in the
+  gallery app before uploading; `MAX_UPLOAD_MB=60` makes the page warn from 30 MB. The 15 s window
+  cap does not help here, because trimming happens on the server after the upload.
+- **The router is the proxy.** Only it reaches the dyno, and it appends the visitor's address as
+  the last `X-Forwarded-For` entry — exactly what `TRUSTED_PROXIES=*` reads, so the per-IP limit
+  sees visitors and a forged header still buys nothing.
+- **512 MB dynos.** OpenCV, a decoded clip and an ffmpeg render fit, but not twice over; keep
+  `MAX_CONCURRENT_JOBS=1` on Eco, Basic and Standard-1X, or use a larger dyno. Eco dynos sleep
+  after 30 minutes idle and the app takes ~10 s to wake and import OpenCV, so a judge's first tap
+  waits; pick the cheapest dyno that does not sleep (`DYNO_TYPE=basic`, or `heroku ps:type`).
+- **Dynos restart at least daily.** Jobs, replays and the demo counters live in the process, so a
+  restart clears results that are still within their TTL and resets the day's budget. One dyno
+  only, as everywhere: never scale `web` above 1.
+- **HTTPS is the router's**, so camera capture and PWA install work with no further setup.
+  `heroku logs --tail -a <app>` shows the startup line and every refusal.
+
 Then open the URL on a phone over 4G, score a clip, and check that the replay plays inline and
 shares. The image was built and smoke-tested locally (`/healthz`, the page, the manifest,
 ffmpeg, the font and OpenCV all present); the public URL itself is not part of this repository.
