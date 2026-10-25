@@ -83,7 +83,7 @@ def test_the_access_code_is_checked_before_the_body_is_read(monkeypatch):
     headers alone: `receive` is never called, so a 200 MB upload with no code
     costs the server nothing.
     """
-    from server.main import AccessCodeMiddleware
+    from server.main import DemoGateMiddleware
 
     monkeypatch.setenv("DEMO_ACCESS_CODE", "judge-1")
     ran = []
@@ -108,7 +108,7 @@ def test_the_access_code_is_checked_before_the_body_is_read(monkeypatch):
         async def send(message):
             sent.append(message)
 
-        asyncio.run(AccessCodeMiddleware(inner)(scope, receive, send))
+        asyncio.run(DemoGateMiddleware(inner)(scope, receive, send))
         return sent[0]["status"], json.loads(sent[1]["body"] or b"{}")
 
     assert run(request("/api/jobs")) == (401, {"detail": errors.user_message(_missing_code()), "reason": "access_code"})
@@ -154,7 +154,7 @@ def test_daily_budget_counts_model_calls_and_turns_the_demo_off_for_the_day(clie
     assert response.status_code == 429
     body = response.json()
     assert body["reason"] == "daily_limit"
-    assert "3 model calls" in body["detail"] and "budget" in body["detail"]
+    assert body["detail"] == "Today's free demo limit is used up. See the sample result, or come back tomorrow."
     assert int(response.headers["retry-after"]) > 0
 
     with open(clip, "rb") as handle:
@@ -216,7 +216,7 @@ def test_per_ip_limit_uses_the_forwarded_address_only_behind_a_trusted_proxy(cli
     assert payload["status"] == "done"
     forged = post_clip(client, clip, headers={"X-Forwarded-For": "198.51.100.4"})
     assert forged.status_code == 429 and forged.json()["reason"] == "ip_limit"
-    assert "3 model calls" in forged.json()["detail"] and "about 1 clips" in forged.json()["detail"]
+    assert forged.json()["detail"].startswith("You've hit the hourly limit. Try again in 60 minutes")
     assert int(forged.headers["retry-after"]) > 0
 
     # Behind a trusted proxy the forwarded address is the visitor, and a
@@ -333,11 +333,12 @@ def test_frame_cap_keeps_every_lift_to_one_vision_call(client, clip, monkeypatch
 
 
 def test_the_footer_names_the_judge_that_is_configured(client, monkeypatch):
-    assert "judged by NVIDIA Nemotron 3 Ultra" in client.get("/").text
+    # The footer reads as the pipeline: tracker measured → vision observed → judge judged.
+    assert "CV tracker measured → MiniCPM-V 4.5 observed → NVIDIA Nemotron 3 Ultra judged" in client.get("/").text
     monkeypatch.setenv("NEBIUS_JUDGE_MODEL", "nvidia/nemotron-3-super-120b-a12b")
-    assert "judged by NVIDIA Nemotron 3 Super" in client.get("/").text
+    assert "NVIDIA Nemotron 3 Super judged" in client.get("/").text
     monkeypatch.setenv("NEBIUS_JUDGE_MODEL", "some-lab/other-judge")
-    assert "judged by some-lab/other-judge" in client.get("/").text
+    assert "some-lab/other-judge judged" in client.get("/").text
 
 
 def test_the_verdict_says_which_model_did_what(client, clip, monkeypatch):

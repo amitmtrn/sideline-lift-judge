@@ -7,12 +7,17 @@ import pytest
 # Every demo limit the app reads from the environment. The API fixtures clear
 # them so a developer's .env cannot leak a cap into the tests.
 DEMO_ENV_VARS = (
+    "ACCESS_MODE",
     "DEMO_ACCESS_CODE",
+    "DEMO_DISABLED",
     "DEMO_DAILY_LIMIT",
+    "DEMO_DAILY_RESERVE_PERCENT",
+    "DEMO_DAY_TIMEZONE",
     "DEMO_IP_HOURLY_LIMIT",
     "DEMO_SAMPLE_DIR",
     "MAX_CONCURRENT_JOBS",
     "MAX_CLIP_SECONDS",
+    "MAX_LIFTS_PER_CLIP",
     "MAX_FRAMES",
     "JOB_TIMEOUT_SECONDS",
     "TRUSTED_PROXIES",

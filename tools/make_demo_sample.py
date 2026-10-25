@@ -10,7 +10,9 @@ verdict and replay from GET /api/sample at no model cost, so a judge who
 arrives after the daily budget is spent still sees a full result.
 
 Pick a clip you are allowed to show in public: the replay is served to anyone
-who opens the demo. The directory holds video, so it is never committed.
+who opens the demo. For the same reason the directory is the one video that
+may be committed (see .gitignore), so a git-push deploy carries it — keep it
+to one lift, well under 10 MB, and check the replay before you commit it.
 """
 from __future__ import annotations
 

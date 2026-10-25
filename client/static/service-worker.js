@@ -5,7 +5,7 @@
  */
 // Bump this with every change to the shell files below: they are served
 // cache-first, so an installed app keeps the old script until the name changes.
-const CACHE = "lift-judge-v4";
+const CACHE = "lift-judge-v5";
 const SHELL = [
   "/",
   "/static/styles.css",
@@ -50,8 +50,13 @@ self.addEventListener("fetch", (event) => {
     event.respondWith(
       fetch(request)
         .then((response) => {
-          const copy = response.clone();
-          caches.open(CACHE).then((cache) => cache.put("/", copy));
+          // Only a good page may replace the shell: a 404 for a bad path, a
+          // server error or a redirect stored under "/" is what the app would
+          // show offline (and Chrome refuses a cached redirect for a navigation).
+          if (response.ok && response.type === "basic" && !response.redirected) {
+            const copy = response.clone();
+            caches.open(CACHE).then((cache) => cache.put("/", copy));
+          }
           return response;
         })
         .catch(() => caches.match("/").then((cached) => cached || Response.error()))

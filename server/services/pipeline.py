@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Protocol, Tuple
 from server.schemas.judgment import LiftJudgment, LiftType
 from server.schemas.segment import SegmentTriage
 from server.services.confidence import assess_clip_quality, apply_quality, cross_check
-from server.services.demo_guard import BudgetExhausted
+from server.services.demo_guard import CALLS_PER_LIFT, BudgetExhausted
 from server.services.errors import detail_of, user_message
 from server.services.measurement import BarPathMeasurement, describe, measure
 from server.services.nebius_client import (
@@ -69,7 +69,21 @@ class ProgressReporter(Protocol):
     def __call__(self, stage: str, message: str, fraction: float) -> None: ...
 
 
+class ReserveCalls(Protocol):
+    """
+    Told how many model calls the run is about to need, once its lift windows
+    are known and before the first call. Raises (DemoRefused) to stop the run
+    there, so a clip is turned away whole rather than scored part-way.
+    """
+
+    def __call__(self, calls: int) -> None: ...
+
+
 def _noop_progress(stage: str, message: str, fraction: float) -> None:
+    return None
+
+
+def _noop_reserve(calls: int) -> None:
     return None
 
 
@@ -225,6 +239,9 @@ class ScoreRequest:
     replay_dir: Optional[str] = None
     keep_observations: bool = False
     detect_split: bool = True
+    # Lift windows this one upload may score; the rest are listed as skipped.
+    # 0 is no cap. The public demo sets it so one clip cannot cost a dozen calls.
+    max_lifts: int = 0
 
 
 async def run_scoring(
@@ -233,10 +250,14 @@ async def run_scoring(
     client: NebiusChatClient,
     prompts_dir: str,
     progress: ProgressReporter = _noop_progress,
+    reserve: ReserveCalls = _noop_reserve,
 ) -> ScoreOutcome:
     """
     Score one upload end to end. Never raises for a single lift that fails: that
-    lift carries its `error` and the rest of the run continues.
+    lift carries its `error` and the rest of the run continues. `reserve` is
+    asked for the run's estimated cost — one lift's calls per window — once
+    the windows are known and before any model call; what it raises ends the
+    run there.
     """
     frames_wanted = clamp_frames(request.frames)
     info = await _offload(probe_video, request.video_path)
@@ -278,7 +299,9 @@ async def run_scoring(
             for window in windows:
                 window.start_sec = max(window.start_sec, start)
                 window.end_sec = min(window.end_sec, outcome.end_sec)
+        windows = _cap_windows(windows, request.max_lifts, outcome)
         outcome.candidate_windows = len(windows)
+        reserve(len(windows) * CALLS_PER_LIFT)
         plan = await _plan_windows(
             client=client,
             request=request,
@@ -300,7 +323,9 @@ async def run_scoring(
             # rises so the sampled frames are the lift, not the setup — and a
             # clean & jerk comes out as its two rises.
             windows = await _lift_windows(request.video_path, start, outcome.end_sec, lift_windows) or [window]
+            windows = _cap_windows(windows, request.max_lifts, outcome)
             outcome.candidate_windows = len(windows)
+            reserve(len(windows) * CALLS_PER_LIFT)
             plan = await _plan_windows(
                 client=client,
                 request=request,
@@ -316,9 +341,21 @@ async def run_scoring(
         if not plan:
             lift = request.lift or LiftType.snatch
             plan = [(window, lift, SegmentTriage(lifts=[lift], activity="as selected"), False)]
+            if not request.detect_split:
+                reserve(CALLS_PER_LIFT)
 
     if not plan:
         return outcome
+
+    if request.max_lifts and len(plan) > request.max_lifts:
+        # A window that split into two lifts can push the plan past the cap
+        # the windows were held to; the cap is on what is scored.
+        for window, lift, _triage, _split in plan[request.max_lifts :]:
+            outcome.skipped.append(
+                f"{_stamp(window)} — {lift.value} not scored: this demo scores up to "
+                f"{request.max_lifts} lifts per clip"
+            )
+        plan = plan[: request.max_lifts]
 
     outcome.split_detected = any(was_split for *_, was_split in plan)
     total = len(plan)
@@ -347,6 +384,19 @@ async def run_scoring(
             # do not spend the tracking and frame work on them.
             break
     return outcome
+
+
+def _cap_windows(windows: List[CandidateSegment], cap: int, outcome: ScoreOutcome) -> List[CandidateSegment]:
+    """
+    Hold a clip to `cap` lift windows (0 = no cap). The earliest are kept —
+    they are the ones the visitor filmed first — and the rest are listed as
+    skipped, with the reason, rather than silently dropped.
+    """
+    if not cap or len(windows) <= cap:
+        return windows
+    for window in windows[cap:]:
+        outcome.skipped.append(f"{_stamp(window)} — not scored: this demo scores up to {cap} lifts per clip")
+    return windows[:cap]
 
 
 async def _plan_windows(

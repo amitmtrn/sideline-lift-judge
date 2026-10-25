@@ -107,8 +107,8 @@ async def save_upload_to_temp(
                 tmp.close()
                 tmp_path.unlink(missing_ok=True)
                 raise UploadTooLarge(
-                    f"Clip is larger than the {max_bytes // (1024 * 1024)} MB limit. "
-                    "Trim it to one lift and try again."
+                    f"Clips need to be under {max_bytes // (1024 * 1024)} MB. "
+                    "Trim this one to the lift in your gallery app and try again."
                 )
             tmp.write(chunk)
 

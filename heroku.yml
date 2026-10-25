@@ -1,10 +1,10 @@
 # Heroku's container stack: with this file, `git push heroku main` builds the
 # Dockerfile on Heroku and runs it as the web dyno.
 #
-# Prefer deploy/heroku.sh, which builds the image locally and pushes it with
-# `heroku container:push`. A git-push build's context is the git tree, where
-# demo_sample/ is empty (its contents are gitignored), so the free sample clip
-# would be missing from the demo. The local build includes it.
+# A git-push build's context is the git tree, so the cached sample clip is in
+# the image only if demo_sample/ is committed (which it may be: see
+# .gitignore). deploy/heroku.sh builds the image locally and pushes it with
+# `heroku container:push`, so it ships whatever is in the directory either way.
 build:
   docker:
     web: Dockerfile

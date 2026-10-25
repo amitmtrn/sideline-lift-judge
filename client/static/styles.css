@@ -193,6 +193,35 @@ p.lede {
   color: var(--chalk-dim);
 }
 
+/* ---------- Start ---------- */
+
+/* Above the fold on a 390×844 phone: the one line, the sample, the camera. */
+[data-screen="start"] h2 {
+  font-size: 38px;
+  margin-bottom: 12px;
+}
+
+[data-screen="start"] .lede {
+  font-size: 18px;
+}
+
+.hero-actions {
+  margin-top: 26px;
+}
+
+.hero-actions button {
+  min-height: 60px;
+  font-size: 20px;
+}
+
+.hero-actions .notice {
+  margin: 0;
+}
+
+.hero-hint {
+  margin-top: 16px;
+}
+
 /* ---------- Controls ---------- */
 
 .stack {
@@ -692,8 +721,9 @@ input[type="range"]::-moz-range-thumb {
   color: var(--chalk-faint);
 }
 
-/* Who did what: tracker, vision model, judge. Small, but never hidden. */
-.provenance {
+/* Who did what, in pipeline order: tracker → vision model → judge. Small, but
+ * never hidden. */
+.pipeline {
   margin: 10px 0 0;
   padding: 0;
   list-style: none;
@@ -705,14 +735,14 @@ input[type="range"]::-moz-range-thumb {
   color: var(--chalk-faint);
 }
 
-.provenance li {
+.pipeline li {
   display: inline;
 }
 
-.provenance li + li::before {
-  content: "·";
+.pipeline li + li::before {
+  content: "→";
   margin: 0 7px;
-  color: var(--line-bright);
+  color: var(--accent);
 }
 
 /* Confidence: honesty sits next to the score, never hidden (§8). */

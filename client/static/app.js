@@ -1,9 +1,10 @@
 /*
  * Sideline Lift Judge — mobile flow.
  *
- * Choose lift -> filming guide -> pick or film a clip -> trim -> poll the job ->
- * read the verdict. Everything the model produced is inserted with textContent,
- * never innerHTML: the cues, notes and drift description are model output.
+ * Start -> choose lift -> filming guide -> pick or film a clip -> trim -> poll
+ * the job -> read the verdict; or Start -> the cached sample result in one tap.
+ * Everything the model produced is inserted with textContent, never innerHTML:
+ * the cues, notes and drift description are model output.
  */
 (() => {
   "use strict";
@@ -12,9 +13,15 @@
   const MAX_UPLOAD_MB = CONFIG.maxUploadMb || 200;
   // Demo caps, all optional: 0 means no clip-length cap, false means no code.
   const MAX_CLIP_SECONDS = Number(CONFIG.maxClipSeconds) || 0;
+  // open: no code anywhere. link: the code rode in on the URL and is sent
+  // silently. code: it is typed on the first screen.
+  const ACCESS_MODE = CONFIG.accessMode || "code";
   const ACCESS_REQUIRED = Boolean(CONFIG.accessRequired);
+  const DEMO_DISABLED = Boolean(CONFIG.demoDisabled);
+  const SAMPLE_AVAILABLE = Boolean(CONFIG.sampleAvailable);
   const ACCESS_CODE_KEY = "liftJudgeAccessCode";
   const POLL_INTERVAL_MS = 1400;
+  const MAX_AUTO_RETRY_SECONDS = 60;
   const STAGE_ORDER = ["uploading", "splitting", "observing", "judging", "rendering"];
   const STAGE_INDEX = {
     uploading: 0,
@@ -26,6 +33,8 @@
     rendering: 4,
     done: 5,
   };
+  // Refusals after which trying the same clip again cannot help today.
+  const NO_RETRY_REASONS = new Set(["daily_limit", "disabled", "access_code", "too_long"]);
 
   const state = {
     lift: "snatch",
@@ -39,6 +48,7 @@
     polling: null,
     previewTimer: null,
     objectUrl: null,
+    retryTimer: null,
   };
 
   const $ = (selector) => document.querySelector(selector);
@@ -81,16 +91,61 @@
   }
 
   function currentAccessCode() {
-    const code = accessInput ? accessInput.value.trim() : storedAccessCode();
+    if (!ACCESS_REQUIRED) return "";
+    // In link mode the field is hidden and the stored code is the only source.
+    const code = ACCESS_MODE === "code" && accessInput ? accessInput.value.trim() : storedAccessCode();
     rememberAccessCode(code);
     return code;
   }
 
-  function askForAccessCode(message) {
-    $("#access-field").hidden = false;
-    fail($("#access-error"), message);
+  // A refusal that is about getting in, not about the clip: shown on the lift
+  // screen. In code mode the field opens for a retype; in link mode there is
+  // nothing to type, so the way on is the link itself or the sample.
+  function accessProblem(message) {
     show("lift");
-    if (accessInput) accessInput.focus();
+    if (ACCESS_MODE === "code") {
+      $("#access-field").hidden = false;
+      if (accessInput) accessInput.focus();
+    }
+    fail($("#access-error"), message);
+    $("#access-actions").hidden = !SAMPLE_AVAILABLE;
+  }
+
+  // R3: validate the code on "Next", before anyone films or uploads. Offline,
+  // or with no code required, the check is skipped: the upload is checked
+  // anyway, and a flaky connection must not block the way to the camera.
+  async function verifyAccess() {
+    if (DEMO_DISABLED) {
+      accessProblem("Live scoring is paused right now. The sample result shows everything the app does.");
+      return false;
+    }
+    if (!ACCESS_REQUIRED) return true;
+    const code = currentAccessCode();
+    if (!code) {
+      accessProblem(
+        ACCESS_MODE === "link"
+          ? "This demo opens from the link on the submission page. Use that link, or see the sample result."
+          : "Enter the access code first — it is on the submission page."
+      );
+      return false;
+    }
+    try {
+      const response = await fetch("/api/access/check", {
+        headers: { "X-Access-Code": code },
+        cache: "no-store",
+      });
+      if (response.ok) return true;
+      let payload = {};
+      try {
+        payload = await response.json();
+      } catch (error) {
+        payload = {};
+      }
+      accessProblem(payload.detail || "That access code is not right. Check it against the submission page.");
+      return false;
+    } catch (error) {
+      return true;
+    }
   }
 
   adoptAccessCodeFromUrl();
@@ -109,7 +164,7 @@
     const target = event.target.closest("[data-go], [data-pick], [data-action]");
     if (!target) return;
     if (target.dataset.go) {
-      if (target.dataset.go === "lift") reset();
+      if (target.dataset.go === "lift" || target.dataset.go === "start") reset();
       show(target.dataset.go);
       return;
     }
@@ -118,6 +173,15 @@
       return;
     }
     switch (target.dataset.action) {
+      case "next":
+        verifyAccess().then((ok) => {
+          if (ok) {
+            hide($("#access-error"));
+            $("#access-actions").hidden = true;
+            show("guide");
+          }
+        });
+        break;
       case "preview-window":
         playWindow();
         break;
@@ -142,6 +206,7 @@
   function reset() {
     stopPolling();
     stopPreview();
+    cancelAutoRetry();
     state.file = null;
     state.jobId = null;
     state.duration = 0;
@@ -158,10 +223,12 @@
     hide($("#pick-error"));
     hide($("#access-error"));
     hide($("#cap-warning"));
+    $("#access-actions").hidden = true;
     $("#progress-actions").hidden = true;
   }
 
   function hide(element) {
+    if (!element) return;
     element.hidden = true;
     element.textContent = "";
   }
@@ -195,7 +262,7 @@
     if (megabytes > MAX_UPLOAD_MB) {
       fail(
         $("#size-warning"),
-        `This clip is ${megabytes.toFixed(0)} MB, over the ${MAX_UPLOAD_MB} MB limit. Trim it down to one lift before scoring.`
+        `Clips need to be under ${MAX_UPLOAD_MB} MB${MAX_CLIP_SECONDS ? ` and ${MAX_CLIP_SECONDS} seconds` : ""}. This one is ${megabytes.toFixed(0)} MB — trim it to the lift in your gallery app first.`
       );
     } else if (megabytes > MAX_UPLOAD_MB / 2) {
       fail(
@@ -234,7 +301,7 @@
       state.capHintShown = true;
       fail(
         $("#size-warning"),
-        `This demo scores up to ${MAX_CLIP_SECONDS} s at a time, so the end handle starts at ${MAX_CLIP_SECONDS} s. Drag both handles to the one lift.`
+        `Clips need to be under ${MAX_CLIP_SECONDS} seconds, so the end handle starts at ${MAX_CLIP_SECONDS} s. Drag both handles to the one lift.`
       );
     }
     renderWindow();
@@ -344,13 +411,22 @@
   /* ---------- Scoring ---------- */
 
   function submit() {
+    cancelAutoRetry();
     if (!state.file) {
       show("guide");
       return;
     }
+    if (DEMO_DISABLED) {
+      showFailure("Live scoring is paused right now. The sample result shows everything the app does.", "disabled");
+      return;
+    }
     const accessCode = currentAccessCode();
     if (ACCESS_REQUIRED && !accessCode) {
-      askForAccessCode("Enter the access code first — it is on the submission page.");
+      accessProblem(
+        ACCESS_MODE === "link"
+          ? "This demo opens from the link on the submission page. Use that link, or see the sample result."
+          : "Enter the access code first — it is on the submission page."
+      );
       return;
     }
     hide($("#progress-error"));
@@ -391,9 +467,10 @@
         setStage("splitting", "Reading the clip…", 0.2);
         poll();
       } else if (payload.reason === "access_code") {
-        askForAccessCode(payload.detail || "This demo needs an access code.");
+        accessProblem(payload.detail || "This demo needs an access code.");
       } else {
-        showFailure(payload.detail || `Upload failed (HTTP ${request.status}).`);
+        const retryAfter = Number(request.getResponseHeader("Retry-After")) || 0;
+        showFailure(payload.detail || `Upload failed (HTTP ${request.status}).`, payload.reason, retryAfter);
       }
     });
     request.addEventListener("error", () =>
@@ -439,7 +516,7 @@
       show("result");
     } else if (payload.status === "error") {
       stopPolling();
-      showFailure(payload.error || payload.message || "Scoring failed.");
+      showFailure(payload.error || payload.message || "Scoring failed.", payload.reason);
     }
   }
 
@@ -455,11 +532,57 @@
     $("#progress-fill").style.width = `${percent}%`;
   }
 
-  function showFailure(message) {
+  // One sentence and a way on. The reason decides which: a limit for the day
+  // leaves only the sample; a busy server is retried by itself; anything
+  // else offers the same clip again.
+  function showFailure(message, reason, retryAfterSeconds) {
     stopPolling();
+    cancelAutoRetry();
     fail($("#progress-error"), message);
-    $("#progress-actions").hidden = false;
+    const actions = $("#progress-actions");
+    actions.hidden = false;
+    const retry = $("#progress-retry");
+    if (retry) {
+      retry.hidden = Boolean(reason) && NO_RETRY_REASONS.has(reason);
+      retry.textContent = "Try again";
+    }
+    const sample = $("#progress-sample");
+    if (sample) {
+      // The sample leads when the clip cannot be scored today; it trails when
+      // trying again is the natural next step.
+      sample.classList.toggle("ghost", !(reason && NO_RETRY_REASONS.has(reason)));
+    }
     show("progress");
+    if (reason === "busy" && state.file) {
+      scheduleAutoRetry(message, Math.min(MAX_AUTO_RETRY_SECONDS, Math.max(5, retryAfterSeconds || 30)));
+    }
+  }
+
+  // "You're next": wait out the slot and send the same clip again, counting
+  // down so the wait is visible, with the button there to jump the countdown.
+  function scheduleAutoRetry(message, seconds) {
+    let left = seconds;
+    const note = $("#progress-error");
+    const retry = $("#progress-retry");
+    const tick = () => {
+      note.textContent = `${message} Trying again in ${left} s…`;
+      if (retry) retry.textContent = "Try again now";
+      if (left <= 0) {
+        cancelAutoRetry();
+        submit();
+        return;
+      }
+      left -= 1;
+    };
+    tick();
+    state.retryTimer = window.setInterval(tick, 1000);
+  }
+
+  function cancelAutoRetry() {
+    if (state.retryTimer) {
+      window.clearInterval(state.retryTimer);
+      state.retryTimer = null;
+    }
   }
 
   /* ---------- The cached sample clip ---------- */
@@ -468,6 +591,7 @@
   // not counted against any limit. What a judge sees when the budget is spent.
   async function loadSample() {
     stopPolling();
+    cancelAutoRetry();
     state.jobId = null;
     hide($("#progress-error"));
     $("#progress-actions").hidden = true;
@@ -478,11 +602,11 @@
       const response = await fetch("/api/sample", { cache: "no-store" });
       payload = await response.json();
       if (!response.ok) {
-        showFailure(payload.detail || "The sample clip is not available right now.");
+        showFailure(payload.detail || "The sample clip is not available right now.", "sample");
         return;
       }
     } catch (error) {
-      showFailure("Could not load the sample clip. Check your connection and try again.");
+      showFailure("Could not load the sample clip. Check your connection and try again.", "sample");
       return;
     }
     renderResults(payload);
@@ -507,7 +631,7 @@
       const banner = element("div", "split-banner");
       banner.appendChild(element("span", "icon", "▶"));
       const text = element("span");
-      text.appendChild(element("b", null, "Sample clip. "));
+      text.appendChild(element("b", null, "Sample result (pre-recorded). "));
       text.appendChild(
         document.createTextNode("Scored earlier and cached — nothing was sent to the model just now.")
       );
@@ -596,8 +720,7 @@
       card.appendChild(line);
     }
 
-    const provenance = provenanceLine(item);
-    if (provenance) card.appendChild(provenance);
+    card.appendChild(pipelineLine(item));
 
     card.appendChild(confidenceBlock(item.confidence));
 
@@ -649,28 +772,29 @@
     return card;
   }
 
-  // Who did what for this verdict: the local tracker measured, the vision
-  // model described, the judge decided. Names come from the server, which
-  // knows which judge actually answered — the fallback, when the primary
-  // failed — so the card never implies a model that was not used.
-  function provenanceLine(item) {
+  // Who did what for this verdict, as the pipeline reads: the local tracker
+  // measured, the vision model observed, the judge judged. Names come from the
+  // server, which knows which judge actually answered — the fallback, when
+  // the primary failed — so the card never implies a model that was not used.
+  function pipelineLine(item) {
     const models = item.models || {};
     const barPath = item.bar_path || {};
-    const parts = [];
+    const list = element("ol", "pipeline");
+    let tracker = "CV tracker measured";
     if (barPath.tracked) {
-      let tracked = "Bar tracked locally (OpenCV, no model)";
-      if (barPath.coverage != null) tracked += `, plate seen in ${Math.round(barPath.coverage * 100)}% of frames`;
-      parts.push(tracked);
-    } else if (item.bar_path) {
-      parts.push("Bar not tracked: drift read from the sampled frames alone");
+      if (barPath.coverage != null) tracker += ` (plate seen in ${Math.round(barPath.coverage * 100)}% of frames)`;
+    } else {
+      tracker = "CV tracker: no trace, drift read from the frames";
     }
-    if (models.vision_name || models.vision) parts.push(`Frames read by ${models.vision_name || models.vision}`);
-    if (models.judge_name || models.judge) {
-      parts.push(`Judged by ${models.judge_name || models.judge}${models.judge_fallback ? " (fallback judge)" : ""}`);
-    }
-    if (!parts.length) return null;
-    const list = element("ul", "provenance");
-    parts.forEach((text) => list.appendChild(element("li", null, text)));
+    list.appendChild(element("li", null, tracker));
+    list.appendChild(element("li", null, `${models.vision_name || models.vision || "Vision model"} observed`));
+    list.appendChild(
+      element(
+        "li",
+        null,
+        `${models.judge_name || models.judge || "Judge"} judged${models.judge_fallback ? " (fallback judge)" : ""}`
+      )
+    );
     return list;
   }
 

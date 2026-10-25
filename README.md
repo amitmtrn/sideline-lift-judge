@@ -5,8 +5,15 @@ score**, a band, the **maximum horizontal bar drift**, a **confidence** value, n
 coaching cues** — plus an annotated replay you can download or share. Mobile-first, so a coach
 can use it from the side of the platform.
 
-Built for the Nebius × NVIDIA Global AI Hackathon. The judge is an **NVIDIA Nemotron 3 Ultra**
-model, and both stages run on **Nebius Token Factory**.
+Built for the Nebius × NVIDIA Global AI Hackathon. The judge is an **NVIDIA Nemotron 3** model —
+**Super** in the public demo, Ultra by default in a checkout — and both stages run on
+**Nebius Token Factory**.
+
+**Demo:** <https://sideline-lift-judge-99d464f34df0.herokuapp.com/> — open it on a phone.
+**No code needed**: the sample result is one tap away, your own clip two. The live judge is
+Nemotron 3 Super (no Ultra fallback) so the bill stays bounded; the demo has a daily limit and
+its counters reset when the dyno restarts (see [Limitations](#limitations)).\
+**Video:** PASTE-YOUTUBE-URL-HERE — the submission video, under three minutes.
 
 - Mobile-first web app, installable as a PWA — film or upload, trim, score, share
 - Two kinds of evidence, one judge: a local plate tracker **measures** the bar path and a vision
@@ -19,8 +26,11 @@ model, and both stages run on **Nebius Token Factory**.
   written from the measurement, so the words cannot contradict the number
 - Schema-validated JSON, a repair retry, and a fallback judge model
 - Two CLIs for one clip and for a whole session
-- Public-demo spend caps that are **on by default in the Docker image**: access code, budgets
-  counted in model calls, a run timeout, a cheaper judge with no fallback, a free cached sample
+- An **open public demo** bounded on the server, not by a code: budgets counted in model calls
+  (per day, per address, with a slice of the day kept for newcomers), a cost estimate before the
+  first call, a run deadline, a cheaper judge with no fallback, a kill switch, and a free cached
+  sample so a judge never meets a dead end — all on by default in the deploys, and the access
+  mode (`open` / `link` / `code`) is one config variable
 
 ### How a clip becomes a verdict
 
@@ -34,7 +44,7 @@ model, and both stages run on **Nebius Token Factory**.
                       8–16 frames from the lift window                          │
                             │                                                   │
                             ▼                                                   ▼
-             Stage 1  MiniCPM-V (Token Factory)              Stage 2  NVIDIA Nemotron 3 Ultra
+             Stage 1  MiniCPM-V (Token Factory)              Stage 2  NVIDIA Nemotron 3
              "what the bar did", phase by phase   ────────►  rubric + observations + measurement
              direction, bar–body contact, angle              → validated JSON: score, band, drift,
                                                                cues, confidence
@@ -471,39 +481,63 @@ The protection is in layers, so that even the worst case is a few dollars.
   touching the key you record the video with.
 - Check Token Factory usage daily until judging ends, then shut the demo down or revoke the key.
 
-**Then limit usage in the app — which the Docker image does by default.** In a local checkout
-every cap below is off until its variable is set, so local runs, the CLIs and the tests are
-untouched. The image is the public demo, so there the caps are `ENV` in the `Dockerfile` with
-the values in the table; a container's own environment (`--env-file`, `-e`, a platform's
-settings) overrides any of them. Only the access code has no default, because it is the secret.
-A refused request gets one plain sentence, a `Retry-After` header and a machine-readable
-`reason` the page acts on.
+**Then limit usage in the app — which the deploys do by default.** In a local checkout every
+cap below is off until its variable is set, so local runs, the CLIs and the tests are untouched.
+The Docker image and `deploy/heroku-web.sh` are the public demo, so there the caps are set with
+the values in the table; a container's own environment (`--env-file`, `-e`, a Heroku config var)
+overrides any of them. A refused request gets one plain sentence that says what to do next, a
+`Retry-After` header and a machine-readable `reason` the page acts on — and the sentence never
+names a variable, a model or a call count, because a visitor can act on none of those.
 
-| Layer | Variable | In the image | What the visitor sees |
+**Three ways in, one variable.** `ACCESS_MODE` is `open` (no code anywhere), `link` (the code
+rides in the `?code=…` link the page is opened from, is stored on the device and sent silently,
+never typed; a request without it gets a friendly 401 and the sample) or `code` (typed on the
+first screen, validated on *Next* before anyone films — the default when unset). Switching is
+`heroku config:set ACCESS_MODE=…`, no code change. In `open` mode the app **refuses to start**
+when a Token Factory key is set and any cap in the table is unset or zero, listing which, so a
+deploy that forgot one never runs uncapped. The public demo for the submission runs `open`.
+
+| Layer | Variable | In the deploys | What the visitor sees |
 |---|---|---|---|
-| Access code | `DEMO_ACCESS_CODE` | **you set it** | a field on the first screen; `?code=…` in the link fills it and is then removed from the address bar. Checked from the `X-Access-Code` header **before the upload is read**, so a clip sent without the code never reaches the disk |
-| Daily budget | `DEMO_DAILY_LIMIT` | `150` model calls | "Today's demo budget (150 model calls, about 50 clips) is used up" (HTTP 429, resets at UTC midnight) |
-| Per-IP rate | `DEMO_IP_HOURLY_LIMIT` | `12` model calls | "You've used this hour's share of the demo (12 model calls, about 4 clips). Try again in N min" |
-| Whose address | `TRUSTED_PROXIES` | unset (compose sets `private`) | nothing — decides whether `X-Forwarded-For` is believed, see below |
-| In flight at once | `MAX_CONCURRENT_JOBS` | `2` | "scoring other clips right now … try again in a minute" |
-| Run time | `JOB_TIMEOUT_SECONDS` | `240` (600 anywhere else) | "Scoring took too long and was stopped. Trim the clip to one lift and try again" |
-| Clip length | `MAX_CLIP_SECONDS` | `15` | the end handle starts at 15 s and the score button waits until the window fits; the server refuses anything longer |
+| Access mode | `ACCESS_MODE` | unset (`code`) until the rollout flips it to `open` | nothing in `open`; the footer says which mode is on |
+| Access code | `DEMO_ACCESS_CODE` | **you set it** for `link` and `code` | `link`: nothing, or "This demo opens from the link on the submission page" with the sample button. `code`: a field on the first screen. Either way checked from the `X-Access-Code` header **before the upload is read** |
+| Kill switch | `DEMO_DISABLED` | unset | `true`: "Live scoring is paused right now", the start screen offers the sample only, every scoring request is 503 — no redeploy |
+| Daily budget | `DEMO_DAILY_LIMIT` | `150` model calls | "Today's free demo limit is used up. See the sample result, or come back tomorrow." (HTTP 429) |
+| Day boundary | `DEMO_DAY_TIMEZONE` | `Asia/Jerusalem` | nothing — the budget resets at local midnight (UTC when unset) |
+| Newcomer share | `DEMO_DAILY_RESERVE_PERCENT` | `20` | an address that already scored today stops 20% short: "…what is left is kept for first-time visitors" — a judge arriving in the evening still gets in |
+| Per-IP rate | `DEMO_IP_HOURLY_LIMIT` | `12` model calls | "You've hit the hourly limit. Try again in N minutes or see the sample." |
+| Whose address | `TRUSTED_PROXIES` | `*` on Heroku, `private` in compose | nothing — decides whether `X-Forwarded-For` is believed, see below |
+| In flight at once | `MAX_CONCURRENT_JOBS` | `1` | "Another lift is being scored. You're next; this usually takes under a minute." The page retries by itself when the slot frees |
+| Run deadline | `JOB_TIMEOUT_SECONDS` | `120` (600 anywhere else) | "Scoring took too long and was stopped. Trim the clip to one lift and try again." The slot is freed |
+| Clip length | `MAX_CLIP_SECONDS` | `15` | the end handle starts at 15 s and the score button waits until the window fits; the server says "Clips need to be under 15 seconds" to anything longer |
+| Upload size | `MAX_UPLOAD_MB` | `60` | "Clips need to be under 60 MB" (HTTP 413); the page warns from 30 MB |
+| Lifts per clip | `MAX_LIFTS_PER_CLIP` | `2` | the first two lift windows are scored, the rest listed under *Windows skipped* |
 | Frames per lift | `MAX_FRAMES` | `10` | nothing — one vision call per lift instead of two |
 | Cheaper judge | `NEBIUS_JUDGE_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | the footer and every card name the judge that actually answered |
 | No fallback | `NEBIUS_JUDGE_FALLBACK_MODEL` | empty | a failed judge call is an error, never a quiet escalation to Ultra |
-| Free fallback | `DEMO_SAMPLE_DIR` | `/app/demo_sample` (baked in) | a **Try a sample clip** button, on the filming screen and next to every refusal |
+| Free fallback | `DEMO_SAMPLE_DIR` | `demo_sample` (shipped with the deploy) | **See a sample result**: the first button on the first screen, and next to every refusal. Never counted, never gated, still there when the demo is paused |
 
 **The budgets count model calls, not uploads.** A single-lift clip costs three (triage,
 observation, judge); a repair retry or the fallback judge adds one each, and a *Find them* clip
 adds one triage per candidate window — so an upload is anywhere from three calls to a dozen,
 and counting uploads left the bill open-ended. A run is admitted when there is room for one
-whole lift, then charged call by call (retries included, since each attempt is billed). If the
-budget runs out part-way through a clip, the run stops at that call — the lifts already scored
-are kept and the one that was not says why. The cap is on the *scored window*, not the
-upload: a long gallery clip trimmed to one lift is fine. Several access codes can be
-comma-separated, so one can be revoked without the rest. Counters live in the process, like
-the job store, so a restart resets the day's count — which errs on the side of letting a judge
-in. The sample, the polls and the replays are never counted.
+whole lift — checked from the request headers, before the upload is read, so a clip that cannot
+be scored is never received — and once the local tracker has found the clip's lift windows the
+run must fit the budget whole (one lift's calls per window) or it stops **before the first
+model call**: "This clip holds 2 lifts, more than today's free demo has room for. Trim it to one
+lift…". It is then charged call by call (retries included, since each attempt is billed). If the
+budget still runs out part-way — a window that turned out to hold a clean *and* a jerk — the run
+stops at that call; the lifts already scored are kept and the one that was not says why. The
+cap is on the *scored window*, not the upload: a long gallery clip trimmed to one lift is fine.
+Several access codes can be comma-separated, so one can be revoked without the rest. Counters
+live in the process, like the job store, so a restart resets the day's count — which errs on
+the side of letting a judge in. The sample, the polls and the replays are never counted.
+
+**What the log says.** One line per admitted run — `job status=done ip=<keyed hash>
+first_today=yes calls=3 remaining_today=147 running=0 duration=41.2s` — with a hash of the
+address keyed per process, never the address, and never the clip's name. `GET /api/config`
+reports the mode, the caps and the calls left today (no secrets), which is the quickest check
+after a deploy. In `open` mode `/docs` and `/openapi.json` are off.
 
 **Whose address the per-IP limit sees.** `X-Forwarded-For` is only believed when the
 connection comes from a proxy named in `TRUSTED_PROXIES` — addresses, CIDR ranges, `private`
@@ -513,39 +547,53 @@ Fly). Behind a trusted proxy the visitor is the rightmost entry the proxy append
 client put in the header itself is ignored. Unset, the header is ignored entirely and the
 socket's peer is the visitor — a direct caller can no longer pick a fresh hourly allowance by
 forging the header, but behind a proxy *everyone* would then share the proxy's one allowance,
-which the startup log warns about. `deploy/docker-compose.yml` sets `private` for Caddy; the
-image no longer tells uvicorn to trust the header from everyone.
+which the startup log warns about. The **first** entry is never believed on its own: ten
+requests with ten forged first entries are limited exactly like ten with none (there is a test).
+`deploy/docker-compose.yml` sets `private` for Caddy and Heroku gets `*`; the image never tells
+uvicorn to trust the header from everyone.
 
 **Have a fallback that costs nothing.** Score one clip once, ahead of time, and the app serves
-that result — replay included — from disk. The sample is **part of the deploy**: build it before
-`docker build` and the image carries it at `/app/demo_sample`, so any host serves it with no
-volume to mount.
+that result — replay included — from disk, labelled *Sample result (pre-recorded)*. The sample is
+**part of the deploy**: build it, and either commit `demo_sample/` (the one video the repo
+allows, because the demo serves it to everyone anyway — keep it to one lift, under ~10 MB) so a
+`git push` deploy carries it, or build the image after it so the image carries it at
+`/app/demo_sample`. Then check that `/api/sample` and its replay answer 200 on the live URL.
 
 ```bash
 python tools/make_demo_sample.py samples/snatch1.mp4 --lift snatch --out demo_sample/
-docker build -t lift-judge .
+git add demo_sample/ && git commit -m "Add the cached demo sample"     # or: docker build -t lift-judge .
 ```
 
-The button appears on the filming screen, and again next to every refusal, so a judge who
-arrives after the budget is spent still sees the whole result screen. The sample needs no
-access code and is not counted, and its card names the judge that scored it when it was made
-(Ultra, if you built it from a checkout with the defaults) — which may differ from the live
-judge, and that is the truth of it. Pick a clip you are allowed to show in public; the directory
-holds video, so its contents are gitignored and only the empty directory is committed. The
-server logs a warning at startup when caps are set and there is no sample.
+The button is the first thing on the first screen, and appears again next to every refusal, so
+a judge who arrives after the budget is spent — or while the demo is paused — still sees the
+whole result screen in two taps and under 30 seconds. The sample needs no access code and is
+not counted, and its card names the judge that scored it when it was made (Ultra, if you built it
+from a checkout with the defaults) — which may differ from the live judge, and that is the truth
+of it. Pick a clip you are allowed to show in public. The server logs a warning at startup when
+caps are set and there is no sample, and `deploy/heroku.sh` refuses to deploy `open` without one.
 
 **Keep Ultra for your own recorded run.** The image runs Nemotron 3 Super with no fallback;
 the code defaults — what a local checkout and the video you record use — stay on Ultra with a
 Super fallback. The footer and every verdict card name the judge that actually answered, so the
 demo never claims a model it is not using.
 
-**Read the first lines of the log.** At startup the server prints which judge, fallback and
-caps are in force, which proxies are trusted and whether a sample is present, and warns when caps
-are set without an access code, without a sample, or with a per-IP limit and no trusted proxy.
+**Read the first lines of the log.** At startup the server prints the access mode, which judge,
+fallback and caps are in force, where the day turns, which proxies are trusted and whether a
+sample is present, and warns when caps are set in `code` mode without a code, without a sample,
+or with a per-IP limit and no trusted proxy. In `open` mode a missing cap is not a warning but
+a refusal to start.
+
+**The rollout, and the way back.** Ship the sample and the caps with `ACCESS_MODE` unset (code
+mode); verify the live URL — `/api/sample` 200, `/api/config` showing the caps, the sample in two
+taps; then `heroku config:set ACCESS_MODE=open`. Watch the log lines and Token Factory usage for
+a day. If spend or abuse looks wrong, `ACCESS_MODE=link` and put the `?code=` link in the
+submission; if needed, `DEMO_DISABLED=true`. After judging: revoke the demo key and set
+`DEMO_DISABLED=true`. None of these steps is a deploy.
 
 ### Upload limits and errors
-- Uploads are streamed to disk and rejected over `MAX_UPLOAD_MB` (HTTP 413) with a message
-  asking you to trim the clip; the partial file is removed.
+- Uploads are streamed to disk and rejected over `MAX_UPLOAD_MB` (HTTP 413) with "Clips need to
+  be under 60 MB. Trim this one to the lift in your gallery app and try again."; the partial
+  file is removed. A window over `MAX_CLIP_SECONDS` gets "Clips need to be under 15 seconds".
 - Any `video/*` type is accepted, plus generic types (e.g. `application/octet-stream`) that
   carry a video extension — phones are inconsistent about what they send.
 - Any failure reaches the phone as one plain sentence that says what to do next ("The model
@@ -558,12 +606,16 @@ are set without an access code, without a sample, or with a per-IP limit and no 
   no-thinking hint and asking again happens only when the provider rejects the parameter
   (400/422), not on an outage.
 - A whole run — tracking, every model call, the replay render — must finish within
-  `JOB_TIMEOUT_SECONDS` (default 600, the image sets 240). Past that it is cancelled, no further
+  `JOB_TIMEOUT_SECONDS` (default 600, the deploys set 120). Past that it is cancelled, no further
   model call is made, the slot is freed, and the phone reads "Scoring took too long and was
   stopped." The synchronous endpoint answers 504.
-- When an access code is required, it is checked from the `X-Access-Code` header in ASGI
-  middleware, before FastAPI reads the multipart body — a clip sent without the code, or with a
-  wrong one, is refused from its headers alone and never spooled to disk.
+- The demo's gate — the kill switch, the access code in `link` and `code` modes, a free slot and
+  room in the budgets for one lift — runs in ASGI middleware on the `X-Access-Code` and
+  `X-Forwarded-For` headers, before FastAPI reads the multipart body. A clip that cannot be
+  scored is refused from its headers alone and never spooled to disk.
+- A job that a limit stops carries the limit's `reason` in its status, so the page offers the
+  right way on: the sample for the day, a countdown for a busy server, the same clip again for
+  anything else.
 - The uploaded clip is deleted as soon as scoring finishes, pass or fail.
 
 ### Local samples (do not commit videos)
@@ -680,8 +732,16 @@ given: these are things that happened on the 39 clips, not hypotheticals.
 - **No accounts, no history.** Results live for `JOB_TTL_SECONDS` and are then deleted. Nothing is
   stored between sessions.
 - **Rotation needs ffprobe.** Without it, portrait clips may be judged sideways.
+- **The public demo has a daily limit.** It is free and open, so it is bounded: 150 model calls
+  a day for everyone (about 50 single-lift clips, fewer for clean & jerks), 12 an hour per
+  address, one run at a time, 15 s and 60 MB per clip, two lifts per clip, a 120 s deadline per
+  run, with the last fifth of the day kept for addresses that have not scored yet. Past a limit
+  the page says so in one sentence and offers the pre-recorded sample result, which is the full
+  experience at no cost. The live judge is Nemotron 3 Super, not Ultra, for the same reason.
 - **Jobs and demo counters live in one process.** The store is in-memory, so the MVP runs as a
-  single instance; a restart resets the day's budget, and it does not scale horizontally as-is.
+  single instance; **a restart resets the day's count and the per-address counters** (Heroku
+  restarts dynos at least daily), which errs on the side of letting a judge in rather than
+  locking one out, and it does not scale horizontally as-is.
 - **Latency** is roughly a minute on a normal connection. That is a target observed in testing,
   not a guarantee — it depends on Token Factory load and clip length — and a run is cut off at
   `JOB_TIMEOUT_SECONDS` regardless.
@@ -689,13 +749,15 @@ given: these are things that happened on the 39 clips, not hypotheticals.
 ### Deployment
 The app is one container. The `Dockerfile` installs ffmpeg and the DejaVu font the replay strip
 is drawn with, runs as a non-root user, answers `/healthz`, and **is the public demo**: the spend
-caps are on in it (Super judge, no fallback, budgets in model calls, a 240 s run timeout, a
-15 s clip cap) and the sample clip is baked in. Build the sample first, then the image:
+caps are on in it (Super judge, no fallback, budgets in model calls with the day turning at
+midnight in Israel, one run at a time, a 120 s run deadline, 15 s / 60 MB / two lifts per clip)
+and the sample clip is baked in. Build the sample first, then the image:
 
 ```bash
 python tools/make_demo_sample.py samples/snatch1.mp4 --lift snatch --out demo_sample/
 docker build -t lift-judge .
-docker run --rm -p 8000:8000 --env-file .env -e DEMO_ACCESS_CODE=the-code lift-judge
+docker run --rm -p 8000:8000 --env-file .env -e ACCESS_MODE=open lift-judge          # no code
+docker run --rm -p 8000:8000 --env-file .env -e DEMO_ACCESS_CODE=the-code lift-judge # gated
 ```
 
 That is enough for any container host (Fly.io, Render, Cloud Run, a Nebius AI Cloud VM…) that
@@ -711,7 +773,8 @@ DOMAIN=lift.example.com docker compose -f deploy/docker-compose.yml up -d --buil
 Caddy obtains and renews the certificate, allows a 220 MB request body and 10-minute proxy
 timeouts, and forwards to the app; the compose file sets `TRUSTED_PROXIES=private` for it, and
 the app port is exposed to Caddy only, never published. Whatever you deploy on, it needs:
-- `NEBIUS_API_KEY` and `DEMO_ACCESS_CODE` (the other variables have defaults in the image)
+- `NEBIUS_API_KEY`, and either `ACCESS_MODE=open` or a `DEMO_ACCESS_CODE` (the other variables
+  have defaults in the image)
 - **HTTPS**, which camera capture and PWA install both require
 - A reverse-proxy body limit at least as large as `MAX_UPLOAD_MB`, and generous read timeouts
 - **One instance**: jobs and the demo counters are held in memory, so run a single replica (the
@@ -723,15 +786,16 @@ sets the config vars, builds the image locally, pushes and releases it on one dy
 
 ```bash
 heroku login
-APP=lift-judge-demo DEMO_ACCESS_CODE=the-code deploy/heroku.sh
+APP=lift-judge-demo DEMO_ACCESS_CODE=the-code deploy/heroku.sh     # gated, code mode
+APP=lift-judge-demo ACCESS_MODE=open deploy/heroku.sh              # open, caps on
 ```
 
 The script reads `NEBIUS_API_KEY` from the environment or `.env` (use a key made just for the
-demo), sets `TRUSTED_PROXIES=*`, `MAX_CONCURRENT_JOBS=1` and `MAX_UPLOAD_MB=60`, and prints the
-app's URL and the startup lines that list the caps in force. Re-run it to redeploy. `heroku.yml`
-is there too, so `git push heroku main` also works — but a git-push build has an empty
-`demo_sample/` (its contents are gitignored), so the free sample would be missing; the script's
-local build includes it. Heroku has no volumes, so the image is the only way the sample gets there.
+demo), sets `TRUSTED_PROXIES=*`, `MAX_CONCURRENT_JOBS=1` and `MAX_UPLOAD_MB=60`, passes
+`ACCESS_MODE` through when given, and prints the app's URL and the startup lines that list the
+caps in force. Re-run it to redeploy. It refuses to deploy `open` with no sample built. `heroku.yml`
+is there too, so `git push heroku main` also works, and carries the sample when `demo_sample/` is
+committed; the script's local build carries it either way.
 
 **Two build paths.** Heroku builds the Dockerfile only on the *container* stack
 (`heroku stack:set container -a <app>`; `heroku.yml` points at it). An app on the default stack —
@@ -742,18 +806,27 @@ That path works too, with three files in the repo and one setting in the dashboa
   pydantic-core has no wheel, so the build tries to compile it and fails — the error you get
   without the pin.
 - `Procfile` starts `deploy/heroku-web.sh`, which applies the same demo defaults the image has as
-  `ENV` (Super judge, no fallback, budgets, timeout, clip cap), so the demo is capped the same way
-  on both paths, plus the Heroku-specific ones: `TRUSTED_PROXIES=*`, one run at a time, a 60 MB
-  upload cap. A config var set in the dashboard always wins over a default.
+  `ENV` (Super judge, no fallback, budgets, the Israel-time day, deadline, clip, upload and
+  lifts-per-clip caps), so the demo is capped the same way on both paths — and so `open` mode,
+  which refuses to start without every one of them, starts — plus the Heroku-specific
+  `TRUSTED_PROXIES=*`. A config var set in the dashboard always wins over a default, and
+  `ACCESS_MODE` is only ever a config var.
 - `Aptfile` installs ffmpeg, which the stack image lacks (it does have glib and the DejaVu font).
   It needs the apt buildpack **ahead of** the Python one: in the dashboard, *Settings →
   Buildpacks → Add* `heroku-community/apt` and drag it to the top, or
   `heroku buildpacks:add --index 1 heroku-community/apt -a <app>`. Without it the app runs, but
   with no annotated replay and portrait clips judged sideways; the startup log says so.
 
-On either path set `NEBIUS_API_KEY` and `DEMO_ACCESS_CODE` as config vars. Neither path ships
-the sample clip, because a build from git sees an empty `demo_sample/`; only the script's local
-image build does.
+On either path set `NEBIUS_API_KEY` as a config var, plus `DEMO_ACCESS_CODE` unless
+`ACCESS_MODE=open`. A build from git ships the sample clip only if `demo_sample/` is committed
+(the sample is the one video the repo allows, see above); the script's local image build ships
+it either way. The live app today runs the buildpack path, so the sample reaches it by commit.
+
+**Going open, one variable at a time.** With the sample live and `/api/config` showing the caps:
+`heroku config:set ACCESS_MODE=open -a <app>`. The dyno restarts, the first screen loses its
+code field, and the startup line reads *access open*. `ACCESS_MODE=link` gates uploads again
+behind the `?code=` link (and `/api/access/check` validates it on *Next*); `DEMO_DISABLED=true`
+leaves the sample only. Each is a config change, never a deploy.
 
 **"Application Error" on the URL** is Heroku's own page for an app with no dyno answering, and
 `heroku logs --tail -a <app>` (or the dashboard's *More → View logs*) names the cause.
@@ -776,18 +849,19 @@ What Heroku changes:
   after 30 minutes idle and the app takes ~10 s to wake and import OpenCV, so a judge's first tap
   waits; pick the cheapest dyno that does not sleep (`DYNO_TYPE=basic`, or `heroku ps:type`).
 - **Dynos restart at least daily.** Jobs, replays and the demo counters live in the process, so a
-  restart clears results that are still within their TTL and resets the day's budget. One dyno
-  only, as everywhere: never scale `web` above 1.
+  restart clears results that are still within their TTL and resets the day's budget and the
+  per-address counters. One dyno only, as everywhere: never scale `web` above 1.
 - **HTTPS is the router's**, so camera capture and PWA install work with no further setup.
   `heroku logs --tail -a <app>` shows the startup line and every refusal.
 
 Then open the URL on a phone over 4G, score a clip, and check that the replay plays inline and
 shares. The image was built and smoke-tested locally (`/healthz`, the page, the manifest,
-ffmpeg, the font and OpenCV all present); the public URL itself is not part of this repository.
+ffmpeg, the font and OpenCV all present); the public URL is at the top of this README.
 
 ### Demo video
-The narration script for the ≤3-minute submission video, with per-beat timings, shot directions
-and a pre-recording checklist, is in [docs/demo-script.md](docs/demo-script.md).
+The finished video is linked at the top of this README. Its narration script, with per-beat
+timings, shot directions and a pre-recording checklist, is in
+[docs/demo-script.md](docs/demo-script.md).
 
 ### License
 MIT (already present in this repository).

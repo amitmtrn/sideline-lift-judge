@@ -36,8 +36,38 @@
       </header>
 
       <main>
+        <!-- 0. Start: the aha moment is one tap away, the camera two. -->
+        <section class="screen" data-screen="start" data-active="true" aria-labelledby="start-title">
+          <h2 id="start-title">Film it from the side. Get the bar path scored.</h2>
+          <p class="lede">
+            Film a snatch or clean from the side. Get a bar-path score and an annotated replay in
+            about a minute.
+          </p>
+
+          <div class="actions hero-actions">
+            {% if sample_available %}
+            <button type="button" data-action="sample">▶ See a sample result</button>
+            {% endif %}
+            {% if demo_disabled %}
+            <p class="notice hint" id="paused-note">
+              Live scoring is paused right now. The sample result shows everything the app does.
+            </p>
+            {% else %}
+            <button type="button" class="{{ 'ghost' if sample_available else '' }}" data-go="lift">
+              🎥 Score my lift
+            </button>
+            {% endif %}
+          </div>
+
+          <p class="field-hint hero-hint">
+            {% if access_mode == "open" %}No account, no code.{% elif access_mode == "link" %}Scoring opens from the link on the submission page.{% elif access_required %}Scoring needs the access code from the submission page.{% endif %}
+            {% if max_clip_seconds and max_upload_mb %}Clips need to be under {{ max_clip_seconds|int }} seconds and {{ max_upload_mb }} MB.{% elif max_upload_mb %}Clips need to be under {{ max_upload_mb }} MB.{% endif %}
+            Nothing is kept: the clip is deleted as soon as it is scored.
+          </p>
+        </section>
+
         <!-- 1. Choose lift -->
-        <section class="screen" data-screen="lift" data-active="true" aria-labelledby="lift-title">
+        <section class="screen" data-screen="lift" aria-labelledby="lift-title">
           <p class="step-label">Step 1 of 4</p>
           <h2 id="lift-title">Which lift?</h2>
           <p class="lede">One lift per clip. A clean &amp; jerk is scored as two: the clean, then the jerk.</p>
@@ -61,11 +91,13 @@
             <label class="choice">
               <input type="radio" name="lift" value="auto" />
               <span class="name">Find them</span>
-              <span class="hint">Longer clip — scores every attempt it finds</span>
+              <span class="hint">{% if max_lifts_per_clip %}Scores up to {{ max_lifts_per_clip }} attempts it finds{% else %}Longer clip — scores every attempt it finds{% endif %}</span>
             </label>
           </div>
 
-          <div class="field" id="access-field" {% if not access_required %}hidden{% endif %}>
+          <!-- The typed code, in code mode only. In link mode the code rides in
+               the URL and is never shown; in open mode there is none. -->
+          <div class="field" id="access-field" {% if not (access_required and access_mode == "code") %}hidden{% endif %}>
             <label for="access-code">Access code</label>
             <input
               id="access-code"
@@ -82,9 +114,14 @@
             </p>
           </div>
           <p id="access-error" class="notice" hidden></p>
+          <div class="actions" id="access-actions" hidden>
+            {% if sample_available %}
+            <button type="button" class="ghost" data-action="sample">▶ See the sample result instead</button>
+            {% endif %}
+          </div>
 
           <div class="dock">
-            <button type="button" data-go="guide">Next</button>
+            <button type="button" data-action="next">Next</button>
           </div>
         </section>
 
@@ -107,7 +144,7 @@
             <li><span class="num">2</span><span><b>3–5 m away, camera at hip height.</b></span></li>
             <li><span class="num">3</span><span><b>Landscape.</b> Portrait works but lowers confidence.</span></li>
             <li><span class="num">4</span><span><b>Whole bar and both plates in frame</b> for the entire lift.</span></li>
-            <li><span class="num">5</span><span><b>One lift per clip.</b> You can trim it on the next screen.</span></li>
+            <li><span class="num">5</span><span><b>One lift per clip.</b> You can trim it on the next screen.{% if max_clip_seconds and max_upload_mb %} Clips need to be under {{ max_clip_seconds|int }} seconds and {{ max_upload_mb }} MB.{% endif %}</span></li>
           </ol>
 
           <input id="camera-input" class="sr-only" type="file" accept="video/*" capture="environment" />
@@ -117,7 +154,7 @@
             <button type="button" data-pick="camera">🎥 Film now</button>
             <button type="button" class="ghost" data-pick="gallery">🖼 Upload from gallery</button>
             {% if sample_available %}
-            <button type="button" class="ghost" data-action="sample">▶ Try a sample clip</button>
+            <button type="button" class="ghost" data-action="sample">▶ See a sample result</button>
             {% endif %}
             <button type="button" class="ghost" data-go="lift">Back</button>
           </div>
@@ -181,11 +218,11 @@
 
           <p id="progress-error" class="notice" hidden></p>
           <div class="actions" id="progress-actions" hidden>
-            <button type="button" class="ghost" data-action="retry">Try again</button>
             {% if sample_available %}
-            <button type="button" class="ghost" data-action="sample">▶ Watch the sample clip instead</button>
+            <button type="button" data-action="sample" id="progress-sample">▶ See the sample result</button>
             {% endif %}
-            <button type="button" class="ghost" data-go="lift">Start over</button>
+            <button type="button" class="ghost" data-action="retry" id="progress-retry">Try again</button>
+            <button type="button" class="ghost" data-go="start">Start over</button>
           </div>
         </section>
 
@@ -199,14 +236,18 @@
             that is angled, dark or holds more than one lift lowers the confidence above.
           </p>
           <div class="dock">
-            <button type="button" data-go="lift">Score another lift</button>
+            {% if demo_disabled %}
+            <button type="button" data-go="start">Back to the start</button>
+            {% else %}
+            <button type="button" data-go="lift">🎥 Score my lift</button>
+            {% endif %}
           </div>
         </section>
       </main>
 
       <footer>
         <span id="install-hint" hidden>Add to Home Screen for a full-screen app. </span>
-        Two-stage pipeline on Nebius Token Factory · judged by {{ judge_name }} ·
+        {% if demo_disabled %}Live scoring paused · {% elif access_mode == "open" %}Open demo, no code needed · daily limit applies · {% elif access_mode == "link" %}Demo by link · {% elif access_required %}Demo by access code · {% endif %}CV tracker measured → {{ vision_name }} observed → {{ judge_name }} judged, on Nebius Token Factory ·
         <a href="https://github.com/amitmtrn/sideline-lift-judge">source (MIT)</a>
       </footer>
     </div>
@@ -218,7 +259,10 @@
         minFrames: {{ min_frames }},
         maxFrames: {{ max_frames }},
         maxClipSeconds: {{ max_clip_seconds }},
+        maxLiftsPerClip: {{ max_lifts_per_clip }},
+        accessMode: "{{ access_mode }}",
         accessRequired: {{ "true" if access_required else "false" }},
+        demoDisabled: {{ "true" if demo_disabled else "false" }},
         sampleAvailable: {{ "true" if sample_available else "false" }}
       };
     </script>

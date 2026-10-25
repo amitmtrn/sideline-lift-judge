@@ -40,15 +40,9 @@ def guard(clock):
 
 @pytest.fixture(autouse=True)
 def no_limits(monkeypatch):
-    for name in (
-        "DEMO_ACCESS_CODE",
-        "DEMO_DAILY_LIMIT",
-        "DEMO_IP_HOURLY_LIMIT",
-        "MAX_CONCURRENT_JOBS",
-        "MAX_CLIP_SECONDS",
-        "JOB_TIMEOUT_SECONDS",
-        "TRUSTED_PROXIES",
-    ):
+    from tests.conftest import DEMO_ENV_VARS
+
+    for name in DEMO_ENV_VARS:
         monkeypatch.delenv(name, raising=False)
 
 
@@ -122,7 +116,10 @@ def test_a_run_is_admitted_only_with_room_for_a_whole_lift(guard, monkeypatch):
     # rather than after it has paid for its vision call.
     error = refused(guard)
     assert error.status == 429 and error.reason == "ip_limit"
-    assert f"{2 * CALLS_PER_LIFT} model calls" in error.detail and "about 2 clips" in error.detail
+    # Plain English: a wait and the sample, never a call count or a variable.
+    assert error.detail.startswith("You've hit the hourly limit. Try again in ")
+    assert "see the sample" in error.detail
+    assert "model" not in error.detail and "DEMO_" not in error.detail
 
 
 def test_per_ip_limit_is_a_rolling_hour(guard, clock, monkeypatch):
@@ -186,7 +183,7 @@ def test_daily_budget_counts_everyone_and_resets_at_utc_midnight(guard, clock, m
         charge(guard, ip, 3)
     error = refused(guard, "d")
     assert error.status == 429 and error.reason == "daily_limit"
-    assert "9 model calls" in error.detail and "about 3 clips" in error.detail
+    assert error.detail == "Today's free demo limit is used up. See the sample result, or come back tomorrow."
     next_midnight = (clock.now // DAY_SECONDS + 1) * DAY_SECONDS
     assert error.retry_after == int(next_midnight - clock.now) + 1
     clock.now = next_midnight + 1

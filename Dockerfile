@@ -19,19 +19,28 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PORT=8000
 
-# Public-demo defaults. DEMO_ACCESS_CODE has no default — it is the secret —
-# so set it (and NEBIUS_API_KEY) in the container's environment. The judge is
+# Public-demo defaults: every cap ACCESS_MODE=open insists on, at the values
+# the PRD sets. ACCESS_MODE itself is not set here (so it is `code`, gated):
+# the deploy flips it to `open` with one config var once the caps and the
+# sample are verified, and back to `link` or `code` — or DEMO_DISABLED=true —
+# without a rebuild if the spend looks wrong. DEMO_ACCESS_CODE has no default
+# (it is the secret) and is only needed in link and code modes. The judge is
 # Nemotron 3 Super with no fallback to Ultra; the budgets count model calls
-# (a single lift is three); TRUSTED_PROXIES stays unset so X-Forwarded-For is
-# ignored until the deploy says which proxy to believe (deploy/ sets it).
+# (a single lift is three) and the day turns at midnight in Israel;
+# TRUSTED_PROXIES stays unset so X-Forwarded-For is ignored until the deploy
+# says which proxy to believe (deploy/ sets it).
 ENV NEBIUS_JUDGE_MODEL=nvidia/nemotron-3-super-120b-a12b \
     NEBIUS_JUDGE_FALLBACK_MODEL= \
     DEMO_DAILY_LIMIT=150 \
+    DEMO_DAY_TIMEZONE=Asia/Jerusalem \
+    DEMO_DAILY_RESERVE_PERCENT=20 \
     DEMO_IP_HOURLY_LIMIT=12 \
-    MAX_CONCURRENT_JOBS=2 \
+    MAX_CONCURRENT_JOBS=1 \
     MAX_CLIP_SECONDS=15 \
+    MAX_LIFTS_PER_CLIP=2 \
     MAX_FRAMES=10 \
-    JOB_TIMEOUT_SECONDS=240 \
+    MAX_UPLOAD_MB=60 \
+    JOB_TIMEOUT_SECONDS=120 \
     DEMO_SAMPLE_DIR=/app/demo_sample
 
 RUN apt-get update \
@@ -50,7 +59,7 @@ COPY tools tools
 COPY score_clip.py score_session.py ./
 # The cached sample clip, if one was built (tools/make_demo_sample.py): the
 # free result a visitor sees once the budget is spent. The directory is
-# tracked empty so this COPY always has something to copy.
+# tracked (its .gitkeep at least) so this COPY always has something to copy.
 COPY demo_sample demo_sample
 
 # Uploads, replays and the job store live under /tmp; nothing is persisted.

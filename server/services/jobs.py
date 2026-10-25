@@ -47,6 +47,9 @@ class Job:
     progress: float = 0.0
     payload: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
+    # Set when the failure was a demo limit (its machine-readable reason), so
+    # the page can offer the right way on: the sample, a wait, or tomorrow.
+    error_reason: Optional[str] = None
     created_at: float = field(default_factory=time.time)
     updated_at: float = field(default_factory=time.time)
     source_path: Optional[Path] = None
@@ -73,6 +76,8 @@ class Job:
         }
         if self.error:
             body["error"] = self.error
+        if self.error_reason:
+            body["reason"] = self.error_reason
         body.update(self.payload)
         return body
 
@@ -170,7 +175,14 @@ class JobStore:
                 from server.services.errors import user_message
 
                 # The traceback goes to the log; the phone gets one plain sentence.
-                logger.exception("Job %s failed", job.id)
+                from server.services.demo_guard import DemoRefused
+
+                if isinstance(exc, DemoRefused):
+                    # A limit, not a fault: one line, no traceback.
+                    logger.info("Job %s stopped by the demo limit %s", job.id, exc.reason)
+                    job.error_reason = exc.reason
+                else:
+                    logger.exception("Job %s failed", job.id)
                 job.status = "error"
                 job.stage = "error"
                 job.message = "Scoring failed."

@@ -5,6 +5,7 @@ jinja2==3.1.4
 python-multipart==0.0.12          # parses the multipart upload
 pydantic==2.9.2
 python-dotenv==1.0.1
+tzdata==2026.5                    # zone data for DEMO_DAY_TIMEZONE where the OS ships none (slim images)
 requests==2.32.3                  # the Token Factory client is hand-rolled on this
 opencv-python-headless==4.10.0.84  # frame sampling and the motion scan
 numpy==2.5.4                      # imported directly, not just via OpenCV
