@@ -737,9 +737,20 @@
       card.appendChild(list);
     }
 
-    if (Array.isArray(item.cues) && item.cues.length) {
+    // Cues — evidence-backed when available, plain strings otherwise
+    const evidencedCues = Array.isArray(item.evidenced_cues) && item.evidenced_cues.length
+      ? item.evidenced_cues : null;
+    const plainCues = Array.isArray(item.cues) && item.cues.length ? item.cues : null;
+
+    if (evidencedCues) {
       const cues = element("div", "cues");
-      item.cues.forEach((cue, index) => {
+      evidencedCues.forEach((ec, idx) => {
+        cues.appendChild(evidencedCueBlock(ec, idx, item));
+      });
+      card.appendChild(cues);
+    } else if (plainCues) {
+      const cues = element("div", "cues");
+      plainCues.forEach((cue, index) => {
         const block = element("div", "cue");
         block.appendChild(element("span", "tag", index === 0 ? "Cue" : "Then"));
         block.appendChild(document.createTextNode(cue));
@@ -759,6 +770,9 @@
       card.appendChild(details);
     }
 
+    // "How this was judged" — three-stage pipeline with model names
+    card.appendChild(howJudgedPanel(item));
+
     if (item.observations) {
       const details = element("details");
       details.appendChild(element("summary", null, "Vision observations"));
@@ -770,6 +784,95 @@
       card.appendChild(replayBlock(item));
     }
     return card;
+  }
+
+  function evidencedCueBlock(ec, idx, item) {
+    const block = element("div", "cue evidenced");
+
+    // Header row: tag + cue text + source badge
+    const header = element("div", "cue-header");
+    header.appendChild(element("span", "tag", idx === 0 ? "Cue" : "Then"));
+    header.appendChild(element("span", "cue-text", ec.text));
+    if (ec.vision_only) {
+      header.appendChild(element("span", "source-tag vision", "Seen by vision model"));
+    } else if (ec.verified) {
+      header.appendChild(element("span", "source-tag measured", "Measured"));
+    } else if (ec.evidence && ec.evidence.source === "tracker") {
+      header.appendChild(element("span", "source-tag measured", "Measured"));
+    }
+    block.appendChild(header);
+
+    // Annotated still — shown immediately; progressive upgrade to video would go here
+    const media = ec.media;
+    if (media && media.still_url) {
+      const stillWrap = element("div", "cue-still-wrap");
+      const img = document.createElement("img");
+      img.src = media.still_url;
+      img.alt = ec.text;
+      img.className = "cue-still";
+      img.loading = "lazy";
+      stillWrap.appendChild(img);
+      block.appendChild(stillWrap);
+    }
+
+    // Why sentence
+    if (ec.why) {
+      block.appendChild(element("p", "cue-why", ec.why));
+    }
+
+    // "Show in replay" link — seeks the main video to the cue's window
+    if (item.annotated_video_url && ec.evidence) {
+      const seekLink = element("button", "cue-seek ghost", "▶ Show in replay");
+      seekLink.type = "button";
+      seekLink.addEventListener("click", () => {
+        const vid = document.querySelector(`video[src="${CSS.escape ? item.annotated_video_url : item.annotated_video_url}"]`);
+        if (vid) {
+          vid.currentTime = ec.evidence.t_start_s;
+          vid.play().catch(() => {});
+          vid.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        }
+      });
+      block.appendChild(seekLink);
+    }
+
+    return block;
+  }
+
+  function howJudgedPanel(item) {
+    const models = item.models || {};
+    const barPath = item.bar_path || {};
+    const details = element("details", "how-judged");
+    details.appendChild(element("summary", null, "How this was judged"));
+
+    const list = element("ol", "how-judged-steps");
+
+    // Step 1: CV tracker
+    const li1 = element("li");
+    li1.appendChild(element("b", null, "CV tracker measured: "));
+    let trackerText = barPath.tracked
+      ? `bar path in ${Math.round((barPath.coverage || 0) * 100)}% of frames`
+        + (barPath.max_drift_cm_estimate != null ? `; max drift ~${barPath.max_drift_cm_estimate} cm` : "")
+      : "bar not tracked — drift read from the frames";
+    li1.appendChild(document.createTextNode(trackerText));
+    list.appendChild(li1);
+
+    // Step 2: Vision model
+    const li2 = element("li");
+    li2.appendChild(element("b", null, `${models.vision_name || models.vision || "Vision model"} observed: `));
+    li2.appendChild(document.createTextNode("factual bar-path description per phase"));
+    list.appendChild(li2);
+
+    // Step 3: Judge
+    const li3 = element("li");
+    const judgeName = models.judge_name || models.judge || "Judge";
+    li3.appendChild(element("b", null, `${judgeName} judged: `));
+    li3.appendChild(document.createTextNode(
+      `score, band, and cue selection${models.judge_fallback ? " (fallback judge)" : ""}`
+    ));
+    list.appendChild(li3);
+
+    details.appendChild(list);
+    return details;
   }
 
   // Who did what for this verdict, as the pipeline reads: the local tracker

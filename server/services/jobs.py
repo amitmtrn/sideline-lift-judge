@@ -54,6 +54,8 @@ class Job:
     updated_at: float = field(default_factory=time.time)
     source_path: Optional[Path] = None
     replays: Dict[int, Path] = field(default_factory=dict)
+    # Evidence stills: maps "{lift_index}_{cue_id}" → Path (e.g. "1_c1" → .../still_1_c1.jpg)
+    stills: Dict[str, Path] = field(default_factory=dict)
     task: Optional["asyncio.Task[None]"] = None
 
     def touch(self) -> None:

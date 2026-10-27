@@ -1,0 +1,68 @@
+{
+  "bar_forward_drift": {
+    "metric": "horizontal_drift_cm",
+    "target": "<= 4 cm",
+    "threshold_cm": 4.0,
+    "note": "approximate — scale estimate from plate size may be inflated on oblique angles"
+  },
+  "bar_loops_away": {
+    "metric": "horizontal_drift_cm",
+    "target": "<= 5 cm loop",
+    "threshold_cm": 5.0,
+    "note": "approximate"
+  },
+  "catch_forward": {
+    "metric": "horizontal_drift_cm",
+    "target": "<= 4 cm from start line at catch",
+    "threshold_cm": 4.0,
+    "note": "approximate"
+  },
+  "catch_behind": {
+    "metric": "horizontal_drift_cm",
+    "target": "<= 4 cm from start line at catch",
+    "threshold_cm": 4.0,
+    "note": "approximate"
+  },
+  "jerk_dip_forward": {
+    "metric": "horizontal_drift_cm",
+    "target": "<= 3 cm during dip",
+    "threshold_cm": 3.0,
+    "note": "approximate"
+  },
+  "early_arm_bend": {
+    "metric": null,
+    "target": "arms straight through full extension",
+    "threshold_cm": null,
+    "note": "vision only — tracker cannot measure elbow angle"
+  },
+  "hips_rise_first": {
+    "metric": null,
+    "target": "hips and shoulders rise together off the floor",
+    "threshold_cm": null,
+    "note": "vision only"
+  },
+  "incomplete_extension": {
+    "metric": null,
+    "target": "full hip/knee/ankle extension before pull-under",
+    "threshold_cm": null,
+    "note": "vision only"
+  },
+  "slow_turnover": {
+    "metric": null,
+    "target": "fast pull-under immediately after extension",
+    "threshold_cm": null,
+    "note": "vision only"
+  },
+  "unstable_catch": {
+    "metric": null,
+    "target": "stable overhead lockout, bar over mid-foot",
+    "threshold_cm": null,
+    "note": "vision only"
+  },
+  "press_out": {
+    "metric": null,
+    "target": "bar locked out overhead without pressing out",
+    "threshold_cm": null,
+    "note": "vision only"
+  }
+}

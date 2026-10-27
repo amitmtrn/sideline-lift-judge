@@ -17,6 +17,33 @@ class LiftType(str, Enum):
 Band = Literal["elite", "solid", "mixed", "poor", "fail", "unknown"]
 
 
+class CueEvidence(BaseModel):
+    t_start_s: float
+    t_end_s: float
+    metric: Optional[str] = None
+    value: Optional[float] = None
+    target: str = ""
+    source: str = "tracker"  # "tracker" | "vision" | "both"
+
+
+class CueMedia(BaseModel):
+    still_url: Optional[str] = None
+    clip_url: Optional[str] = None
+
+
+class EvidencedCue(BaseModel):
+    id: str
+    text: str
+    phase: str
+    issue: str
+    frame_refs: List[int] = Field(default_factory=list)
+    evidence: Optional[CueEvidence] = None
+    why: str = ""
+    media: Optional[CueMedia] = None
+    verified: bool = False
+    vision_only: bool = False
+
+
 class LiftJudgment(BaseModel):
     lift: LiftType
     score: Optional[int] = Field(default=None, ge=1, le=10)
@@ -32,6 +59,8 @@ class LiftJudgment(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     annotated_video_url: Optional[str] = Field(default=None)
     judged_by: Optional[str] = Field(default=None)
+    # Evidence-backed cues (G1–G4): built server-side after the judge replies.
+    evidenced_cues: Optional[List[EvidencedCue]] = Field(default=None)
 
     @model_validator(mode="after")
     def validate_cues(self) -> "LiftJudgment":

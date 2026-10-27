@@ -21,7 +21,7 @@ from server.utils.video_meta import probe_video
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from server.schemas.judgment import LiftJudgment
+    from server.schemas.judgment import EvidencedCue, LiftJudgment
 
 # Fonts vary by host; the first that exists wins. Without any of them drawtext
 # cannot render, and we fall back to an un-annotated (but still playable) clip.
@@ -269,6 +269,159 @@ def _run(args: List[str], timeout: float) -> bool:
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
         return False
     return True
+
+
+def render_cue_still(
+    video_path: str,
+    cue: "EvidencedCue",
+    bar_path: Optional["BarPath"],
+    out_path: str,
+    *,
+    window_start_sec: float = 0.0,
+    window_end_sec: float = 9999.0,
+    timeout: float = 15.0,
+) -> Optional[str]:
+    """
+    Render an annotated JPEG for one evidence cue (PRD §5.4).
+
+    The frame is extracted at the key moment (max-drift point in the cue's
+    time window). The bar path trace is drawn over it: the full lift faded,
+    the window segment bold, a vertical reference line, a red drift arrow
+    with a centimetre label, and text banners naming the cue and the phase.
+    """
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    if not shutil.which("ffmpeg"):
+        return None
+
+    evidence = cue.evidence
+    t_start = evidence.t_start_s if evidence else (window_start_sec + window_end_sec) / 2 - 0.5
+    t_end = evidence.t_end_s if evidence else t_start + 1.0
+    key_t = (t_start + t_end) / 2.0
+
+    # Find the actual max-drift point within the time window
+    key_point = None
+    if bar_path is not None and bar_path.tracked and bar_path.points:
+        ref = bar_path.reference_x
+        candidates = [p for p in bar_path.points if t_start <= p.t <= t_end] or bar_path.points
+        key_point = max(candidates, key=lambda p: abs(p.x - ref))
+        key_t = key_point.t
+
+    # Extract frame from the video at key_t (ffmpeg handles display rotation)
+    destination = Path(out_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp_frame = str(destination.with_suffix(".raw_frame.jpg"))
+    extract_args = [
+        "ffmpeg", "-y", "-v", "error",
+        "-ss", f"{max(0.0, key_t):.3f}",
+        "-i", str(video_path),
+        "-vframes", "1",
+        tmp_frame,
+    ]
+    if not _run(extract_args, timeout):
+        return None
+    frame = cv2.imread(tmp_frame)
+    try:
+        Path(tmp_frame).unlink(missing_ok=True)
+    except OSError:
+        pass
+    if frame is None:
+        return None
+
+    h, w = frame.shape[:2]
+
+    # Scale down to max 1080 px tall for storage
+    max_h = 1080
+    if h > max_h:
+        ratio = max_h / h
+        frame = cv2.resize(frame, (_even(int(w * ratio)), max_h))
+        h, w = frame.shape[:2]
+
+    # --- Bar-path trace overlay ---
+    if bar_path is not None and bar_path.tracked and bar_path.points:
+        layer = np.zeros((h, w, 4), dtype=np.uint8)
+        thickness = max(2, round(min(w, h) / 220))
+        ref_x_px = int(bar_path.reference_x * w)
+
+        # Full path, faded (lower alpha)
+        all_pts = [(int(p.x * w), int(p.y * h)) for p in bar_path.points]
+        FADED_GREEN = (106, 174, 47, 90)
+        if len(all_pts) >= 2:
+            cv2.polylines(layer, [np.array(all_pts, dtype=np.int32)], False, FADED_GREEN, thickness, cv2.LINE_AA)
+
+        # Window segment, bold
+        win_pts_raw = [p for p in bar_path.points if t_start <= p.t <= t_end]
+        if win_pts_raw:
+            win_pts = [(int(p.x * w), int(p.y * h)) for p in win_pts_raw]
+            if len(win_pts) >= 2:
+                cv2.polylines(layer, [np.array(win_pts, dtype=np.int32)], False, TRACE_GREEN, thickness + 2, cv2.LINE_AA)
+
+        # Vertical reference line (dashed)
+        dash_on, dash_gap = thickness * 4, thickness * 8
+        for y_dash in range(0, h, dash_on + dash_gap):
+            cv2.line(layer, (ref_x_px, y_dash), (ref_x_px, min(h, y_dash + dash_on)),
+                     REFERENCE_CHALK, max(1, thickness - 1), cv2.LINE_AA)
+
+        # Start-of-path marker
+        cv2.circle(layer, all_pts[0], thickness * 3, REFERENCE_CHALK, -1, cv2.LINE_AA)
+
+        # Composite trace onto frame
+        alpha = layer[:, :, 3:4].astype(np.float32) / 255.0
+        frame_f = frame.astype(np.float32)
+        trace_rgb = layer[:, :, :3].astype(np.float32)
+        frame = np.clip(frame_f * (1 - alpha) + trace_rgb * alpha, 0, 255).astype(np.uint8)
+
+        # Red drift arrow + circle at the key point (drawn directly on frame, no alpha)
+        if key_point is not None:
+            kx = int(key_point.x * w)
+            ky = int(key_point.y * h)
+            RED = (0, 0, 220)
+            cv2.arrowedLine(frame, (ref_x_px, ky), (kx, ky), RED, max(2, thickness + 1), cv2.LINE_AA, tipLength=0.25)
+            cv2.circle(frame, (kx, ky), max(4, thickness * 4), RED, thickness, cv2.LINE_AA)
+
+            # Centimetre label next to the arrowhead
+            if evidence and evidence.value is not None:
+                label = f"{evidence.value:.0f} cm"
+                label_x = max(4, min(kx + 6, w - 60))
+                label_y = max(20, ky - 6)
+                font_scale = max(0.4, min(w, h) / 800)
+                lthick = max(1, thickness - 1)
+                cv2.putText(frame, label, (label_x, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), lthick + 2, cv2.LINE_AA)
+                cv2.putText(frame, label, (label_x, label_y),
+                            cv2.FONT_HERSHEY_SIMPLEX, font_scale, (255, 255, 255), lthick, cv2.LINE_AA)
+
+    # --- Text banners ---
+    font_scale_base = max(0.4, w / 900)
+    lthick = max(1, round(w / 500))
+    banner_h = max(32, int(h * 0.07))
+    pad = max(6, int(w * 0.015))
+
+    # Top banner: cue text (truncated to fit)
+    overlay_top = frame.copy()
+    cv2.rectangle(overlay_top, (0, 0), (w, banner_h), (0, 0, 0), -1)
+    frame = cv2.addWeighted(overlay_top, 0.65, frame, 0.35, 0)
+    cue_display = cue.text if len(cue.text) <= 60 else cue.text[:57] + "…"
+    cv2.putText(frame, cue_display, (pad, banner_h - pad),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale_base * 0.85, (255, 255, 255), lthick, cv2.LINE_AA)
+
+    # Bottom banner: phase + time
+    phase_label = cue.phase.replace("_", " ").title()
+    if evidence:
+        bottom_text = f"{phase_label}  {evidence.t_start_s:.1f}–{evidence.t_end_s:.1f} s"
+    else:
+        bottom_text = phase_label
+    bottom_y = h - banner_h
+    overlay_bot = frame.copy()
+    cv2.rectangle(overlay_bot, (0, bottom_y), (w, h), (0, 0, 0), -1)
+    frame = cv2.addWeighted(overlay_bot, 0.65, frame, 0.35, 0)
+    cv2.putText(frame, bottom_text, (pad, h - pad),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale_base * 0.75, (200, 200, 200), lthick, cv2.LINE_AA)
+
+    if cv2.imwrite(str(destination), frame, [cv2.IMWRITE_JPEG_QUALITY, 85]):
+        return str(destination)
+    return None
 
 
 def render_annotated_replay(

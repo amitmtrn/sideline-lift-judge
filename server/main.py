@@ -541,8 +541,17 @@ async def create_job(
             current.replays = {
                 item.index: Path(item.replay_path) for item in outcome.lifts if item.replay_path
             }
+            current.stills = {
+                f"{item.index}_{cue_id}": path
+                for item in outcome.lifts
+                for cue_id, path in item.still_paths.items()
+                if path and Path(path).is_file()
+            }
+            _job_id = current.id
             current.payload = outcome_payload(
-                outcome, replay_url=lambda index: f"/api/jobs/{current.id}/replay/{index}.mp4"
+                outcome,
+                replay_url=lambda index: f"/api/jobs/{_job_id}/replay/{index}.mp4",
+                still_url=lambda index, cue_id: f"/api/jobs/{_job_id}/evidence/{index}_{cue_id}.jpg",
             )
             if not outcome.scored:
                 first_error = next((item.error for item in outcome.lifts if item.error), None)
@@ -587,6 +596,21 @@ async def read_replay(job_id: str, index: int):
         path,
         media_type="video/mp4",
         headers={"Content-Disposition": f'inline; filename="lift-{index}.mp4"'},
+    )
+
+
+@app.get("/api/jobs/{job_id}/evidence/{key}.jpg")
+async def read_evidence_still(job_id: str, key: str):
+    job = get_store().get(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="That result has expired.")
+    path = job.stills.get(key)
+    if path is None or not Path(path).is_file():
+        raise HTTPException(status_code=404, detail="No evidence still for that cue.")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=1800"},
     )
 
 

@@ -27,6 +27,7 @@ from server.schemas.segment import SegmentTriage
 from server.services.confidence import assess_clip_quality, apply_quality, cross_check
 from server.services.demo_guard import CALLS_PER_LIFT, BudgetExhausted
 from server.services.errors import detail_of, user_message
+from server.services.evidence import build_evidence_cues
 from server.services.measurement import BarPathMeasurement, describe, measure
 from server.services.nebius_client import (
     NebiusChatClient,
@@ -184,6 +185,8 @@ class ScoredLift:
     # The demo budget ran out on this lift: the run stops here, keeping the
     # lifts before it.
     out_of_budget: bool = False
+    # Evidence stills: maps cue_id (e.g. "c1") to local file path.
+    still_paths: Dict[str, Any] = field(default_factory=dict)
 
 
 def models_used(judgment: Optional[LiftJudgment] = None) -> Dict[str, Any]:
@@ -628,6 +631,28 @@ async def _score_one_lift(
     quality = cross_check(judgment, measurement, quality)
     scored.judgment = apply_quality(judgment, quality)
 
+    # Build evidence for each cue and render annotated stills.
+    if scored.judgment.cues and request.replay_dir:
+        try:
+            evidenced = await _offload(
+                _build_evidence,
+                scored.judgment.cues,
+                measurement,
+                bar_path,
+                lift.value,
+                window.start_sec,
+                window.end_sec,
+                request.video_path,
+                request.replay_dir,
+                index,
+            )
+            scored.judgment = scored.judgment.model_copy(
+                update={"evidenced_cues": [ec for ec, _ in evidenced]}
+            )
+            scored.still_paths = {ec.id: path for ec, path in evidenced if path is not None}
+        except Exception:
+            logger.exception("Evidence building failed for %s — skipping", label)
+
     if request.render_replay and request.replay_dir:
         progress("rendering", f"Rendering replay — {label}…", low + 0.8 * (high - low))
         replay = await _offload(
@@ -700,3 +725,47 @@ def _stamp(window: CandidateSegment) -> str:
     from server.utils.clips import format_timestamp
 
     return f"{format_timestamp(window.start_sec)}–{format_timestamp(window.end_sec)}"
+
+
+def _build_evidence(
+    cues: List[str],
+    measurement: BarPathMeasurement,
+    bar_path,
+    lift: str,
+    window_start: float,
+    window_end: float,
+    video_path: str,
+    replay_dir: str,
+    lift_index: int,
+):
+    """
+    Build EvidencedCue objects and render annotated stills.
+    Returns [(EvidencedCue, Optional[path]), ...] for each surviving cue.
+    Runs on a worker thread (called via _offload).
+    """
+    from pathlib import Path as _Path
+    from server.services.replay import render_cue_still
+
+    evidenced = build_evidence_cues(
+        cues=cues,
+        measurement=measurement,
+        bar_path=bar_path,
+        lift=lift,
+        window_start_sec=window_start,
+        window_end_sec=window_end,
+    )
+
+    result = []
+    for ec in evidenced:
+        still_name = f"still_{lift_index}_{ec.id}.jpg"
+        still_path = str(_Path(replay_dir) / still_name)
+        path = render_cue_still(
+            video_path=video_path,
+            cue=ec,
+            bar_path=bar_path,
+            out_path=still_path,
+            window_start_sec=window_start,
+            window_end_sec=window_end,
+        )
+        result.append((ec, path))
+    return result

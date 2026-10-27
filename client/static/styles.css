@@ -852,6 +852,104 @@ input[type="range"]::-moz-range-thumb {
   color: var(--accent);
 }
 
+/* Evidence-backed cue enhancements */
+.cue.evidenced {
+  padding-bottom: 12px;
+}
+
+.cue-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 2px;
+}
+
+.cue-header .tag {
+  flex-shrink: 0;
+}
+
+.cue-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.source-tag {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-family: var(--font-display);
+  font-size: 10px;
+  font-weight: 400;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.source-tag.measured {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+.source-tag.vision {
+  background: color-mix(in srgb, var(--plate-orange) 15%, transparent);
+  color: var(--plate-orange);
+  border: 1px solid color-mix(in srgb, var(--plate-orange) 30%, transparent);
+}
+
+.cue-still-wrap {
+  margin: 10px 0 8px;
+  border-radius: calc(var(--radius) - 2px);
+  overflow: hidden;
+  line-height: 0;
+}
+
+.cue-still {
+  width: 100%;
+  max-height: 280px;
+  object-fit: contain;
+  background: #000;
+  border-radius: calc(var(--radius) - 2px);
+  display: block;
+}
+
+.cue-why {
+  margin: 8px 0 6px;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--chalk-dim);
+  line-height: 1.45;
+}
+
+.cue-seek {
+  margin-top: 6px;
+  font-size: 12px;
+  padding: 4px 10px;
+}
+
+.how-judged {
+  margin-top: 16px;
+}
+
+.how-judged-steps {
+  margin: 10px 0 0 0;
+  padding-left: 22px;
+  font-size: 14px;
+  color: var(--chalk-dim);
+  line-height: 1.6;
+}
+
+.how-judged-steps li {
+  margin-bottom: 4px;
+}
+
+.how-judged-steps b {
+  color: var(--chalk);
+  font-weight: 600;
+}
+
 details {
   margin-top: 16px;
   padding: 12px 14px;
