@@ -259,16 +259,41 @@ def write_trace_overlay(path: "BarPath", width: int, height: int, out_path: str)
 
 def _run(args: List[str], timeout: float) -> bool:
     try:
-        subprocess.run(
+        result = subprocess.run(
             args,
             check=True,
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
             timeout=timeout,
         )
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+    except subprocess.CalledProcessError as exc:
+        if exc.stderr:
+            logger.warning("ffmpeg error: %s", exc.stderr.decode(errors="replace").strip()[:400])
+        return False
+    except (subprocess.TimeoutExpired, OSError):
         return False
     return True
+
+
+def _read_frame_at(video_path: str, t_sec: float):
+    """Read one frame at t_sec from video_path using OpenCV. Returns the BGR
+    ndarray or None on any failure."""
+    try:
+        import cv2  # type: ignore
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            logger.warning("_read_frame_at: could not open %s", video_path)
+            return None
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t_sec) * 1000.0)
+        ret, frame = cap.read()
+        cap.release()
+        if not ret or frame is None:
+            logger.warning("_read_frame_at: read failed at t=%.3f in %s", t_sec, video_path)
+            return None
+        return frame
+    except Exception:
+        logger.exception("_read_frame_at: unexpected error at t=%.3f in %s", t_sec, video_path)
+        return None
 
 
 def render_cue_still(
@@ -292,9 +317,6 @@ def render_cue_still(
     import cv2  # type: ignore
     import numpy as np  # type: ignore
 
-    if not shutil.which("ffmpeg"):
-        return None
-
     evidence = cue.evidence
     t_start = evidence.t_start_s if evidence else (window_start_sec + window_end_sec) / 2 - 0.5
     t_end = evidence.t_end_s if evidence else t_start + 1.0
@@ -308,25 +330,30 @@ def render_cue_still(
         key_point = max(candidates, key=lambda p: abs(p.x - ref))
         key_t = key_point.t
 
-    # Extract frame from the video at key_t (ffmpeg handles display rotation)
+    # Extract frame via OpenCV — same coordinate space as the tracker, no
+    # subprocess and no rotation correction needed (bar_path coords are in the
+    # OpenCV frame's space already).
     destination = Path(out_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    tmp_frame = str(destination.with_suffix(".raw_frame.jpg"))
-    extract_args = [
-        "ffmpeg", "-y", "-v", "error",
-        "-ss", f"{max(0.0, key_t):.3f}",
-        "-i", str(video_path),
-        "-vframes", "1",
-        tmp_frame,
-    ]
-    if not _run(extract_args, timeout):
-        return None
-    frame = cv2.imread(tmp_frame)
-    try:
-        Path(tmp_frame).unlink(missing_ok=True)
-    except OSError:
-        pass
+    frame = _read_frame_at(video_path, key_t)
     if frame is None:
+        # ffmpeg fallback (handles codecs OpenCV can't decode without extra libs)
+        tmp_frame = str(destination.with_suffix(".raw_frame.jpg"))
+        extract_args = [
+            "ffmpeg", "-y", "-v", "error",
+            "-ss", f"{max(0.0, key_t):.3f}",
+            "-i", str(video_path),
+            "-vframes", "1",
+            tmp_frame,
+        ]
+        if shutil.which("ffmpeg") and _run(extract_args, timeout):
+            frame = cv2.imread(tmp_frame)
+            try:
+                Path(tmp_frame).unlink(missing_ok=True)
+            except OSError:
+                pass
+    if frame is None:
+        logger.warning("render_cue_still: could not extract frame at t=%.3f from %s", key_t, video_path)
         return None
 
     h, w = frame.shape[:2]
