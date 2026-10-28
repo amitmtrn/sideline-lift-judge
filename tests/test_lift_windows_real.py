@@ -20,10 +20,10 @@ have_samples = all((SAMPLES / name).is_file() for name in truth)
 
 pytestmark = pytest.mark.skipif(not have_samples, reason="real sample clips are not present")
 
-# Measured on 2026-10-21 at 85% recall / 78% precision (9 of 62 lifts missed, 11
-# junk windows of 51). The 92% / 84% noted on 2026-10-18 no longer reproduced
-# on that day's code either (85% / 79%), so these floors are set a little under
-# what is measured now; a change that drops below them needs a reason.
+# Measured on 2026-10-28 at 89% recall / 86% precision (7 of 63 lifts missed, 7
+# junk windows of 50), after frames were read on presentation time; it was 85% /
+# 78% on 2026-10-21. The floors stay where they were set then, a little under
+# that day's figures; a change that drops below them needs a reason.
 MIN_RECALL = 0.80
 MIN_PRECISION = 0.75
 

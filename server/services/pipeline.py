@@ -42,6 +42,7 @@ from server.services.nebius_client import (
 from server.services.replay import render_annotated_replay
 from server.utils.bar_track import BarPath, LiftWindow, detect_lift_windows, track_bar_path
 from server.utils.frames import sample_frames_in_range_bgr
+from server.utils.plate_follow import follow_bar_path
 from server.utils.image_ops import frames_to_data_urls, prepare_frames
 from server.utils.segmentation import (
     CandidateSegment,
@@ -674,12 +675,26 @@ def _trace_for(
     video_path: str, window: CandidateSegment, lift_window: Optional[LiftWindow], label: str
 ) -> Optional[BarPath]:
     """
-    The bar's path through this window, from local CV and no model call. The
-    trail that found the lift is used first; a second tracking pass samples
-    different frames and does not reliably agree, so it runs only when there is
-    no trail or the trail does not cover this part of the clip.
+    The bar's path through this window, from local CV and no model call.
+
+    First choice is following the plate frame by frame from the start of the
+    window (plate_follow): it says where the bar went far more faithfully than
+    the trail that found the lift, which is a chain of separate guesses at
+    12 fps. That trail is the next choice — and is offered to the follower as
+    a hint — and a fresh bar_track pass is the last, because it samples
+    different frames and does not reliably agree with either.
     """
     bar_path: Optional[BarPath] = None
+    hint = None
+    if lift_window is not None and lift_window.points and lift_window.radius:
+        start = min(lift_window.points, key=lambda p: abs(p.t - lift_window.rise_start_sec))
+        hint = (start.t, start.x, start.y, float(lift_window.radius))
+    try:
+        bar_path = follow_bar_path(video_path, window.start_sec, window.end_sec, hint=hint)
+    except Exception:
+        logger.exception("Following the plate failed for %s", label)
+    if bar_path is not None and bar_path.tracked:
+        return bar_path
     if lift_window is not None:
         bar_path = lift_window.bar_path(window.start_sec, window.end_sec)
     if bar_path is None or not bar_path.tracked:
@@ -739,12 +754,14 @@ def _build_evidence(
     lift_index: int,
 ):
     """
-    Build EvidencedCue objects and render annotated stills.
-    Returns [(EvidencedCue, Optional[path]), ...] for each surviving cue.
-    Runs on a worker thread (called via _offload).
+    Build EvidencedCue objects and render each one's evidence image: a strip
+    of frames across the cue's window, or one annotated still when the strip
+    cannot be made. Returns [(EvidencedCue, Optional[path]), ...] for each
+    surviving cue. Runs on a worker thread (called via _offload).
     """
     from pathlib import Path as _Path
-    from server.services.replay import render_cue_still
+    from server.schemas.judgment import CueMedia
+    from server.services.replay import render_cue_still, render_cue_strip
 
     evidenced = build_evidence_cues(
         cues=cues,
@@ -757,15 +774,18 @@ def _build_evidence(
 
     result = []
     for ec in evidenced:
-        still_name = f"still_{lift_index}_{ec.id}.jpg"
-        still_path = str(_Path(replay_dir) / still_name)
-        path = render_cue_still(
-            video_path=video_path,
-            cue=ec,
-            bar_path=bar_path,
-            out_path=still_path,
-            window_start_sec=window_start,
-            window_end_sec=window_end,
-        )
+        still_path = str(_Path(replay_dir) / f"still_{lift_index}_{ec.id}.jpg")
+        path = render_cue_strip(video_path=video_path, cue=ec, bar_path=bar_path, out_path=still_path)
+        if path is not None:
+            ec = ec.model_copy(update={"media": CueMedia(layout="strip")})
+        else:
+            path = render_cue_still(
+                video_path=video_path,
+                cue=ec,
+                bar_path=bar_path,
+                out_path=still_path,
+                window_start_sec=window_start,
+                window_end_sec=window_end,
+            )
         result.append((ec, path))
     return result

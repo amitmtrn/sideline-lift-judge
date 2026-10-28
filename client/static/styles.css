@@ -915,6 +915,25 @@ input[type="range"]::-moz-range-thumb {
   display: block;
 }
 
+/* Frames across the cue's window: full height, scrolled sideways when wider
+   than the card, so no frame is shrunk past reading. */
+.cue-strip-wrap {
+  margin: 10px 0 8px;
+  border-radius: calc(var(--radius) - 2px);
+  overflow-x: auto;
+  overflow-y: hidden;
+  line-height: 0;
+  background: #000;
+  -webkit-overflow-scrolling: touch;
+}
+
+.cue-strip {
+  height: 240px;
+  width: auto;
+  max-width: none;
+  display: block;
+}
+
 .cue-why {
   margin: 8px 0 6px;
   font-size: 14px;

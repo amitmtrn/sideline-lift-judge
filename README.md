@@ -439,8 +439,11 @@ than ~1.5 s apart merge as the phases of one lift (pull, catch, recovery; a clea
 after it), and no window is allowed to be longer than one lift. The motion-energy segmentation
 remains only as a fallback when nothing could be tracked.
 
-**Measured on 39 real clips** (62 hand-labelled lifts, `tests/data/lift_windows_truth.json`,
-re-measured 2026-10-21): recall 85% (9 lifts missed), precision 78% (11 junk windows of 51).
+**Measured on 39 real clips** (63 hand-labelled lifts, `tests/data/lift_windows_truth.json`,
+re-measured 2026-10-28): recall 89% (7 lifts missed), precision 86% (7 junk windows of 50). The
+gain over the 85% / 78% of 2026-10-21 came from reading frames on their own presentation time:
+9 of the 39 clips are variable frame rate, and frame number / fps had put their windows up to
+two seconds from the lift (see `server/utils/frames.py`).
 The misses are mostly jerks whose drive is so fast that the plate is motion-blurred for the whole
 0.3 s at 12 fps; the extra windows are an athlete walking in or the bar being dropped or
 re-racked, which the triage stage rejects before anything is scored. Two windows merge when
@@ -676,12 +679,18 @@ given: these are things that happened on the 39 clips, not hypotheticals.
   sideways travel. The confidence cap says so; it cannot rescue the angle.
 
 **Finding the lift (the local tracker)**
-- **Measured, not assumed: 85% recall, 78% precision** on the 39 real clips (62 hand-labelled
-  lifts, 2026-10-21). 9 lifts were missed — mostly jerks whose drive is so fast the plate is
-  motion-blurred for the whole 0.3 s at the 12 fps the tracker samples — and 11 of 51 windows were
+- **Measured, not assumed: 89% recall, 86% precision** on the 39 real clips (63 hand-labelled
+  lifts, 2026-10-28). 7 lifts were missed — mostly jerks whose drive is so fast the plate is
+  motion-blurred for the whole 0.3 s at the 12 fps the tracker samples — and 7 of 50 windows were
   junk: an athlete walking in, the bar being dropped or re-racked. Triage rejects the junk before
   anything is scored, but each rejected window still costs one vision call. The earlier figures
   of 92/84 did not reproduce and were corrected.
+- **The drawn bar path** is a second pass inside each window (`server/utils/plate_follow.py`):
+  the plate followed frame by frame with optical flow, not the 12 fps detections that found the
+  lift. Scored against per-frame plate tracks checked by eye (`tools/score_bar_path.py`), 53 of
+  61 gym lifts get a clean trace (11 before) and the drift shown is off by 5 cm at the median,
+  27 cm at worst (17 and 137 before). On 6 competition clips from YouTube
+  (`--set competition`) 7 of 11 lifts are clean and the drift is off by 4 cm at the median.
 - **A clean & jerk done fast is one rise.** Rises under ~1.5 s apart merge as the phases of one
   lift, so a jerk that follows the clean at once lands in the clean's window and the split falls
   back to the quiet moment in the motion profile. If no split leaves each half at least 1.2 s —

@@ -202,43 +202,25 @@ def _circles(gray, min_radius: int, max_radius: int):
 
 
 def _read_window(video_path: str, start_sec: float, end_sec: float, sample_fps: float, analysis_width: int):
+    """(fps, [(t, frame at analysis width)]) at about sample_fps, t in presentation time."""
     import cv2  # type: ignore
+
+    from server.utils.frames import read_frames
 
     capture = cv2.VideoCapture(video_path)
     if not capture.isOpened():
         return 0.0, []
-    try:
-        fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
-        if not (0 < fps <= 480):
-            fps = 30.0
-        step = max(1, int(round(fps / max(1.0, sample_fps))))
-        first = max(0, int(round(max(0.0, start_sec) * fps)))
-        last = int(round(max(start_sec, end_sec) * fps))
-        capture.set(cv2.CAP_PROP_POS_FRAMES, first)
-
-        samples = []
-        index = first
-        while index <= last:
-            # grab() advances without the colour conversion that read() does;
-            # retrieve() only for the frames we keep. On 60 fps phone footage
-            # that is most of the decode cost gone.
-            if not capture.grab():
-                break
-            if (index - first) % step == 0:
-                ok, frame = capture.retrieve()
-                if ok and frame is not None:
-                    # Downscale only: blowing a small clip up costs time and
-                    # adds no detail for Hough to find.
-                    if frame.shape[1] > analysis_width:
-                        scale = analysis_width / frame.shape[1]
-                        frame = cv2.resize(
-                            frame, (analysis_width, max(1, int(round(frame.shape[0] * scale))))
-                        )
-                    samples.append((index / fps, frame))
-            index += 1
-        return fps, samples
-    finally:
-        capture.release()
+    fps = float(capture.get(cv2.CAP_PROP_FPS) or 0.0)
+    capture.release()
+    samples = []
+    for t, frame in read_frames(video_path, start_sec, max(start_sec, end_sec), max_fps=max(1.0, sample_fps)):
+        # Downscale only: blowing a small clip up costs time and adds no
+        # detail for Hough to find.
+        if frame.shape[1] > analysis_width:
+            scale = analysis_width / frame.shape[1]
+            frame = cv2.resize(frame, (analysis_width, max(1, int(round(frame.shape[0] * scale)))))
+        samples.append((t, frame))
+    return fps, samples
 
 
 @dataclass

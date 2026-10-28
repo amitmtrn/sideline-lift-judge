@@ -29,6 +29,9 @@ class CueEvidence(BaseModel):
 class CueMedia(BaseModel):
     still_url: Optional[str] = None
     clip_url: Optional[str] = None
+    # What the image at still_url is: "strip" — frames across the cue's
+    # window, side by side — or "still", one annotated frame.
+    layout: str = "still"
 
 
 class EvidencedCue(BaseModel):

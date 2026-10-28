@@ -64,6 +64,8 @@ def compute_motion_profile(
     import cv2  # type: ignore
     import numpy as np  # type: ignore
 
+    from server.utils.frames import frame_time
+
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return MotionProfile()
@@ -96,7 +98,9 @@ def compute_motion_profile(
                             interpolation=cv2.INTER_AREA,
                         )
                     gray = cv2.GaussianBlur(gray, (5, 5), 0)
-                    timestamp = frame_index / fps
+                    # The frame's own presentation time: frame_index / fps drifts
+                    # from it by seconds on variable-frame-rate phone footage.
+                    timestamp = frame_time(cap)
                     if previous is not None:
                         times.append(timestamp)
                         energy.append(float(np.mean(cv2.absdiff(previous, gray))))

@@ -802,14 +802,16 @@
     }
     block.appendChild(header);
 
-    // Annotated still — shown immediately; progressive upgrade to video would go here
+    // Evidence image: a strip of frames across the cue's window (scrolls
+    // sideways on a phone), or one annotated still.
     const media = ec.media;
     if (media && media.still_url) {
-      const stillWrap = element("div", "cue-still-wrap");
+      const strip = media.layout === "strip";
+      const stillWrap = element("div", strip ? "cue-strip-wrap" : "cue-still-wrap");
       const img = document.createElement("img");
       img.src = media.still_url;
-      img.alt = ec.text;
-      img.className = "cue-still";
+      img.alt = strip ? `${ec.text}: frames from the lift, the key moment outlined in red` : ec.text;
+      img.className = strip ? "cue-strip" : "cue-still";
       img.loading = "lazy";
       stillWrap.appendChild(img);
       block.appendChild(stillWrap);

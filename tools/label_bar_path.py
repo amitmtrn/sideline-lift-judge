@@ -57,6 +57,18 @@ WINDOWS = ROOT / "tests" / "data" / "lift_windows_truth.json"
 SEEDS = ROOT / "tests" / "data" / "bar_path_seeds.json"
 TRUTH = ROOT / "tests" / "data" / "bar_path_truth.json"
 
+
+def use_set(name: str) -> None:
+    """
+    Point the tool at another set of clips: samples/<name>/ for the video,
+    tests/data/<name>/ for the labels, seeds and truth. The default set is
+    the gym session in samples/ itself.
+    """
+    global SAMPLES, WINDOWS, SEEDS, TRUTH
+    SAMPLES = ROOT / "samples" / name
+    data = ROOT / "tests" / "data" / name
+    WINDOWS, SEEDS, TRUTH = data / "lift_windows_truth.json", data / "bar_path_seeds.json", data / "bar_path_truth.json"
+
 # The seed sheet is drawn this long before the first lift is labelled as
 # leaving the floor — the labels are read off 0.75 s strips, so a shorter lead
 # sometimes starts with the bar already at the hips. The track then runs back
@@ -88,19 +100,18 @@ def clip_names() -> List[str]:
 
 def read_span(path: Path, start_sec: float, end_sec: float):
     """
-    (t, frame) at analysis width for every native frame in the span, timed as
-    index / fps — the same clock detect_lift_windows uses — and read from the
-    top so a seek on variable-frame-rate HEVC cannot land a few frames off.
+    (t, frame) at analysis width for every native frame in the span, t the
+    frame's presentation time (server.utils.frames.frame_time — the app's
+    clock), read from the top so no seek can land a few frames off.
     """
+    from server.utils.frames import frame_time
+
     capture = cv2.VideoCapture(str(path))
-    fps = float(capture.get(cv2.CAP_PROP_FPS) or 30.0)
-    index = 0
     try:
         while True:
             if not capture.grab():
                 break
-            t = index / fps
-            index += 1
+            t = frame_time(capture)
             if t < start_sec:
                 continue
             if t > end_sec:
@@ -258,10 +269,11 @@ def track_plate(frames, plate_seeds: List[dict], height: int):
     return followed, plate_seeds[0]["r"] * ANALYSIS_WIDTH
 
 
-def _propagate_one(name: str, plates: List[List[dict]], lifts, out: Path):
+def _propagate_one(video: Path, plates: List[List[dict]], lifts, out: Path):
+    name = video.name
     first = min(s["t"] for plate in plates for s in plate)
     start = max(0.0, min(first, lifts[0][0] - LOOK_BACK))
-    frames = list(read_span(SAMPLES / name, start, lifts[-1][2] + LEAD_OUT))
+    frames = list(read_span(video, start, lifts[-1][2] + LEAD_OUT))
     height = frames[0][1].shape[0]
     tracks = [track_plate(frames, plate, height) for plate in plates]
     entry = {
@@ -291,7 +303,7 @@ def propagate(out: Path, only: Optional[List[str]] = None, workers: int = 8) -> 
     truth = json.loads(TRUTH.read_text()) if TRUTH.is_file() else {}
     names = [n for n in clip_names() if n in seeds and (not only or n in only)]
     with ProcessPoolExecutor(max_workers=workers) as pool:
-        jobs = [pool.submit(_propagate_one, n, seeds[n], windows[n], out) for n in names]
+        jobs = [pool.submit(_propagate_one, SAMPLES / n, seeds[n], windows[n], out) for n in names]
         for job in jobs:
             name, entry, message = job.result()
             truth[name] = entry
@@ -305,7 +317,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser.add_argument("step", choices=["candidates", "propagate"])
     parser.add_argument("--out", type=Path, required=True, help="where the sheets or check strips go")
     parser.add_argument("--only", nargs="*", help="propagate just these clips (file names)")
+    parser.add_argument("--set", default="", help="another set of clips, e.g. competition (see use_set)")
     args = parser.parse_args(argv)
+    if args.set:
+        use_set(args.set)
     if args.step == "candidates":
         candidates(args.out)
     else:

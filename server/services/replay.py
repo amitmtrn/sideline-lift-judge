@@ -276,24 +276,17 @@ def _run(args: List[str], timeout: float) -> bool:
 
 
 def _read_frame_at(video_path: str, t_sec: float):
-    """Read one frame at t_sec from video_path using OpenCV. Returns the BGR
-    ndarray or None on any failure."""
+    """The BGR frame presented at t_sec, or None on any failure."""
+    from server.utils.frames import read_frames_at
+
     try:
-        import cv2  # type: ignore
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            logger.warning("_read_frame_at: could not open %s", video_path)
-            return None
-        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t_sec) * 1000.0)
-        ret, frame = cap.read()
-        cap.release()
-        if not ret or frame is None:
-            logger.warning("_read_frame_at: read failed at t=%.3f in %s", t_sec, video_path)
-            return None
-        return frame
+        frame = read_frames_at(str(video_path), [max(0.0, t_sec)])[0]
     except Exception:
         logger.exception("_read_frame_at: unexpected error at t=%.3f in %s", t_sec, video_path)
         return None
+    if frame is None:
+        logger.warning("_read_frame_at: read failed at t=%.3f in %s", t_sec, video_path)
+    return frame
 
 
 def render_cue_still(
@@ -447,6 +440,157 @@ def render_cue_still(
                 cv2.FONT_HERSHEY_SIMPLEX, font_scale_base * 0.75, (200, 200, 200), lthick, cv2.LINE_AA)
 
     if cv2.imwrite(str(destination), frame, [cv2.IMWRITE_JPEG_QUALITY, 85]):
+        return str(destination)
+    return None
+
+
+# The strip: this many frames across the cue's window, each this tall and
+# cropped to this width:height, around the bar path with this many plate
+# diameters of margin (or this share of the frame height, whichever is more).
+STRIP_TILES = 5
+STRIP_TILE_HEIGHT = 360
+STRIP_TILE_ASPECT = 0.75
+STRIP_MARGIN_PLATES = 1.5
+STRIP_MARGIN_FRAME = 0.08
+STRIP_RED = (40, 40, 220)
+
+
+def _strip_times(t_start: float, t_end: float, key_t: Optional[float], count: int) -> List[float]:
+    """Evenly spaced times across the window, with the key moment one of them."""
+    import numpy as np  # type: ignore
+
+    times = [float(t) for t in np.linspace(t_start, t_end, count)]
+    if key_t is not None and t_start <= key_t <= t_end:
+        nearest = min(range(count), key=lambda i: abs(times[i] - key_t))
+        times[nearest] = key_t
+    return sorted(times)
+
+
+def _strip_crop(bar_path: Optional["BarPath"], width: int, height: int) -> Tuple[int, int, int, int]:
+    """
+    One crop for every tile, so the frames line up and the bar's movement
+    reads across them: the whole path with a margin, grown to the tile's
+    shape. The full frame when there is no trace to centre on.
+    """
+    if bar_path is None or not bar_path.tracked or not bar_path.points:
+        crop_w, crop_h = width, height
+        if crop_w / crop_h > STRIP_TILE_ASPECT:
+            crop_w = int(crop_h * STRIP_TILE_ASPECT)
+        else:
+            crop_h = int(crop_w / STRIP_TILE_ASPECT)
+        return (width - crop_w) // 2, (height - crop_h) // 2, crop_w, crop_h
+    xs = [p.x * width for p in bar_path.points] + [bar_path.reference_x * width]
+    ys = [p.y * height for p in bar_path.points]
+    margin = max(STRIP_MARGIN_PLATES * 2 * bar_path.plate_radius * width, STRIP_MARGIN_FRAME * height)
+    left, right = min(xs) - margin, max(xs) + margin
+    top, bottom = min(ys) - margin, max(ys) + margin
+    crop_w, crop_h = right - left, bottom - top
+    if crop_w / crop_h > STRIP_TILE_ASPECT:
+        crop_h = crop_w / STRIP_TILE_ASPECT
+    else:
+        crop_w = crop_h * STRIP_TILE_ASPECT
+    # Too big for the frame: as big as the frame allows, at the tile's shape.
+    scale = min(1.0, width / crop_w, height / crop_h)
+    crop_w, crop_h = int(crop_w * scale), int(crop_h * scale)
+    centre_x, centre_y = (left + right) / 2, (top + bottom) / 2
+    x0 = int(min(max(0, centre_x - crop_w / 2), width - crop_w))
+    y0 = int(min(max(0, centre_y - crop_h / 2), height - crop_h))
+    return x0, y0, crop_w, crop_h
+
+
+def render_cue_strip(
+    video_path: str,
+    cue: "EvidencedCue",
+    bar_path: Optional["BarPath"],
+    out_path: str,
+    *,
+    tiles: int = STRIP_TILES,
+) -> Optional[str]:
+    """
+    The cue's evidence as the lift itself, frame by frame: `tiles` frames
+    across the cue's time window, side by side, one of them the moment the
+    bar was furthest from where it started. Every frame carries the bar path
+    so far, the line the bar started over, and a circle on what the tracker
+    followed — so a strip shows plainly when the tracker was on the plate and
+    when it was not. The key frame carries the drift arrow and a red border.
+
+    Without a trace the frames are shown bare: they are still the evidence a
+    vision-only cue rests on. Returns the written path, or None when the
+    frames could not be read.
+    """
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    from server.utils.frames import read_frames_at
+
+    evidence = cue.evidence
+    if evidence is None:
+        return None
+    t_start, t_end = evidence.t_start_s, evidence.t_end_s
+    tracked = bar_path is not None and bar_path.tracked and bool(bar_path.points)
+    key_point = None
+    if tracked:
+        reference = bar_path.reference_x
+        inside = [p for p in bar_path.points if t_start <= p.t <= t_end] or bar_path.points
+        key_point = max(inside, key=lambda p: abs(p.x - reference))
+    times = _strip_times(t_start, t_end, key_point.t if key_point else None, tiles)
+    frames = read_frames_at(video_path, times)
+    if not any(frame is not None for frame in frames):
+        logger.warning("render_cue_strip: no frames read in %.2f-%.2f s of %s", t_start, t_end, video_path)
+        return None
+    height, width = next(f for f in frames if f is not None).shape[:2]
+    x0, y0, crop_w, crop_h = _strip_crop(bar_path, width, height)
+    tile_h = STRIP_TILE_HEIGHT
+    tile_w = int(round(tile_h * crop_w / crop_h))
+    scale = tile_h / crop_h
+
+    def to_tile(p) -> Tuple[int, int]:
+        return int((p.x * width - x0) * scale), int((p.y * height - y0) * scale)
+
+    step = 1.5 / 12.0  # a trace point this close in time is this frame's
+    out = []
+    for t, frame in zip(times, frames):
+        if frame is None:
+            tile = np.zeros((tile_h, tile_w, 3), dtype=np.uint8)
+        else:
+            tile = cv2.resize(frame[y0 : y0 + crop_h, x0 : x0 + crop_w], (tile_w, tile_h), interpolation=cv2.INTER_AREA)
+        is_key = key_point is not None and abs(t - key_point.t) < 1e-6
+        if tracked:
+            ref_x = int((bar_path.reference_x * width - x0) * scale)
+            for y in range(0, tile_h, 12):
+                cv2.line(tile, (ref_x, y), (ref_x, min(tile_h, y + 6)), REFERENCE_CHALK[:3], 1, cv2.LINE_AA)
+            everything = np.array([to_tile(p) for p in bar_path.points], dtype=np.int32)
+            faded = tile.copy()
+            cv2.polylines(faded, [everything], False, TRACE_GREEN[:3], 2, cv2.LINE_AA)
+            tile = cv2.addWeighted(faded, 0.35, tile, 0.65, 0)
+            so_far = np.array([to_tile(p) for p in bar_path.points if p.t <= t + 1e-6], dtype=np.int32)
+            if len(so_far) >= 2:
+                cv2.polylines(tile, [so_far], False, TRACE_SHADOW[:3], 5, cv2.LINE_AA)
+                cv2.polylines(tile, [so_far], False, TRACE_GREEN[:3], 3, cv2.LINE_AA)
+            here = min(bar_path.points, key=lambda p: abs(p.t - t))
+            if abs(here.t - t) <= step:
+                radius = max(4, int(bar_path.plate_radius * width * scale))
+                cv2.circle(tile, to_tile(here), radius, (255, 255, 255), 2, cv2.LINE_AA)
+            if is_key:
+                kx, ky = to_tile(key_point)
+                cv2.arrowedLine(tile, (ref_x, ky), (kx, ky), STRIP_RED, 3, cv2.LINE_AA, tipLength=0.3)
+                if evidence.value is not None:
+                    label = f"{evidence.value:.0f} cm"
+                    (text_w, _h), _base = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 4)
+                    lx, ly = max(4, min(kx + 6, tile_w - text_w - 4)), max(40, ky - 8)
+                    cv2.putText(tile, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 4, cv2.LINE_AA)
+                    cv2.putText(tile, label, (lx, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA)
+        stamp = f"{t:.1f} s"
+        cv2.putText(tile, stamp, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 4, cv2.LINE_AA)
+        cv2.putText(tile, stamp, (6, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+        if is_key:
+            cv2.rectangle(tile, (1, 1), (tile_w - 2, tile_h - 2), STRIP_RED, 3)
+        out.append(tile)
+    gap = np.zeros((tile_h, 4, 3), dtype=np.uint8)
+    strip = np.hstack([part for tile in out for part in (tile, gap)][:-1])
+    destination = Path(out_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if cv2.imwrite(str(destination), strip, [cv2.IMWRITE_JPEG_QUALITY, 85]):
         return str(destination)
     return None
 

@@ -67,7 +67,7 @@ def _interpolate(points: List[List[float]], t: float):
     return x0 + share * (x1 - x0), y0 + share * (y1 - y0)
 
 
-def score_clip(name: str) -> List[Dict]:
+def score_clip(name: str, samples: Path = SAMPLES, windows_file: Path = WINDOWS, truth_file: Path = TRUTH) -> List[Dict]:
     import numpy as np
 
     from server.services.pipeline import _trace_for
@@ -75,10 +75,10 @@ def score_clip(name: str) -> List[Dict]:
     from server.utils.segmentation import CandidateSegment
     from server.utils.video_meta import probe_video
 
-    lifts = json.loads(WINDOWS.read_text())[name]
-    truth = json.loads(TRUTH.read_text())[name]
+    lifts = json.loads(windows_file.read_text())[name]
+    truth = json.loads(truth_file.read_text())[name]
     aspect = truth["aspect"]
-    path = str(SAMPLES / name)
+    path = str(samples / name)
     windows = detect_lift_windows(path, duration_sec=probe_video(path).duration_sec)
 
     rows = []
@@ -140,6 +140,11 @@ def score_clip(name: str) -> List[Dict]:
     return rows
 
 
+def _short(clip: str) -> str:
+    """113132 for the gym's 20260925_113132.mp4; the first six characters otherwise."""
+    return Path(clip).stem.split("_")[-1][:6]
+
+
 def summarise(rows: List[Dict]) -> str:
     import numpy as np
 
@@ -149,10 +154,10 @@ def summarise(rows: List[Dict]) -> str:
     ]
     for r in rows:
         if r["status"] != "scored":
-            lines.append(f"{r['clip'][9:15]:>8} {r['lift']:>4} {r['status']:>17}")
+            lines.append(f"{_short(r['clip']):>8} {r['lift']:>4} {r['status']:>17}")
             continue
         lines.append(
-            f"{r['clip'][9:15]:>8} {r['lift']:>4} {'scored':>17} {r['on_path']:>7.0%} "
+            f"{_short(r['clip']):>8} {r['lift']:>4} {'scored':>17} {r['on_path']:>7.0%} "
             f"{r['median_px']:>4.0f}px {r['p90_px']:>4.0f}px {r['drift_px']:>4.0f}/{r['truth_drift_px']:<4.0f} "
             f"{r['drift_cm']:>5.1f}cm {r['drift_error_cm']:>4.1f}cm"
         )
@@ -176,11 +181,17 @@ def main(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--json", type=Path, help="also write every row here")
+    parser.add_argument("--set", default="", help="another set of clips: samples/<set>/ and tests/data/<set>/")
     args = parser.parse_args(argv)
 
-    names = sorted(json.loads(TRUTH.read_text()))
+    samples, windows_file, truth_file = SAMPLES, WINDOWS, TRUTH
+    if args.set:
+        data = ROOT / "tests" / "data" / args.set
+        samples, windows_file, truth_file = SAMPLES / args.set, data / "lift_windows_truth.json", data / "bar_path_truth.json"
+    names = sorted(json.loads(truth_file.read_text()))
     with ProcessPoolExecutor(max_workers=args.workers) as pool:
-        rows = [row for clip_rows in pool.map(score_clip, names) for row in clip_rows]
+        jobs = [pool.submit(score_clip, n, samples, windows_file, truth_file) for n in names]
+        rows = [row for job in jobs for row in job.result()]
     print(summarise(rows))
     if args.json:
         args.json.write_text(json.dumps(rows, indent=1))

@@ -313,3 +313,85 @@ def test_render_cleans_up_the_trace_png(lift_video, tmp_path):
     out = tmp_path / "replay.mp4"
     assert render_annotated_replay(lift_video, judgment(), str(out), bar_path=tracked_path()) is not None
     assert list(tmp_path.glob("*.png")) == [], "temporary trace overlay was left behind"
+
+
+# ---------- the evidence strip ----------
+
+
+def evidenced_cue(t_start: float = 0.2, t_end: float = 0.8, value=12.0):
+    from server.schemas.judgment import CueEvidence, EvidencedCue
+
+    return EvidencedCue(
+        id="c1",
+        text="keep the bar close",
+        phase="second_pull",
+        issue="bar_forward_drift",
+        evidence=CueEvidence(t_start_s=t_start, t_end_s=t_end, metric="drift_cm", value=value),
+    )
+
+
+def test_strip_times_span_the_window_and_include_the_key_moment():
+    from server.services.replay import _strip_times
+
+    times = _strip_times(0.2, 0.8, 0.47, 5)
+    assert len(times) == 5 and times == sorted(times)
+    assert times[0] == 0.2 and times[-1] == 0.8
+    assert 0.47 in times
+    # A key moment outside the window is not forced in.
+    assert _strip_times(0.2, 0.8, 3.0, 5) == _strip_times(0.2, 0.8, None, 5)
+
+
+def test_strip_is_a_row_of_frames_with_the_key_one_outlined(lift_video, tmp_path):
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+    from server.services.replay import STRIP_RED, STRIP_TILE_HEIGHT, STRIP_TILES, render_cue_strip
+
+    out = render_cue_strip(lift_video, evidenced_cue(), tracked_path(), str(tmp_path / "strip.jpg"))
+    assert out is not None
+    strip = cv2.imread(out)
+    assert strip.shape[0] == STRIP_TILE_HEIGHT
+    tile_w = (strip.shape[1] - 4 * (STRIP_TILES - 1)) / STRIP_TILES
+    assert tile_w == int(tile_w) and tile_w > 0
+    # The worst drift is at t=0.5 — the third of five frames over 0.2-0.8 s —
+    # and that tile, alone, carries the red border.
+    def border_is_red(k):
+        left = int(k * (tile_w + 4))
+        pixel = strip[STRIP_TILE_HEIGHT // 2, left + 1].astype(int)
+        return abs(pixel - np.array(STRIP_RED)).max() < 60
+    assert [border_is_red(k) for k in range(STRIP_TILES)] == [False, False, True, False, False]
+
+
+def test_strip_without_a_trace_still_shows_the_frames(lift_video, tmp_path):
+    import cv2  # type: ignore
+    from server.services.replay import STRIP_TILE_HEIGHT, render_cue_strip
+    from server.utils.bar_track import BarPath
+
+    for path in (None, BarPath()):
+        out = render_cue_strip(lift_video, evidenced_cue(value=None), path, str(tmp_path / "bare.jpg"))
+        assert out is not None
+        assert cv2.imread(out).shape[0] == STRIP_TILE_HEIGHT
+
+
+def test_strip_needs_a_readable_video_and_a_window(tmp_path, lift_video):
+    from server.services.replay import render_cue_strip
+    from server.schemas.judgment import EvidencedCue
+
+    missing = str(tmp_path / "nope.mp4")
+    assert render_cue_strip(missing, evidenced_cue(), tracked_path(), str(tmp_path / "a.jpg")) is None
+    bare = EvidencedCue(id="c1", text="x", phase="pull", issue="unknown")
+    assert render_cue_strip(lift_video, bare, tracked_path(), str(tmp_path / "b.jpg")) is None
+
+
+def test_evidence_uses_the_strip_and_says_so(lift_video, tmp_path):
+    from server.services.measurement import measure
+    from server.services.pipeline import _build_evidence
+
+    path = tracked_path()
+    built = _build_evidence(
+        ["keep the bar close"], measure(path), path, "snatch", 0.0, 0.9,
+        lift_video, str(tmp_path), 1,
+    )
+    assert built, "the cue was dropped"
+    for cue, image in built:
+        assert image is not None and image.endswith(".jpg")
+        assert cue.media is not None and cue.media.layout == "strip"
