@@ -820,12 +820,14 @@ input[type="range"]::-moz-range-thumb {
 
 .cues {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   margin: 18px 0 0;
 }
 
 .cue {
   position: relative;
+  min-width: 0;
   padding: 15px 16px 15px 18px;
   background: var(--steel-800);
   border: 1px solid var(--line);
@@ -916,9 +918,14 @@ input[type="range"]::-moz-range-thumb {
 }
 
 /* Frames across the cue's window: full height, scrolled sideways when wider
-   than the card, so no frame is shrunk past reading. */
+   than the card, so no frame is shrunk past reading. The max-width + min-width:0
+   combination is what keeps the strip from pushing the card wider than the
+   viewport on a phone — without it, the image's intrinsic width grows the grid
+   column and the whole card clips on the right. */
 .cue-strip-wrap {
   margin: 10px 0 8px;
+  max-width: 100%;
+  min-width: 0;
   border-radius: calc(var(--radius) - 2px);
   overflow-x: auto;
   overflow-y: hidden;
