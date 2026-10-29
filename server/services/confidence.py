@@ -200,6 +200,19 @@ def assess_clip_quality(
                     "plate is bigger than a thumbnail in frame, and the drift reads cleanly.",
                     CAP_SMALL_PLATE,
                 )
+            # Plate ellipse aspect gives us a measured oblique signal that
+            # does not depend on the vision model noticing it in words.
+            # Calibrated against the hand-labelled clips: a perfectly side-on
+            # plate measures ~0.998, a visibly tilted camera drops to ~0.91,
+            # and anything a coach would call off-axis sits well under 0.9.
+            # The threshold leaves a buffer for a slight tilt that still
+            # earns the warning — the drift reads inflated at even 20° off.
+            axis_ratio = measurement.plate_axis_ratio
+            if axis_ratio is not None and axis_ratio < 0.93:
+                quality.add(
+                    "Film square from the side; this angle may overstate forward drift.",
+                    CAP_OFF_AXIS,
+                )
 
     if lifts_in_window > 1 and not was_split:
         quality.add(

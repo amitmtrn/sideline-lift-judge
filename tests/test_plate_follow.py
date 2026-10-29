@@ -184,6 +184,56 @@ def test_full_pipeline_follows_the_rising_plate_not_the_static_one(tmp_path):
     )
 
 
+def test_axis_ratio_is_measured_from_the_plate_ellipse(tmp_path):
+    """
+    A plate drawn as an ellipse (short vertical axis = oblique view) must
+    come back with `plate_axis_ratio` well below 1; a plate drawn as a
+    circle must come back close to 1. The threshold used by the confidence
+    module is 0.82, so cross that both ways.
+    """
+    import cv2  # type: ignore
+    from server.utils.plate_follow import follow_bar_path
+
+    def write_elliptical(path, *, aspect: float, duration: float = 2.0):
+        writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (WIDTH, HEIGHT))
+        assert writer.isOpened()
+        rng = np.random.default_rng(7)
+        backdrop = np.clip(rng.normal(80, 6, (HEIGHT, WIDTH, 3)), 0, 255).astype(np.uint8)
+        total = int(duration * FPS)
+        try:
+            for index in range(total):
+                fraction = index / (total - 1)
+                frame = backdrop.copy()
+                rise = min(1.0, max(0.0, (fraction - 0.2) / 0.6))
+                x = 150
+                y = HEIGHT - 90 - rise * (HEIGHT - 320)
+                centre = (int(round(x)), int(round(y)))
+                axes = (PLATE_R, int(round(PLATE_R * aspect)))
+                cv2.ellipse(frame, centre, axes, 0, 0, 360, (60, 60, 200), -1, cv2.LINE_AA)
+                cv2.ellipse(frame, centre, axes, 0, 0, 360, (230, 230, 230), 3, cv2.LINE_AA)
+                writer.write(frame)
+        finally:
+            writer.release()
+        return path
+
+    # 0.7 aspect ≈ a ~45° side tilt, which is exactly what we want to catch
+    # on a judge's clip. A heavier squash (0.5) stops looking like a circle
+    # to Hough's seeder; the hint keeps the real pipeline alive in that case.
+    hint = (0.0, 150 / WIDTH, (HEIGHT - 90) / HEIGHT, float(PLATE_R))
+    oblique = follow_bar_path(
+        write_elliptical(str(tmp_path / "oblique.mp4"), aspect=0.7), 0.0, 2.0, hint=hint
+    )
+    assert oblique.tracked, oblique.reason
+    assert oblique.plate_axis_ratio is not None
+    assert oblique.plate_axis_ratio < 0.82, oblique.plate_axis_ratio
+
+    side_on = follow_bar_path(
+        write_elliptical(str(tmp_path / "side.mp4"), aspect=1.0), 0.0, 2.0, hint=hint
+    )
+    assert side_on.tracked, side_on.reason
+    assert side_on.plate_axis_ratio is None or side_on.plate_axis_ratio >= 0.82, side_on.plate_axis_ratio
+
+
 def test_nothing_rising_is_not_called_a_bar(tmp_path):
     import cv2  # type: ignore
     from server.utils.plate_follow import follow_bar_path

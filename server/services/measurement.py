@@ -39,9 +39,13 @@ class BarPathMeasurement:
     # about a plate radius of a frame edge during the lift (the bar left view,
     # so the measurement is not trustworthy there). `plate_too_small` fires
     # when the plate is too small on screen for the tracker's rim-finding to
-    # stay inside a few pixels.
+    # stay inside a few pixels. `plate_axis_ratio` is the plate's measured
+    # minor/major axis — 1.0 side-on, dropping as the camera tilts; the
+    # confidence module caps on it and the judge is told about it so it does
+    # not claim side-on when the tracker measured otherwise.
     near_frame_edge: bool = False
     plate_too_small: bool = False
+    plate_axis_ratio: Optional[float] = None
     reason: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
@@ -117,6 +121,7 @@ def measure(path: Optional[BarPath]) -> BarPathMeasurement:
         rise_diameters=(lowest - highest) * path.frame_height / plate_px,
         near_frame_edge=near_edge,
         plate_too_small=plate_too_small,
+        plate_axis_ratio=path.plate_axis_ratio,
     )
 
 
@@ -227,4 +232,15 @@ def describe(measurement: BarPathMeasurement, lift: str) -> str:
         "From an oblique camera the measured drift is inflated by the athlete moving toward or away",
         "from the camera, so discount it when the observations say the view is not square to the side.",
     ]
+    # Oblique signal from the plate's own shape — a side-on plate projects to
+    # a near-circle. Tell the judge the measured ratio when it indicates tilt,
+    # so it does not reply "no indication of oblique camera inflation" on an
+    # obviously oblique clip.
+    axis_ratio = measurement.plate_axis_ratio
+    if axis_ratio is not None and axis_ratio < 0.93:
+        lines.append(
+            f"- The plate was measured at a {axis_ratio:.2f} minor/major axis ratio: the camera "
+            "is NOT square to the side, so the drift above is inflated. Treat the direction as "
+            "indicative, not the exact centimetres."
+        )
     return "\n".join(lines)

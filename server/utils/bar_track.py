@@ -86,6 +86,10 @@ class BarPath:
     sampled: int = 0
     frame_width: int = 0
     frame_height: int = 0
+    # Median minor/major axis ratio of the plate across the lift. 1.0 is a
+    # perfect circle (side-on); the smaller the number, the more the camera
+    # looks down the lift from an angle. None when no fit was measurable.
+    plate_axis_ratio: Optional[float] = None
     reason: str = ""
 
     @property
@@ -591,15 +595,25 @@ def _colour_distance(colour, reference) -> float:
 
 
 def _smooth(points: List[BarPoint], window: int = 3) -> List[BarPoint]:
-    """Take the jitter out of the detections without flattening the loop."""
+    """
+    Jitter out of the detections without flattening the loop and, importantly,
+    without dragging the first and last points. The old centred mean used a
+    truncated window at the edges (one or two neighbours instead of three),
+    which pulled the first point toward the second and the last toward the
+    second-to-last — the trace's start marker ended up under the sleeve and
+    the furthest-point marker over it. The endpoints are kept as-is now; a
+    single-frame jump at the edges stays as a (small) jitter, not an inward
+    bend.
+    """
     if len(points) < window:
         return points
     half = window // 2
     smoothed: List[BarPoint] = []
     for index, point in enumerate(points):
-        low = max(0, index - half)
-        high = min(len(points), index + half + 1)
-        neighbours = points[low:high]
+        if index < half or index >= len(points) - half:
+            smoothed.append(point)
+            continue
+        neighbours = points[index - half : index + half + 1]
         smoothed.append(
             BarPoint(
                 t=point.t,

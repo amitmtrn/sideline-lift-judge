@@ -72,6 +72,10 @@ class _Seed:
     y: float
     radius: float
     track: List[Optional[Tuple[float, float]]] = field(default_factory=list)
+    # Minor/major axis ratio from each successful ellipse fit along the
+    # trail. A plate filmed square to the side has values close to 1; an
+    # oblique view flattens the ellipse so the median drops.
+    axis_ratios: List[float] = field(default_factory=list)
     checks: int = 0
     found: int = 0
 
@@ -142,7 +146,7 @@ def _features(gray, x: float, y: float, radius: float):
     return found + np.array([left, top], np.float32)
 
 
-def _snap(gray, x: float, y: float, radius: float) -> Optional[Tuple[float, float]]:
+def _snap(gray, x: float, y: float, radius: float) -> Optional[Tuple[float, float, Optional[float]]]:
     """
     A circle of the plate's size close to the track, if there is one, then
     an ellipse fit on the rim pixels around it so the returned centre lands
@@ -150,6 +154,10 @@ def _snap(gray, x: float, y: float, radius: float) -> Optional[Tuple[float, floa
     refinement matters for oblique views where the plate projects to an
     ellipse — a side-on circle degenerates to the Hough centre, which is
     the same point.
+
+    Returns `(x, y, axis_ratio)`: `axis_ratio` is the ellipse's minor/major
+    (close to 1 side-on, below 1 the more the camera tilts). None when no
+    ellipse fit was healthy enough to measure it.
     """
     import cv2  # type: ignore
     import numpy as np  # type: ignore
@@ -171,17 +179,21 @@ def _snap(gray, x: float, y: float, radius: float) -> Optional[Tuple[float, floa
     if np.hypot(bx - x, by - y) > SNAP_DISTANCE * radius:
         return None
     refined = _ellipse_centre(gray, bx, by, radius)
-    if refined is not None and np.hypot(refined[0] - bx, refined[1] - by) <= 0.3 * radius:
-        return refined
-    return (bx, by)
+    if refined is not None:
+        (ex, ey), ratio = refined
+        if np.hypot(ex - bx, ey - by) <= 0.3 * radius:
+            return ex, ey, ratio
+    return bx, by, None
 
 
-def _ellipse_centre(gray, cx: float, cy: float, radius: float) -> Optional[Tuple[float, float]]:
+def _ellipse_centre(
+    gray, cx: float, cy: float, radius: float
+) -> Optional[Tuple[Tuple[float, float], float]]:
     """
-    Fit an ellipse to the plate's rim and return its centre. Keeps the point
-    on the sleeve for an oblique view, where Hough's best-fit circle sits
-    biased toward one side of the projected ellipse. Returns None when the
-    fit is unreliable (not enough edge pixels, bad aspect, far from `cx,cy`).
+    Fit an ellipse to the plate's rim and return `((cx, cy), axis_ratio)`.
+    `axis_ratio` is minor/major, close to 1 on a side-on plate and below 1
+    the more the camera tilts. Returns None when the fit is unreliable
+    (not enough edge pixels, bad aspect, far from the Hough centre).
     """
     import cv2  # type: ignore
     import numpy as np  # type: ignore
@@ -202,8 +214,12 @@ def _ellipse_centre(gray, cx: float, cy: float, radius: float) -> Optional[Tuple
     # or background edges outside do not pull the ellipse off.
     local = (int(cx) - left, int(cy) - top)
     mask = np.zeros_like(edges)
-    cv2.circle(mask, local, int(radius * 1.2), 255, -1)
-    cv2.circle(mask, local, int(radius * 0.75), 0, -1)
+    # Wider annulus than Hough's radius so an oblique-view ellipse (minor
+    # axis well inside the Hough radius; major axis a little outside) keeps
+    # both ends of its rim in the fit. The inner radius still clears the
+    # plate's hub lettering (which lives inside ~0.4 r).
+    cv2.circle(mask, local, int(radius * 1.3), 255, -1)
+    cv2.circle(mask, local, int(radius * 0.5), 0, -1)
     edges = cv2.bitwise_and(edges, mask)
 
     ys, xs = np.where(edges > 0)
@@ -223,7 +239,7 @@ def _ellipse_centre(gray, cx: float, cy: float, radius: float) -> Optional[Tuple
         return None
     if not (expected_dia * 0.7 <= major <= expected_dia * 1.4):
         return None
-    return float(ex + left), float(ey + top)
+    return (float(ex + left), float(ey + top)), float(minor / major)
 
 
 def _follow(frames, order: Sequence[int], seeds: List[_Seed]) -> None:
@@ -275,8 +291,17 @@ def _follow(frames, order: Sequence[int], seeds: List[_Seed]) -> None:
                 rim = _snap(gray, x, y, seed.radius)
                 if rim is not None:
                     seed.found += 1
-                    x, y = rim
-                    positions[k] = rim
+                    x, y, ratio = rim
+                    positions[k] = (x, y)
+                    if ratio is not None:
+                        seed.axis_ratios.append(ratio)
+                else:
+                    # Hough failed — still measure the plate's axis ratio at
+                    # the flow-tracked position so an oblique view (where
+                    # Hough struggles for exactly this reason) is detected.
+                    fit = _ellipse_centre(gray, x, y, seed.radius)
+                    if fit is not None:
+                        seed.axis_ratios.append(fit[1])
             if refresh or len(corners[k]) < 10:
                 corners[k] = _features(gray, x, y, seed.radius)
             seed.track[index] = (x, y)
@@ -401,6 +426,17 @@ def follow_bar_path(
         span_frames = sum(1 for ft, _ in frames if points[0].t <= ft <= points[-1].t)
     else:
         span_frames = len(frames)
+    axis_ratio: Optional[float] = None
+    if best.axis_ratios:
+        import numpy as np  # type: ignore
+
+        # The MINIMUM across frames rather than the median: a seed that
+        # settled on the plate's minor-axis circle contributes near-circular
+        # fits across most frames (its patch does not contain the full
+        # ellipse), while frames where the fit captured the major axis as
+        # well give the real ratio. The minimum is the clearest look at the
+        # ellipse the camera saw.
+        axis_ratio = float(np.min(best.axis_ratios))
     return BarPath(
         points=_smooth(points),
         plate_radius=best.radius / width,
@@ -408,4 +444,5 @@ def follow_bar_path(
         sampled=len(frames),
         frame_width=width,
         frame_height=height,
+        plate_axis_ratio=axis_ratio,
     )
