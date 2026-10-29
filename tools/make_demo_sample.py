@@ -2,17 +2,23 @@
 """
 Score one clip once and cache the result as the public demo's sample.
 
+Takes a local file or a URL (Google Drive "anyone-with-link" is handled):
+
     python tools/make_demo_sample.py samples/snatch1.mp4 --lift snatch --out demo_sample/
-    python tools/make_demo_sample.py samples/cj.mp4 --lift clean --trim-start 2 --trim-end 9 --out demo_sample/
+    python tools/make_demo_sample.py "https://drive.google.com/uc?export=download&id=..." --lift clean --out demo_sample/
 
-Then set DEMO_SAMPLE_DIR=demo_sample on the server. The app serves the cached
-verdict and replay from GET /api/sample at no model cost, so a judge who
-arrives after the daily budget is spent still sees a full result.
+The resulting `sample.json` carries the verdict **and** the per-frame
+bar-path points, so the dyno re-renders the annotated replay from the
+downloaded clip at /api/sample time (no model call, no video commit). Only
+`sample.json` and the evidence stills are expected to be committed; the
+replay MP4 the pipeline rendered locally is not part of the shippable
+bundle (videos are not committed — spec §12).
 
-Pick a clip you are allowed to show in public: the replay is served to anyone
-who opens the demo. For the same reason the directory is the one video that
-may be committed (see .gitignore), so a git-push deploy carries it — keep it
-to one lift, well under 10 MB, and check the replay before you commit it.
+Deploy flow:
+    1. Build the bundle locally with this tool.
+    2. Commit `demo_sample/sample.json` and `demo_sample/*.jpg` (NOT the mp4).
+    3. `heroku config:set SAMPLE_CLIP_URL=<drive URL> DEMO_SAMPLE_DIR=demo_sample -a <app>`.
+    4. Deploy.
 """
 from __future__ import annotations
 
@@ -32,6 +38,7 @@ from server.schemas.judgment import LiftType  # noqa: E402
 from server.services.nebius_client import NebiusChatClient, judge_model  # noqa: E402
 from server.services.pipeline import DEFAULT_FRAMES, MAX_FRAMES, MIN_FRAMES  # noqa: E402
 from server.services.sample import SAMPLE_FILE, make_sample  # noqa: E402
+from server.utils.drive_download import download_drive_file  # noqa: E402
 
 
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -39,7 +46,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         description="Score a clip once and cache it as the demo's sample result.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("video", type=str, help="Path to the clip")
+    parser.add_argument("video", type=str, help="Path to the clip, or a Google Drive URL")
     parser.add_argument("--lift", choices=[lift.value for lift in LiftType], default=None, help="Which lift it holds")
     parser.add_argument("--auto", action="store_true", help="Let the pipeline find the lifts instead")
     parser.add_argument("--trim-start", type=float, default=None, help="Window start, seconds")
@@ -51,8 +58,20 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 async def run(args: argparse.Namespace) -> int:
-    if not Path(args.video).is_file():
-        print(f"ERROR: no such file: {args.video}", file=sys.stderr)
+    video_source = args.video
+    if video_source.startswith("http://") or video_source.startswith("https://"):
+        out_dir = Path(args.out)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        local_clip = out_dir / "_source_download.mp4"
+        print(f"Downloading {video_source} -> {local_clip}", file=sys.stderr)
+        try:
+            download_drive_file(video_source, local_clip)
+        except Exception as exc:
+            print(f"ERROR: could not download clip: {exc}", file=sys.stderr)
+            return 2
+        video_source = str(local_clip)
+    if not Path(video_source).is_file():
+        print(f"ERROR: no such file: {video_source}", file=sys.stderr)
         return 2
     if not args.lift and not args.auto:
         print("ERROR: pass --lift snatch|clean|jerk, or --auto.", file=sys.stderr)
@@ -74,7 +93,7 @@ async def run(args: argparse.Namespace) -> int:
     print(f"Judge: {judge_model()}", file=sys.stderr)
     try:
         outcome = await make_sample(
-            video_path=args.video,
+            video_path=video_source,
             out_dir=Path(args.out),
             client=client,
             prompts_dir=args.prompts_dir,
