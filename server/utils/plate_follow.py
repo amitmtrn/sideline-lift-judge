@@ -143,7 +143,14 @@ def _features(gray, x: float, y: float, radius: float):
 
 
 def _snap(gray, x: float, y: float, radius: float) -> Optional[Tuple[float, float]]:
-    """A circle of the plate's size close to the track, if there is one."""
+    """
+    A circle of the plate's size close to the track, if there is one, then
+    an ellipse fit on the rim pixels around it so the returned centre lands
+    on the sleeve rather than wherever Hough fitted its circle. The ellipse
+    refinement matters for oblique views where the plate projects to an
+    ellipse — a side-on circle degenerates to the Hough centre, which is
+    the same point.
+    """
     import cv2  # type: ignore
     import numpy as np  # type: ignore
 
@@ -161,7 +168,62 @@ def _snap(gray, x: float, y: float, radius: float) -> Optional[Tuple[float, floa
         return None
     best = min(found[0], key=lambda c: np.hypot(c[0] + left - x, c[1] + top - y))
     bx, by = float(best[0] + left), float(best[1] + top)
-    return (bx, by) if np.hypot(bx - x, by - y) <= SNAP_DISTANCE * radius else None
+    if np.hypot(bx - x, by - y) > SNAP_DISTANCE * radius:
+        return None
+    refined = _ellipse_centre(gray, bx, by, radius)
+    if refined is not None and np.hypot(refined[0] - bx, refined[1] - by) <= 0.3 * radius:
+        return refined
+    return (bx, by)
+
+
+def _ellipse_centre(gray, cx: float, cy: float, radius: float) -> Optional[Tuple[float, float]]:
+    """
+    Fit an ellipse to the plate's rim and return its centre. Keeps the point
+    on the sleeve for an oblique view, where Hough's best-fit circle sits
+    biased toward one side of the projected ellipse. Returns None when the
+    fit is unreliable (not enough edge pixels, bad aspect, far from `cx,cy`).
+    """
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    reach = int(radius * 1.5) + 2
+    height, width = gray.shape[:2]
+    top = max(0, int(round(cy)) - reach)
+    bottom = min(height, int(round(cy)) + reach)
+    left = max(0, int(round(cx)) - reach)
+    right = min(width, int(round(cx)) + reach)
+    patch = gray[top:bottom, left:right]
+    if patch.shape[0] < 10 or patch.shape[1] < 10:
+        return None
+
+    blurred = cv2.GaussianBlur(patch, (3, 3), 0.8)
+    edges = cv2.Canny(blurred, 60, 160)
+    # Mask to an annulus around the Hough circle so letters inside the plate
+    # or background edges outside do not pull the ellipse off.
+    local = (int(cx) - left, int(cy) - top)
+    mask = np.zeros_like(edges)
+    cv2.circle(mask, local, int(radius * 1.2), 255, -1)
+    cv2.circle(mask, local, int(radius * 0.75), 0, -1)
+    edges = cv2.bitwise_and(edges, mask)
+
+    ys, xs = np.where(edges > 0)
+    if len(xs) < 10:
+        return None
+    points = np.column_stack((xs.astype(np.float32), ys.astype(np.float32)))
+    try:
+        (ex, ey), (axis_a, axis_b), _angle = cv2.fitEllipse(points)
+    except cv2.error:
+        return None
+    major = max(axis_a, axis_b)
+    minor = min(axis_a, axis_b)
+    expected_dia = 2.0 * radius
+    # Guard against pathological fits: a very elongated ellipse is a letter
+    # or a chain of unrelated edges, not a plate.
+    if major <= 0 or minor / major < 0.4:
+        return None
+    if not (expected_dia * 0.7 <= major <= expected_dia * 1.4):
+        return None
+    return float(ex + left), float(ey + top)
 
 
 def _follow(frames, order: Sequence[int], seeds: List[_Seed]) -> None:
