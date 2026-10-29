@@ -198,6 +198,41 @@ class ScoredLift:
     still_paths: Dict[str, Any] = field(default_factory=dict)
 
 
+def _partial_judgment(
+    exc: BaseException,
+    measurement: BarPathMeasurement,
+    lift: LiftType,
+) -> LiftJudgment:
+    """
+    What to show when the judge did not answer but the tracker did. Band is
+    "unknown" (so LiftJudgment allows no cues) and `max_horizontal_drift` is
+    whatever the tracker measured in words. The note names the failure in
+    plain English, so a coach can decide whether to retry.
+    """
+    drift_cm = measurement.max_drift_cm
+    drift_line = (
+        f"The bar was measured {int(round(drift_cm))} cm off its starting line at the furthest point."
+        if drift_cm is not None
+        else "The bar was tracked but the exact drift is unknown."
+    )
+    note = (
+        "The judge did not answer this clip (" + user_message(exc).rstrip(".") + "). "
+        "The tracker's measurements and the replay below are still shown — try again in a minute "
+        "for a 1-10 score."
+    )
+    return LiftJudgment.model_construct(
+        lift=lift,
+        score=None,
+        band="unknown",
+        confidence=None,
+        max_horizontal_drift=drift_line,
+        cues=[],
+        notes=note,
+        warnings=["The judge was unavailable for this clip. Try again in a minute."],
+        judged_by="unavailable",
+    )
+
+
 def models_used(judgment: Optional[LiftJudgment] = None) -> Dict[str, Any]:
     """
     The models behind a verdict, by id and by the name the page shows. The
@@ -623,10 +658,21 @@ async def _score_one_lift(
         scored.out_of_budget = True
         return scored
     except Exception as exc:
+        # If the tracker already succeeded, lose the judge but not the whole
+        # run: a card without a 1-10 score still shows the drift arrow,
+        # the trace, and a replay the coach can review. The judge's absence
+        # is spelled out in the warnings so the card does not pretend to
+        # know a number it does not.
         logger.exception("Scoring failed for %s", label)
-        scored.error = user_message(exc)
-        scored.error_detail = detail_of(exc)
-        return scored
+        if measurement is not None and measurement.tracked:
+            scored.judgment = _partial_judgment(exc, measurement, lift)
+            scored.error_detail = detail_of(exc)
+            scored.models = {"judge": "unavailable"}
+            judgment = scored.judgment
+        else:
+            scored.error = user_message(exc)
+            scored.error_detail = detail_of(exc)
+            return scored
 
     quality = assess_clip_quality(
         observations=observations,

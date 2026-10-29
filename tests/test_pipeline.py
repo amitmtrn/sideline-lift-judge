@@ -191,6 +191,32 @@ def test_a_failing_judge_marks_only_that_lift(lift_video):
     assert "Nebius API error 503" in failed.error_detail
 
 
+def test_partial_judgment_when_judge_fails_but_tracker_tracked():
+    """
+    Judge went down mid-run: the lift still has drift, a path and a replay,
+    so the card shows a verdict row with "unknown" band and a plain-English
+    note instead of nothing. Nothing but the judge's answer is lost.
+    """
+    from server.schemas.judgment import LiftJudgment
+    from server.services.measurement import BarPathMeasurement
+    from server.services.pipeline import _partial_judgment
+
+    measurement = BarPathMeasurement(
+        tracked=True, coverage=0.98, points=120,
+        max_drift_diameters=0.3, max_drift_cm=14.0,
+        drift_at_rise_fraction=0.6, sideways_range_diameters=0.4, rise_diameters=3.8,
+    )
+    judgment = _partial_judgment(RuntimeError("The model service took too long to answer"),
+                                 measurement, LiftType.clean)
+    assert isinstance(judgment, LiftJudgment)
+    assert judgment.score is None
+    assert judgment.band == "unknown"
+    assert judgment.cues == []
+    assert "judge did not answer" in (judgment.notes or "")
+    assert "14 cm" in (judgment.max_horizontal_drift or "")
+    assert judgment.warnings and "unavailable" in judgment.warnings[0].lower()
+
+
 def test_the_judge_is_given_the_tracker_measurement(lift_video):
     from server.services.pipeline import ScoreRequest
 
