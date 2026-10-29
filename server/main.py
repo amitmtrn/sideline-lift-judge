@@ -1,7 +1,6 @@
 import asyncio
 import logging
 import os
-import shutil
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -66,6 +65,7 @@ from server.utils.uploads import (
     max_upload_bytes,
     save_upload_to_temp,
 )
+from server.utils.ffmpeg_binary import ffmpeg_exe, ffprobe_exe, log_binaries
 from server.utils.video_meta import probe_video
 
 # Load .env if present for local dev
@@ -143,12 +143,17 @@ def _log_configuration() -> None:
             "DEMO_IP_HOURLY_LIMIT is set but TRUSTED_PROXIES is not: behind a reverse proxy every "
             "visitor shares the proxy's address and its hourly allowance."
         )
-    missing = [tool for tool in ("ffmpeg", "ffprobe") if not shutil.which(tool)]
-    if missing:
+    log_binaries()
+    if ffmpeg_exe() is None:
         logger.warning(
-            "%s not found on PATH: no annotated replays, and portrait clips may be judged sideways. "
-            "The Docker image has them; a Heroku buildpack deploy needs the apt buildpack (Aptfile).",
-            " and ".join(missing),
+            "No ffmpeg binary found: annotated replays will be skipped. "
+            "Install `imageio-ffmpeg` (requirements.txt) or the apt buildpack with Aptfile=ffmpeg."
+        )
+    if ffprobe_exe() is None:
+        logger.info(
+            "ffprobe not on PATH: using OpenCV for video metadata. "
+            "Portrait phone clips that declare rotation only in container metadata may be judged "
+            "sideways; add the apt buildpack with Aptfile=ffmpeg for full rotation handling."
         )
 
 

@@ -219,8 +219,51 @@ def test_render_falls_back_when_the_font_is_missing(lift_video, tmp_path, monkey
 
 
 def test_render_without_ffmpeg_returns_none(lift_video, tmp_path, monkeypatch):
-    monkeypatch.setattr("server.services.replay.shutil.which", lambda name: None)
+    monkeypatch.setattr("server.services.replay.ffmpeg_exe", lambda: None)
     assert render_annotated_replay(lift_video, judgment(), str(tmp_path / "none.mp4")) is None
+
+
+def test_render_uses_imageio_ffmpeg_when_path_has_none(tmp_path, monkeypatch):
+    """
+    The pip fallback carries the deploy on Heroku's Python buildpack by itself:
+    without a system ffmpeg, the imageio-ffmpeg wheel's bundled binary should
+    be picked up and produce a playable MP4. The clip is portrait so the test
+    also pins the "respect rotation metadata" guarantee: a portrait source goes
+    in, a portrait replay comes out.
+    """
+    from tests.conftest import write_lift_video
+    from server.utils import ffmpeg_binary
+
+    portrait = write_lift_video(str(tmp_path / "portrait.mp4"), width=96, height=160, duration=2.0)
+    # Hide the system ffmpeg from both the binary resolver and anywhere else
+    # the module might still call shutil.which. The imageio wheel's bundled
+    # binary stays reachable because it does not go through PATH.
+    ffmpeg_binary.reset_cache_for_tests()
+    monkeypatch.setattr("server.utils.ffmpeg_binary.shutil.which", lambda name: None)
+    assert ffmpeg_binary.ffmpeg_exe() is not None, "imageio-ffmpeg must provide a binary"
+
+    out = tmp_path / "replay.mp4"
+    written = render_annotated_replay(portrait, judgment(), str(out), start_sec=0.0, end_sec=1.5)
+    assert written is not None, "imageio-ffmpeg should have produced a replay"
+    assert out.exists() and out.stat().st_size > 1024
+
+    # The first bytes of an iOS-safe MP4 are an `ftyp` box with a brand that
+    # the Safari player recognises. mp42/isom are the usual ones ffmpeg writes.
+    head = out.read_bytes()[:32]
+    assert b"ftyp" in head, head
+
+    # Replay should respect portrait orientation: the output is taller than wide.
+    # Decode the first frame with OpenCV; if ffprobe is on PATH, double-check it.
+    import cv2  # type: ignore
+
+    cap = cv2.VideoCapture(str(out))
+    try:
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    finally:
+        cap.release()
+    assert height > width, (width, height)
+    ffmpeg_binary.reset_cache_for_tests()
 
 
 def test_find_font_returns_an_existing_file_or_none():

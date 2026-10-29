@@ -10,12 +10,12 @@ no audio, and +faststart so playback can begin before the file finishes loading.
 from __future__ import annotations
 
 import logging
-import shutil
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
 
 from server.utils.bar_track import BarPath
+from server.utils.ffmpeg_binary import ffmpeg_exe
 from server.utils.video_meta import probe_video
 
 logger = logging.getLogger(__name__)
@@ -259,7 +259,7 @@ def write_trace_overlay(path: "BarPath", width: int, height: int, out_path: str)
 
 def _run(args: List[str], timeout: float) -> bool:
     try:
-        result = subprocess.run(
+        subprocess.run(
             args,
             check=True,
             stdout=subprocess.DEVNULL,
@@ -267,10 +267,19 @@ def _run(args: List[str], timeout: float) -> bool:
             timeout=timeout,
         )
     except subprocess.CalledProcessError as exc:
-        if exc.stderr:
-            logger.warning("ffmpeg error: %s", exc.stderr.decode(errors="replace").strip()[:400])
+        stderr = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
+        logger.warning(
+            "ffmpeg %s failed (exit %s): %s",
+            Path(args[0]).name if args else "ffmpeg",
+            exc.returncode,
+            stderr[:800] or "no stderr",
+        )
         return False
-    except (subprocess.TimeoutExpired, OSError):
+    except subprocess.TimeoutExpired:
+        logger.warning("ffmpeg %s timed out after %.0fs", Path(args[0]).name if args else "ffmpeg", timeout)
+        return False
+    except OSError as exc:
+        logger.warning("ffmpeg %s could not be spawned: %s", args[0] if args else "ffmpeg", exc)
         return False
     return True
 
@@ -331,20 +340,22 @@ def render_cue_still(
     frame = _read_frame_at(video_path, key_t)
     if frame is None:
         # ffmpeg fallback (handles codecs OpenCV can't decode without extra libs)
-        tmp_frame = str(destination.with_suffix(".raw_frame.jpg"))
-        extract_args = [
-            "ffmpeg", "-y", "-v", "error",
-            "-ss", f"{max(0.0, key_t):.3f}",
-            "-i", str(video_path),
-            "-vframes", "1",
-            tmp_frame,
-        ]
-        if shutil.which("ffmpeg") and _run(extract_args, timeout):
-            frame = cv2.imread(tmp_frame)
-            try:
-                Path(tmp_frame).unlink(missing_ok=True)
-            except OSError:
-                pass
+        ffmpeg = ffmpeg_exe()
+        if ffmpeg:
+            tmp_frame = str(destination.with_suffix(".raw_frame.jpg"))
+            extract_args = [
+                ffmpeg, "-y", "-v", "error",
+                "-ss", f"{max(0.0, key_t):.3f}",
+                "-i", str(video_path),
+                "-vframes", "1",
+                tmp_frame,
+            ]
+            if _run(extract_args, timeout):
+                frame = cv2.imread(tmp_frame)
+                try:
+                    Path(tmp_frame).unlink(missing_ok=True)
+                except OSError:
+                    pass
     if frame is None:
         logger.warning("render_cue_still: could not extract frame at t=%.3f from %s", key_t, video_path)
         return None
@@ -613,7 +624,9 @@ def render_annotated_replay(
     a coach can play is worth more than no replay at all. Returns the written
     path, or None when ffmpeg is unavailable or every attempt failed.
     """
-    if not shutil.which("ffmpeg"):
+    ffmpeg = ffmpeg_exe()
+    if not ffmpeg:
+        logger.warning("render_annotated_replay: no ffmpeg binary available; skipping replay")
         return None
 
     destination = Path(out_path)
@@ -689,7 +702,7 @@ def render_annotated_replay(
     try:
         for attempt, (label, filter_args) in enumerate(attempts):
             args = [
-                "ffmpeg",
+                ffmpeg,
                 "-y",
                 "-v",
                 "error",
@@ -708,6 +721,11 @@ def render_annotated_replay(
                         "Replay fell back to %s; the fuller overlay could not be drawn.", label
                     )
                 return str(destination)
+        logger.warning(
+            "render_annotated_replay: all %d encode attempts failed for %s",
+            len(attempts),
+            video_path,
+        )
         return None
     finally:
         if trace_file:

@@ -9,10 +9,13 @@ tzdata==2026.5                    # zone data for DEMO_DAY_TIMEZONE where the OS
 requests==2.32.3                  # the Token Factory client is hand-rolled on this
 opencv-python-headless==4.10.0.84  # frame sampling and the motion scan
 numpy==2.5.4                      # imported directly, not just via OpenCV
+imageio-ffmpeg==0.6.0              # bundled ffmpeg binary used when none is on PATH (Heroku without the apt buildpack)
 
 # Tests
 pytest==8.3.3
 httpx==0.28.1                     # required by starlette's TestClient
 
-# Also required, but not installable with pip: ffmpeg (ffmpeg + ffprobe on PATH).
-# Without it there is no trimming, no rotation handling and no annotated replay.
+# A system ffmpeg (ffmpeg + ffprobe on PATH) is still preferred — it brings
+# ffprobe, which the pip fallback does not. Without ffprobe, metadata reads
+# via OpenCV instead and rotation declared only in container metadata may be
+# missed. imageio-ffmpeg above keeps replays working either way.

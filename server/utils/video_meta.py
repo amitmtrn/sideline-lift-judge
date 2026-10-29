@@ -6,6 +6,8 @@ import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
+from server.utils.ffmpeg_binary import ffprobe_exe
+
 
 @dataclass
 class VideoInfo:
@@ -51,7 +53,8 @@ def probe_video(video_path: str) -> VideoInfo:
     at 0 is the right thing. Returns an unpopulated VideoInfo (probed=False)
     only when the file itself is unreadable.
     """
-    if shutil.which("ffprobe"):
+    ffprobe = ffprobe_exe()
+    if ffprobe:
         try:
             # -show_streams rather than a -show_entries selector: asking for
             # `side_data_list` by name returns the section with its fields
@@ -59,7 +62,7 @@ def probe_video(video_path: str) -> VideoInfo:
             # missing.
             out = subprocess.check_output(
                 [
-                    "ffprobe",
+                    ffprobe,
                     "-v",
                     "error",
                     "-show_streams",

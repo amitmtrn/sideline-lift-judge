@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
 from pathlib import Path
 from typing import List, Optional
 
+from server.utils.ffmpeg_binary import ffmpeg_exe
+
 
 def has_ffmpeg() -> bool:
-    return shutil.which("ffmpeg") is not None
+    return ffmpeg_exe() is not None
 
 
 def cut_segment(
@@ -26,7 +27,8 @@ def cut_segment(
     short window between keyframes sometimes comes out empty. Returns the written
     path, or None when ffmpeg is missing or both attempts fail.
     """
-    if not has_ffmpeg():
+    ffmpeg = ffmpeg_exe()
+    if not ffmpeg:
         return None
     start = max(0.0, float(start_sec))
     duration = max(0.05, float(end_sec) - start)
@@ -39,7 +41,7 @@ def cut_segment(
     for codec_args in ([encode_args] if reencode else [copy_args, encode_args]):
         attempts.append(
             [
-                "ffmpeg",
+                ffmpeg,
                 "-y",
                 "-v",
                 "error",
