@@ -163,10 +163,16 @@ def test_render_never_builds_a_drawtext_command(lift_video, tmp_path, monkeypatc
 
     def _run(args, timeout):  # noqa: ARG001
         recorded.append(list(args))
-        # Pretend every attempt fails, so the loop walks all fallbacks.
         return False
 
+    original_popen = subprocess.Popen
+
+    def tracking_popen(args, *rest, **kw):
+        recorded.append(list(args))
+        return original_popen(args, *rest, **kw)
+
     monkeypatch.setattr("server.services.replay._run", _run)
+    monkeypatch.setattr("server.services.replay.subprocess.Popen", tracking_popen)
     render_annotated_replay(lift_video, judgment(), str(tmp_path / "nope.mp4"))
     assert recorded, "render should have attempted at least one encode"
     for args in recorded:

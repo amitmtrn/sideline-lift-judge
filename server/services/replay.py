@@ -262,6 +262,104 @@ def build_full_overlay(
     return layer
 
 
+def build_banner_overlay(judgment: "LiftJudgment", width: int, height: int):
+    """
+    Just the header + footer banner, as a BGRA alpha layer. Trace and dot are
+    drawn per-frame in the progressive renderer, so the banner is the only
+    static overlay — one pre-computed layer blended onto every frame.
+    """
+    import numpy as np  # type: ignore
+
+    if width <= 0 or height <= 0:
+        return None
+    layer = np.zeros((height, width, 4), dtype=np.uint8)
+    _draw_banners(layer, judgment, width, height)
+    return layer
+
+
+def _blend_bgra(frame, overlay) -> None:
+    """Blend a BGRA overlay onto a BGR frame in place."""
+    import numpy as np  # type: ignore
+
+    if overlay is None:
+        return
+    alpha = overlay[:, :, 3:4].astype(np.float32) / 255.0
+    frame_f = frame.astype(np.float32)
+    overlay_rgb = overlay[:, :, :3].astype(np.float32)
+    np.copyto(frame, np.clip(frame_f * (1 - alpha) + overlay_rgb * alpha, 0, 255).astype(np.uint8))
+
+
+def _draw_progressive_trace(
+    frame,
+    bar_path: "BarPath",
+    current_t: float,
+    width: int,
+    height: int,
+) -> None:
+    """
+    Draw the bar path up to `current_t` on `frame` in place, plus a moving
+    dot at the latest tracked point. The reference line and the furthest-
+    point marker are always drawn (constant for the clip), so a coach pausing
+    on any frame still sees them.
+    """
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    if not bar_path.tracked or not bar_path.points:
+        return
+
+    points_so_far = [(int(p.x * width), int(p.y * height)) for p in bar_path.points if p.t <= current_t]
+    thickness = max(2, round(min(width, height) / 220))
+
+    # Reference line (dashed) — always shown, so the start-point reads from
+    # the first frame too.
+    reference_x = int(bar_path.reference_x * width)
+    for y in range(0, height, thickness * 8):
+        cv2.line(
+            frame,
+            (reference_x, y),
+            (reference_x, min(height, y + thickness * 4)),
+            REFERENCE_CHALK[:3],
+            max(1, thickness - 1),
+            cv2.LINE_AA,
+        )
+
+    # Max-drift marker — constant across the clip (the whole path's answer),
+    # so the coach can anticipate it. Drawn before the live trace so the
+    # trace covers it as the lift reaches that moment.
+    _drift, worst = bar_path.max_drift()
+    if worst is not None:
+        wx, wy = int(worst.x * width), int(worst.y * height)
+        for x in range(min(reference_x, wx), max(reference_x, wx), thickness * 6):
+            cv2.line(
+                frame,
+                (x, wy),
+                (min(x + thickness * 3, max(reference_x, wx)), wy),
+                DRIFT_ORANGE[:3],
+                thickness,
+                cv2.LINE_AA,
+            )
+        cv2.circle(frame, (wx, wy), thickness * 4, DRIFT_ORANGE[:3], thickness, cv2.LINE_AA)
+
+    # The trace up to the current moment — shadowed for contrast over a
+    # light gym floor.
+    if len(points_so_far) >= 2:
+        polyline = np.array(points_so_far, dtype=np.int32)
+        cv2.polylines(frame, [polyline], False, TRACE_SHADOW[:3], thickness + 3, cv2.LINE_AA)
+        cv2.polylines(frame, [polyline], False, TRACE_GREEN[:3], thickness, cv2.LINE_AA)
+
+    # Moving dot at the current position.
+    if points_so_far:
+        head = points_so_far[-1]
+        cv2.circle(frame, head, thickness * 3, (255, 255, 255), -1, cv2.LINE_AA)
+        cv2.circle(frame, head, thickness * 3, TRACE_GREEN[:3], 2, cv2.LINE_AA)
+
+    # Start marker — faint circle at the first tracked point so the coach
+    # sees "where it started" the whole way through.
+    first = (int(bar_path.points[0].x * width), int(bar_path.points[0].y * height))
+    cv2.circle(frame, first, thickness * 3, REFERENCE_CHALK[:3], -1, cv2.LINE_AA)
+
+
 def write_full_overlay(
     judgment: "LiftJudgment",
     bar_path: Optional["BarPath"],
@@ -690,6 +788,110 @@ def render_cue_strip(
     return None
 
 
+def _render_progressive(
+    *,
+    ffmpeg: str,
+    video_path: str,
+    judgment: "LiftJudgment",
+    destination: Path,
+    start_sec: Optional[float],
+    end_sec: Optional[float],
+    bar_path: Optional["BarPath"],
+    width: int,
+    height: int,
+    timeout: float,
+) -> Optional[Tuple[Optional[str], bool]]:
+    """
+    Decode each frame with OpenCV, draw the trace progressively up to the
+    frame's own timestamp (plus the banner, reference line and max-drift
+    marker that stay constant), then pipe raw BGR24 to ffmpeg. On any
+    failure, returns None so the caller falls back to the static-overlay
+    path. On success, returns `(path, annotated)` just like
+    `render_annotated_replay` does.
+    """
+    import cv2  # type: ignore
+
+    from server.utils.frames import read_frames
+
+    s_start = max(0.0, float(start_sec or 0.0))
+    probe_duration = float(end_sec) if end_sec is not None else 0.0
+    if probe_duration <= s_start:
+        info = probe_video(video_path)
+        probe_duration = s_start + max(0.1, info.duration_sec or 10.0)
+    s_end = probe_duration
+
+    banner_overlay = build_banner_overlay(judgment, width, height) if judgment is not None else None
+
+    args = [
+        ffmpeg, "-y", "-v", "error",
+        "-f", "rawvideo",
+        "-pix_fmt", "bgr24",
+        "-s", f"{width}x{height}",
+        "-framerate", str(OUTPUT_FPS),
+        "-i", "pipe:0",
+        "-c:v", "libx264",
+        "-profile:v", "high",
+        "-pix_fmt", "yuv420p",
+        "-preset", "veryfast",
+        "-crf", "25",
+        "-movflags", "+faststart",
+        "-an",
+        str(destination),
+    ]
+    try:
+        proc = subprocess.Popen(
+            args, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
+        )
+    except OSError as exc:
+        logger.warning("Progressive encoder could not start: %s", exc)
+        return None
+
+    frames_written = 0
+    try:
+        for t, raw in read_frames(video_path, s_start, s_end, max_fps=OUTPUT_FPS):
+            if raw is None:
+                continue
+            if raw.shape[0] != height or raw.shape[1] != width:
+                frame = cv2.resize(raw, (width, height))
+            else:
+                frame = raw.copy()
+            if bar_path is not None:
+                _draw_progressive_trace(frame, bar_path, t, width, height)
+            if banner_overlay is not None:
+                _blend_bgra(frame, banner_overlay)
+            try:
+                proc.stdin.write(frame.tobytes())
+            except BrokenPipeError:
+                break
+            frames_written += 1
+    except Exception as exc:
+        logger.warning("Progressive render raised: %s", exc)
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        return None
+    try:
+        proc.stdin.close()
+    except Exception:
+        pass
+    try:
+        return_code = proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        logger.warning("Progressive encoder timed out after %.0fs", timeout)
+        proc.kill()
+        return None
+    if return_code != 0:
+        stderr = (proc.stderr.read() if proc.stderr else b"").decode(errors="replace").strip()
+        logger.warning("Progressive encoder exited %s: %s", return_code, stderr[:400] or "no stderr")
+        return None
+    if not destination.exists() or destination.stat().st_size <= 1024 or frames_written < 2:
+        logger.warning("Progressive encoder produced %d frames; falling back", frames_written)
+        return None
+    annotated = banner_overlay is not None or (bar_path is not None and bar_path.tracked)
+    return str(destination), annotated
+
+
 def render_annotated_replay(
     video_path: str,
     judgment: "LiftJudgment",
@@ -726,6 +928,25 @@ def render_annotated_replay(
         return None, False
     width, height = size
     scale = f"scale={width}:{height}"
+
+    # First choice: pipe each decoded frame to ffmpeg with the trace drawn
+    # progressively up to the current moment and a moving dot. The static
+    # overlay-filter path below stays as a fallback if the progressive
+    # encoder cannot be started (very old ffmpeg, no stdin pipe) or crashes.
+    progressive_rc = _render_progressive(
+        ffmpeg=ffmpeg,
+        video_path=video_path,
+        judgment=judgment,
+        destination=destination,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        bar_path=bar_path,
+        width=width,
+        height=height,
+        timeout=timeout,
+    )
+    if progressive_rc is not None:
+        return progressive_rc
 
     trim_args: List[str] = []
     if start_sec is not None:
