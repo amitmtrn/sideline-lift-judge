@@ -5,6 +5,8 @@ score**, a band, the **maximum horizontal bar drift**, a **confidence** value, n
 coaching cues** — plus an annotated replay you can download or share. Mobile-first, so a coach
 can use it from the side of the platform.
 
+▶ **Demo video:** <https://www.youtube.com/watch?v=3E22yknw8Nk>
+
 Built for the Nebius × NVIDIA Global AI Hackathon. The judge is an **NVIDIA Nemotron 3** model —
 **Super** in the public demo, Ultra by default in a checkout — and both stages run on
 **Nebius Token Factory**.
@@ -18,7 +20,7 @@ the dyno downloads once (see
 [Running the public demo](#running-the-public-demo-without-a-surprise-bill) for
 the `SAMPLE_CLIP_URL` env var). The demo has a daily limit and its counters reset
 when the dyno restarts (see [Limitations](#limitations)).\
-**Video:** TODO — paste the submission YouTube URL here (under three minutes).
+▶ **Demo video:** <https://www.youtube.com/watch?v=3E22yknw8Nk>
 
 - Mobile-first web app, installable as a PWA — film or upload, trim, score, share
 - Two kinds of evidence, one judge: a local plate tracker **measures** the bar path and a vision
