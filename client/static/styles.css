@@ -1043,10 +1043,18 @@ details pre {
   color: var(--chalk-faint);
 }
 
+.trace-key-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  /* The pair is the smallest wrap unit, so "WHERE IT STARTED" never splits
+     across two lines on a narrow phone. */
+  white-space: nowrap;
+}
+
 .trace-key .swatch {
   width: 16px;
   height: 3px;
-  margin-right: -8px;
   border-radius: 2px;
   background: var(--plate-green);
 }

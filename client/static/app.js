@@ -36,6 +36,14 @@
   // Refusals after which trying the same clip again cannot help today.
   const NO_RETRY_REASONS = new Set(["daily_limit", "disabled", "access_code", "too_long"]);
 
+  // Pre-upload re-encode kicks in above this size, or whenever the user
+  // trimmed the clip. 6 MB on a gym 4G link takes ~30 s to upload, which is
+  // what Heroku's router timeout cuts off; smaller clips are left alone.
+  const PRE_UPLOAD_SHRINK_MIN_BYTES = 4 * 1024 * 1024;
+  const PRE_UPLOAD_MAX_LONG_SIDE = 720;
+  const PRE_UPLOAD_FPS = 30;
+  const PRE_UPLOAD_BITRATE = 2_500_000;
+
   const state = {
     lift: "snatch",
     file: null,
@@ -461,9 +469,139 @@
     return `${minutes}:${(value - minutes * 60).toFixed(1).padStart(4, "0")}`;
   }
 
+  // ---------- pre-upload re-encode ----------
+  // Trim + downscale in the browser before upload so a 30 s Heroku router
+  // timeout does not cut a gym-4G upload off. Falls back silently on any
+  // failure — iOS Safari's MediaRecorder is picky about MIME, and some
+  // Android stock browsers do not support canvas.captureStream.
+  function pickRecorderMime() {
+    const candidates = [
+      "video/mp4;codecs=avc1",
+      "video/mp4",
+      "video/webm;codecs=vp9",
+      "video/webm;codecs=vp8",
+      "video/webm",
+    ];
+    if (typeof MediaRecorder === "undefined" || !MediaRecorder.isTypeSupported) return null;
+    for (const mime of candidates) {
+      try {
+        if (MediaRecorder.isTypeSupported(mime)) return mime;
+      } catch (_err) {
+        // Keep walking the list.
+      }
+    }
+    return null;
+  }
+
+  function waitForEvent(element, name, timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        element.removeEventListener(name, onDone);
+        reject(new Error(`${name} timed out`));
+      }, timeoutMs);
+      const onDone = (event) => {
+        clearTimeout(timer);
+        element.removeEventListener(name, onDone);
+        resolve(event);
+      };
+      element.addEventListener(name, onDone, { once: true });
+    });
+  }
+
+  async function preUploadReencode(file, startSec, endSec) {
+    const mime = pickRecorderMime();
+    if (!mime) throw new Error("No supported MediaRecorder MIME on this browser");
+
+    const videoEl = document.createElement("video");
+    videoEl.muted = true;
+    videoEl.playsInline = true;
+    videoEl.preload = "auto";
+    const url = URL.createObjectURL(file);
+    videoEl.src = url;
+    try {
+      await waitForEvent(videoEl, "loadedmetadata");
+      const vw = videoEl.videoWidth;
+      const vh = videoEl.videoHeight;
+      if (!vw || !vh) throw new Error("video dimensions missing");
+      if (typeof videoEl.captureStream !== "function") {
+        throw new Error("captureStream not supported");
+      }
+      const longest = Math.max(vw, vh);
+      const scale = Math.min(1, PRE_UPLOAD_MAX_LONG_SIDE / longest);
+      const canvasW = Math.max(2, Math.floor((vw * scale) / 2) * 2);
+      const canvasH = Math.max(2, Math.floor((vh * scale) / 2) * 2);
+      const canvas = document.createElement("canvas");
+      canvas.width = canvasW;
+      canvas.height = canvasH;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) throw new Error("2d canvas not supported");
+
+      const start = Math.max(0, Number(startSec) || 0);
+      const end = Math.min(videoEl.duration || Number(endSec) || 0, Number(endSec) || videoEl.duration || 0);
+      if (!(end > start)) throw new Error("empty trim window");
+
+      videoEl.currentTime = start;
+      await waitForEvent(videoEl, "seeked");
+
+      if (typeof canvas.captureStream !== "function") {
+        throw new Error("canvas.captureStream not supported");
+      }
+      const stream = canvas.captureStream(PRE_UPLOAD_FPS);
+      const recorder = new MediaRecorder(stream, {
+        mimeType: mime,
+        videoBitsPerSecond: PRE_UPLOAD_BITRATE,
+      });
+      const chunks = [];
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data && event.data.size > 0) chunks.push(event.data);
+      });
+      const stopped = new Promise((resolve) => recorder.addEventListener("stop", resolve, { once: true }));
+
+      recorder.start();
+      await videoEl.play().catch(() => {});
+
+      const windowDuration = end - start;
+      const t0 = performance.now();
+      let rafToken = null;
+      const paintAndWatch = () => {
+        try {
+          ctx.drawImage(videoEl, 0, 0, canvasW, canvasH);
+        } catch (_err) {
+          // Draw errors (SecurityError on tainted canvas) end the loop.
+          recorder.state === "recording" && recorder.stop();
+          return;
+        }
+        const elapsed = videoEl.currentTime - start;
+        const wallElapsed = (performance.now() - t0) / 1000;
+        const done = videoEl.ended ||
+          videoEl.currentTime >= end - 0.01 ||
+          elapsed >= windowDuration ||
+          // Safety: never record more than the window plus a second of wall time
+          wallElapsed > windowDuration + 2.0;
+        if (done) {
+          if (recorder.state === "recording") recorder.stop();
+          try { videoEl.pause(); } catch (_err) { /* ignore */ }
+        } else {
+          rafToken = requestAnimationFrame(paintAndWatch);
+        }
+      };
+      rafToken = requestAnimationFrame(paintAndWatch);
+      await stopped;
+      if (rafToken) cancelAnimationFrame(rafToken);
+
+      if (!chunks.length) throw new Error("no recorded data");
+      const outType = mime.split(";")[0];
+      const extension = outType.includes("mp4") ? "mp4" : "webm";
+      const name = `clip-trimmed.${extension}`;
+      return new File(chunks, name, { type: outType });
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
   /* ---------- Scoring ---------- */
 
-  function submit() {
+  async function submit() {
     cancelAutoRetry();
     if (!state.file) {
       show("guide");
@@ -484,19 +622,46 @@
     }
     hide($("#progress-error"));
     $("#progress-actions").hidden = true;
-    setStage("uploading", "Uploading the clip…", 0.02);
     show("progress");
 
+    // Shrink the upload before it goes over gym 4G: trim to the window and
+    // scale the long side to ~720 px. The browser renderer falls back to
+    // the original file on any error — iOS Safari's MediaRecorder has
+    // enough edge cases to make the fallback a safe default, not a bug.
+    let fileToUpload = state.file;
+    let serverSideTrim = state.trimAvailable && state.duration && (state.start > 0.05 || state.end < state.duration - 0.05);
+    const oversize = state.file.size > PRE_UPLOAD_SHRINK_MIN_BYTES;
+    if ((serverSideTrim || oversize) && typeof MediaRecorder !== "undefined") {
+      setStage("uploading", "Preparing the clip for upload…", 0.01);
+      try {
+        const trimStart = state.trimAvailable ? state.start : 0;
+        const trimEnd = state.trimAvailable && state.duration ? state.end : (state.duration || 0);
+        const encoded = await preUploadReencode(state.file, trimStart, trimEnd);
+        if (encoded && encoded.size > 1024) {
+          fileToUpload = encoded;
+          // The window is already baked in; do not ask the server to trim again.
+          serverSideTrim = false;
+        }
+      } catch (error) {
+        // Any failure (unsupported MIME, seek stall, decode error): just
+        // upload the original. The server-side cap and progress bar still
+        // apply, so the user is not worse off than before.
+        console.warn("Pre-upload re-encode failed, sending original file", error);
+      }
+    }
+    setStage("uploading", "Uploading the clip…", 0.02);
+
     const body = new FormData();
-    body.append("video", state.file, state.file.name || "clip.mp4");
+    body.append("video", fileToUpload, fileToUpload.name || "clip.mp4");
     if (state.lift === "auto") {
       body.append("mode", "auto");
     } else {
       body.append("lift", state.lift);
       body.append("mode", "single");
     }
-    // Only send a window if trimming worked and it is narrower than the clip.
-    if (state.trimAvailable && state.duration && (state.start > 0.05 || state.end < state.duration - 0.05)) {
+    // Only send a window if trimming worked and the browser did not already
+    // bake the window into the upload itself.
+    if (serverSideTrim) {
       body.append("trim_start", state.start.toFixed(2));
       body.append("trim_end", state.end.toFixed(2));
     }
@@ -977,12 +1142,18 @@
     const block = element("div", "replay");
     if (item.bar_path_tracked) {
       const key = element("p", "trace-key");
-      key.appendChild(element("span", "swatch path", ""));
-      key.appendChild(element("span", null, "bar path"));
-      key.appendChild(element("span", "swatch start", ""));
-      key.appendChild(element("span", null, "where it started"));
-      key.appendChild(element("span", "swatch drift", ""));
-      key.appendChild(element("span", null, "furthest from it"));
+      // Each swatch+label is a pair so flex-wrap breaks between pairs, not
+      // between a swatch and its own words ("WHERE IT STARTED" splitting
+      // across two lines reads as nonsense at 390 px).
+      const addPair = (swatchClass, label) => {
+        const item = element("span", "trace-key-item");
+        item.appendChild(element("span", `swatch ${swatchClass}`, ""));
+        item.appendChild(element("span", null, label));
+        key.appendChild(item);
+      };
+      addPair("path", "bar path");
+      addPair("start", "where it started");
+      addPair("drift", "furthest from it");
       block.appendChild(key);
     }
     const video = document.createElement("video");
