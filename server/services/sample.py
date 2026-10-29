@@ -4,9 +4,15 @@ if it had just finished. It costs nothing per view, needs no access code and
 is not counted against any limit, so a judge who arrives after the daily
 budget is spent still sees the whole result screen, replay included.
 
-The sample lives in DEMO_SAMPLE_DIR as `sample.json` plus the replay MP4s the
-run rendered. `tools/make_demo_sample.py` builds it. Videos are never
-committed (spec §12), so the directory is a deployment artifact, not source.
+The sample can come from either source, in this order:
+  1. SAMPLE_RESULT_URL: a hosted sample.json fetched once per process and
+     cached. SAMPLE_CLIP_URL, when set, is substituted into every lift's
+     annotated_video_url so the replay plays from the same hosting.
+  2. DEMO_SAMPLE_DIR: a local directory with `sample.json` plus optional
+     replay MP4s next to it. `tools/make_demo_sample.py` builds that.
+
+The remote path exists so a deploy with the model credential but no committed
+sample video can still serve a replay (videos are not committed — spec §12).
 """
 from __future__ import annotations
 
@@ -16,6 +22,7 @@ import logging
 import os
 import shutil
 import time
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -52,8 +59,83 @@ def sample_dir() -> Optional[Path]:
     return Path(raw.strip()).expanduser()
 
 
+def _sample_result_url() -> str:
+    return (os.getenv("SAMPLE_RESULT_URL") or "").strip()
+
+
+def _sample_clip_url() -> str:
+    return (os.getenv("SAMPLE_CLIP_URL") or "").strip()
+
+
 def sample_available() -> bool:
     return load_sample() is not None
+
+
+# Cache the remote JSON for the lifetime of the process keyed by URL, so a
+# page view does not re-fetch — and so an unset env resets back to None.
+_REMOTE_CACHE: Dict[str, Optional["DemoSample"]] = {}
+
+
+def reset_remote_cache_for_tests() -> None:
+    _REMOTE_CACHE.clear()
+
+
+def _apply_clip_url(payload: Dict[str, Any]) -> None:
+    """Point every lift's replay at SAMPLE_CLIP_URL when it is set."""
+    url = _sample_clip_url()
+    if not url:
+        return
+    for lift in payload.get("lifts") or []:
+        if isinstance(lift, dict):
+            lift["annotated_video_url"] = url
+
+
+def _parse_sample_body(body: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(body, dict):
+        return None
+    payload = body.get("payload")
+    if not isinstance(payload, dict) or not isinstance(payload.get("lifts"), list):
+        return None
+    return copy.deepcopy(payload)
+
+
+def _load_remote_sample() -> Optional["DemoSample"]:
+    url = _sample_result_url()
+    if not url:
+        return None
+    if url in _REMOTE_CACHE:
+        return _REMOTE_CACHE[url]
+    try:
+        with urllib.request.urlopen(url, timeout=10) as response:
+            raw = response.read()
+    except Exception as exc:
+        logger.warning("Could not fetch SAMPLE_RESULT_URL: %s", exc)
+        _REMOTE_CACHE[url] = None
+        return None
+    try:
+        body = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        logger.warning("SAMPLE_RESULT_URL did not return JSON: %s", exc)
+        _REMOTE_CACHE[url] = None
+        return None
+    payload = _parse_sample_body(body)
+    if payload is None:
+        logger.warning("SAMPLE_RESULT_URL JSON has no lifts; ignoring")
+        _REMOTE_CACHE[url] = None
+        return None
+    _apply_clip_url(payload)
+    # The remote path drops local-replay URLs — the file endpoint has nothing
+    # to serve. SAMPLE_CLIP_URL is the way to put a video back.
+    if not _sample_clip_url():
+        for lift in payload["lifts"]:
+            if isinstance(lift, dict):
+                lift["annotated_video_url"] = None
+    payload["sample"] = True
+    payload.setdefault("status", "done")
+    payload.setdefault("message", SAMPLE_MESSAGE)
+    sample = DemoSample(payload=payload, replays={})
+    _REMOTE_CACHE[url] = sample
+    return sample
 
 
 def write_sample(outcome: ScoreOutcome, out_dir: Path, *, source_name: str = "") -> Path:
@@ -98,10 +180,15 @@ def write_sample(outcome: ScoreOutcome, out_dir: Path, *, source_name: str = "")
 
 def load_sample(directory: Optional[Path] = None) -> Optional[DemoSample]:
     """
-    The sample from `directory` (default DEMO_SAMPLE_DIR), or None when there
-    is none. A replay file that has gone missing drops its URL rather than
-    the whole sample: the verdict still shows, just without the video.
+    The sample from the remote URL (SAMPLE_RESULT_URL, cached per process) or
+    `directory` (default DEMO_SAMPLE_DIR), or None when neither is reachable.
+    A replay file that has gone missing drops its URL rather than the whole
+    sample: the verdict still shows, just without the video.
     """
+    if directory is None:
+        remote = _load_remote_sample()
+        if remote is not None:
+            return remote
     directory = directory if directory is not None else sample_dir()
     if directory is None:
         return None
@@ -113,8 +200,8 @@ def load_sample(directory: Optional[Path] = None) -> Optional[DemoSample]:
     except (OSError, ValueError) as exc:
         logger.warning("Sample at %s could not be read: %s", path, exc)
         return None
-    payload = body.get("payload") if isinstance(body, dict) else None
-    if not isinstance(payload, dict) or not isinstance(payload.get("lifts"), list):
+    payload = _parse_sample_body(body)
+    if payload is None:
         logger.warning("Sample at %s has no lifts", path)
         return None
 
@@ -128,10 +215,10 @@ def load_sample(directory: Optional[Path] = None) -> Optional[DemoSample]:
         if file.is_file():
             replays[index] = file
 
-    payload = copy.deepcopy(payload)
     for lift in payload["lifts"]:
         if isinstance(lift, dict) and lift.get("annotated_video_url") and lift.get("index") not in replays:
             lift["annotated_video_url"] = None
+    _apply_clip_url(payload)
     payload["sample"] = True
     payload.setdefault("status", "done")
     payload.setdefault("message", SAMPLE_MESSAGE)

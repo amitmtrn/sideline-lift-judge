@@ -26,14 +26,13 @@ out/
 *.avi
 *.heic
 *.pdf
-# The one exception: the cached demo sample (tools/make_demo_sample.py writes
-# it here). It is the clip the public demo serves to every visitor anyway,
-# picked for that, and a git-push deploy (Heroku's buildpack path) ships only
-# what is in the tree. Keep it small (one lift, under ~10 MB), and the .gitkeep
-# so the Dockerfile's COPY has something to copy before a sample exists.
+# The cached demo sample lives here (tools/make_demo_sample.py writes it).
+# Only non-video assets are committed: a git-push deploy ships only what is in
+# the tree, but videos stay off-repo (spec §12). Point SAMPLE_CLIP_URL at a
+# hosted MP4, or SAMPLE_RESULT_URL at the whole JSON, to put the replay back.
 !demo_sample/.gitkeep
 !demo_sample/sample.json
-!demo_sample/*.mp4
+!demo_sample/*.jpg
 
 # OS files
 .DS_Store
