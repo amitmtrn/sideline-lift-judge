@@ -25,7 +25,7 @@ import shutil
 import threading
 import time
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -47,6 +47,7 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_FILE = "sample.json"
 SAMPLE_REPLAY_URL = "/api/sample/replay/{index}.mp4"
+SAMPLE_STILL_URL = "/api/sample/evidence/{key}.jpg"
 SAMPLE_MESSAGE = "Sample clip — scored earlier and cached. Nothing was sent to the model just now."
 DEFAULT_CACHE_DIR = Path("/tmp/lift-judge-samples")
 
@@ -55,6 +56,10 @@ DEFAULT_CACHE_DIR = Path("/tmp/lift-judge-samples")
 class DemoSample:
     payload: Dict[str, Any]
     replays: Dict[int, Path]
+    # key "{lift_index}_{cue_id}" -> path to the committed JPG. Served by
+    # /api/sample/evidence/{key}.jpg so the sample card renders the evidence
+    # strip the same way a live card does.
+    stills: Dict[str, Path] = field(default_factory=dict)
 
 
 def sample_dir() -> Optional[Path]:
@@ -339,6 +344,7 @@ def load_sample(directory: Optional[Path] = None) -> Optional[DemoSample]:
         return None
 
     replays = _materialise_replays(body=body, payload=payload, directory=directory)
+    stills = _materialise_stills(payload=payload, directory=directory)
     for lift in payload["lifts"]:
         if isinstance(lift, dict):
             index = lift.get("index")
@@ -347,7 +353,52 @@ def load_sample(directory: Optional[Path] = None) -> Optional[DemoSample]:
             elif index in replays and not lift.get("annotated_video_url"):
                 lift["annotated_video_url"] = SAMPLE_REPLAY_URL.format(index=index)
     _apply_clip_url_fallback(payload)
-    return DemoSample(payload=_finalise_payload(payload), replays=replays)
+    return DemoSample(payload=_finalise_payload(payload), replays=replays, stills=stills)
+
+
+def _materialise_stills(
+    *,
+    payload: Dict[str, Any],
+    directory: Optional[Path],
+) -> Dict[str, Path]:
+    """
+    Match each evidenced cue to a committed JPG next to the sample JSON and
+    inject the serving URL into `payload['lifts'][*]['evidenced_cues'][*].media`.
+    The file naming convention mirrors what the pipeline writes
+    (`still_{lift_index}_{cue_id}.jpg`), so an existing bundle built with
+    `tools/make_demo_sample.py` lights up without having to rename anything.
+    """
+    stills: Dict[str, Path] = {}
+    if directory is None:
+        return stills
+    for lift in payload.get("lifts") or []:
+        if not isinstance(lift, dict):
+            continue
+        index = lift.get("index")
+        if index is None:
+            continue
+        cues = lift.get("evidenced_cues") or []
+        for ec in cues:
+            if not isinstance(ec, dict):
+                continue
+            cue_id = ec.get("id")
+            if not cue_id:
+                continue
+            jpg = Path(directory) / f"still_{index}_{cue_id}.jpg"
+            if not jpg.is_file():
+                continue
+            key = f"{index}_{cue_id}"
+            stills[key] = jpg
+            media = ec.get("media") or {}
+            if not isinstance(media, dict):
+                media = {}
+            # Default to a strip layout when the pipeline did not record one,
+            # so an older bundle still renders as a strip (what the renderer
+            # writes).
+            media.setdefault("layout", "strip")
+            media["still_url"] = SAMPLE_STILL_URL.format(key=key)
+            ec["media"] = media
+    return stills
 
 
 # ---------- writing (used by the admin build-sample tool) ----------

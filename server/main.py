@@ -671,6 +671,27 @@ async def read_sample_replay(index: int):
     )
 
 
+@app.get("/api/sample/evidence/{key}.jpg")
+async def read_sample_evidence(key: str):
+    """
+    One evidence still from the committed sample bundle. `key` is formatted
+    the same way jobs serve their stills (`{lift_index}_{cue_id}`), so the
+    client renders a sample card the same way as a live one.
+    """
+    sample = load_sample()
+    path = sample.stills.get(key) if sample is not None else None
+    if path is None or not Path(path).is_file():
+        raise HTTPException(status_code=404, detail="No evidence still for that cue.")
+    return FileResponse(
+        path,
+        media_type="image/jpeg",
+        headers={
+            "Content-Disposition": f'inline; filename="sample-{key}.jpg"',
+            "Cache-Control": "public, max-age=3600",
+        },
+    )
+
+
 @app.post("/api/score")
 async def score_endpoint(
     request: Request,

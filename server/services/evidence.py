@@ -33,16 +33,16 @@ DRIFT_THRESHOLD_CM = {
 
 # Rubric target description per issue code, shown as evidence.target.
 RUBRIC_TARGETS = {
-    "bar_forward_drift": "<= 4 cm",
-    "bar_loops_away": "<= 5 cm loop",
+    "bar_forward_drift": "≤ 4 cm",
+    "bar_loops_away": "≤ 5 cm loop",
     "early_arm_bend": "arms straight through extension",
     "hips_rise_first": "hips and shoulders rise together",
     "incomplete_extension": "full hip/knee/ankle extension before pull-under",
     "slow_turnover": "fast turnover immediately after extension",
-    "catch_forward": "<= 4 cm from start line at catch",
-    "catch_behind": "<= 4 cm from start line at catch",
+    "catch_forward": "≤ 4 cm from start line at catch",
+    "catch_behind": "≤ 4 cm from start line at catch",
     "unstable_catch": "stable overhead lockout",
-    "jerk_dip_forward": "<= 3 cm during dip",
+    "jerk_dip_forward": "≤ 3 cm during dip",
     "press_out": "bar locked out overhead without pressing",
 }
 
@@ -164,6 +164,13 @@ def _time_window(
     return t_start, t_end
 
 
+def _plural(lift: str) -> str:
+    """Snatches, cleans, jerks — not 'cleanes'. Keeps the sentence readable."""
+    if lift.endswith("ch") or lift.endswith("sh") or lift.endswith("s"):
+        return f"{lift}es"
+    return f"{lift}s"
+
+
 def _why_sentence(
     issue: str,
     lift: str,
@@ -181,7 +188,7 @@ def _why_sentence(
         if value_cm is not None:
             return (
                 f"Measured {value_cm:.0f} cm forward drift at {time_label}. "
-                f"Good {lift}es stay within about {target} here."
+                f"Good {_plural(lift)} stay within about {target} here."
             )
         return f"Bar appeared to drift forward during the {phase_label}. Keep it close."
 

@@ -1,31 +1,31 @@
 {
   "bar_forward_drift": {
     "metric": "horizontal_drift_cm",
-    "target": "<= 4 cm",
+    "target": "≤ 4 cm",
     "threshold_cm": 4.0,
     "note": "approximate — scale estimate from plate size may be inflated on oblique angles"
   },
   "bar_loops_away": {
     "metric": "horizontal_drift_cm",
-    "target": "<= 5 cm loop",
+    "target": "≤ 5 cm loop",
     "threshold_cm": 5.0,
     "note": "approximate"
   },
   "catch_forward": {
     "metric": "horizontal_drift_cm",
-    "target": "<= 4 cm from start line at catch",
+    "target": "≤ 4 cm from start line at catch",
     "threshold_cm": 4.0,
     "note": "approximate"
   },
   "catch_behind": {
     "metric": "horizontal_drift_cm",
-    "target": "<= 4 cm from start line at catch",
+    "target": "≤ 4 cm from start line at catch",
     "threshold_cm": 4.0,
     "note": "approximate"
   },
   "jerk_dip_forward": {
     "metric": "horizontal_drift_cm",
-    "target": "<= 3 cm during dip",
+    "target": "≤ 3 cm during dip",
     "threshold_cm": 3.0,
     "note": "approximate"
   },
