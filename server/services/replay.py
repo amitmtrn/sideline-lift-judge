@@ -1,18 +1,25 @@
 """
 FR-10: render the annotated replay.
 
-The verdict is burnt into the trimmed clip with ffmpeg so the file a coach
-downloads or shares over WhatsApp still carries the score — a sidecar caption
-would not survive the share sheet. Output is deliberately conservative so iOS
-Safari plays it inline: H.264 baseline-friendly yuv420p, even dimensions, AAC or
-no audio, and +faststart so playback can begin before the file finishes loading.
+The verdict is burnt into the trimmed clip so the file a coach downloads or
+shares over WhatsApp still carries the score — a sidecar caption would not
+survive the share sheet. Output is deliberately conservative so iOS Safari
+plays it inline: H.264 baseline-friendly yuv420p, even dimensions, AAC or no
+audio, and +faststart so playback can begin before the file finishes loading.
+
+Every overlay — header strip, score, confidence, cue footer, bar-path trace,
+reference line, drift arrow — is pre-rendered as one transparent BGRA image
+in Python with OpenCV and composited by ffmpeg's `overlay` filter. The static
+ffmpeg bundled by imageio-ffmpeg has no `drawtext` filter, and we must not
+depend on it: a replay that composites but silently loses its text would ship
+a verdict with nothing on it. The overlay filter is in every reasonable build.
 """
 from __future__ import annotations
 
 import logging
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional, Sequence, Tuple
+from typing import TYPE_CHECKING, List, Optional, Tuple
 
 from server.utils.bar_track import BarPath
 from server.utils.ffmpeg_binary import ffmpeg_exe
@@ -23,22 +30,12 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from server.schemas.judgment import EvidencedCue, LiftJudgment
 
-# Fonts vary by host; the first that exists wins. Without any of them drawtext
-# cannot render, and we fall back to an un-annotated (but still playable) clip.
-FONT_CANDIDATES: Sequence[str] = (
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    # Where Heroku's apt buildpack puts the same package (Aptfile).
-    "/app/.apt/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-    "/usr/share/fonts/truetype/freefont/FreeSansBold.ttf",
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-)
-
 # Keep the replay small enough to send over gym 4G; 720 on the long side is
 # plenty for a phone screen.
 MAX_LONG_SIDE = 720
+# Cap the output framerate so a 60 fps phone clip stays well under the Basic
+# dyno's deadline. 30 reads as a video and halves the encode's work.
+OUTPUT_FPS = 30
 BAND_COLORS = {
     "elite": "0x3ddc97",
     "solid": "0x5ec0a6",
@@ -49,49 +46,17 @@ BAND_COLORS = {
 }
 
 
-def find_font() -> Optional[str]:
-    for path in FONT_CANDIDATES:
-        if Path(path).is_file():
-            return path
-    return None
-
-
-def escape_drawtext(text: str) -> str:
-    """
-    Escape for drawtext's text= value inside a filtergraph. Backslashes first,
-    then the characters that end a value (: and ') and the ones that would be
-    read as filtergraph syntax.
-
-    `%` and `{}` are deliberately not escaped: every drawtext below sets
-    `expansion=none`, which is what makes them literal. Escaping `%` here
-    instead produces "Stray %" from the text expander.
-    """
-    out = text.replace("\\", "\\\\")
-    for char in (":", "'", ",", "[", "]", ";", "="):
-        out = out.replace(char, "\\" + char)
-    return out.replace("\n", " ")
-
-
-# The cue and drift text come from a model, so no part of it may be read as a
-# drawtext expansion.
-NO_EXPANSION = "expansion=none"
-
-
-# Mean glyph advance of the bold sans fonts we use, as a fraction of font size.
-# Only needs to be close: it decides whether a headline is shrunk, not laid out.
-CHAR_ADVANCE = 0.58
-MIN_TITLE_SIZE = 11
-
-
-def fitted_font_size(text: str, available_width: int) -> int:
-    """Largest font size at which `text` still fits across `available_width`."""
-    if not text or available_width <= 0:
-        return MIN_TITLE_SIZE
-    return max(MIN_TITLE_SIZE, int(available_width / (len(text) * CHAR_ADVANCE)))
+def _band_color_bgra(band: str) -> Tuple[int, int, int, int]:
+    """BAND_COLORS[band] is '0xRRGGBB'. Return BGRA so OpenCV draws it right."""
+    hex_rgb = BAND_COLORS.get(band, BAND_COLORS["unknown"])[2:]
+    r = int(hex_rgb[0:2], 16)
+    g = int(hex_rgb[2:4], 16)
+    b = int(hex_rgb[4:6], 16)
+    return (b, g, r, 255)
 
 
 def wrap_text(text: str, width: int) -> List[str]:
-    """Greedy wrap on word boundaries; a single over-long word is left alone."""
+    """Greedy wrap on word boundaries by character count. Public helper."""
     words = (text or "").split()
     if not words:
         return []
@@ -138,62 +103,181 @@ def _scale_filter(width: int, height: int) -> str:
     return f"scale={size[0]}:{size[1]}"
 
 
-def build_overlay_filters(
-    judgment: "LiftJudgment",
+def _fit_scale(
+    text: str,
+    max_width_px: int,
     *,
-    font: str,
-    display_width: int,
-    display_height: int,
+    font_face: int,
+    start_scale: float,
+    thickness: int,
+    min_scale: float = 0.35,
+) -> float:
+    """
+    Pick the largest OpenCV font scale at which `text` still fits inside
+    `max_width_px`. The score and the confidence are part of the honesty
+    contract, so it is the font size that gives way to a portrait clip, not
+    the text.
+    """
+    import cv2  # type: ignore
+
+    scale = max(min_scale, start_scale)
+    while scale > min_scale:
+        (text_width, _), _ = cv2.getTextSize(text, font_face, scale, thickness)
+        if text_width <= max_width_px:
+            return scale
+        scale -= 0.05
+    return min_scale
+
+
+def _wrap_to_pixels(
+    text: str,
+    max_width_px: int,
+    *,
+    font_face: int,
+    scale: float,
+    thickness: int,
 ) -> List[str]:
+    """Word-wrap by measured pixel width — no character-count guessing."""
+    import cv2  # type: ignore
+
+    words = (text or "").split()
+    if not words or max_width_px <= 0:
+        return []
+    lines: List[str] = []
+    current = words[0]
+    for word in words[1:]:
+        probe = f"{current} {word}"
+        (probe_width, _), _ = cv2.getTextSize(probe, font_face, scale, thickness)
+        if probe_width <= max_width_px:
+            current = probe
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+# OpenCV's Hershey fonts are what render_cue_still already uses; the renderer
+# below keeps that look consistent across stills and the replay.
+_TITLE_FONT = None  # set lazily so this module imports without OpenCV at test time
+_BODY_FONT = None
+
+
+def _draw_banners(layer, judgment: "LiftJudgment", width: int, height: int) -> None:
     """
-    The overlay: a header strip with lift, score, band and confidence, and a
-    footer strip with the first cue. Sizes are derived from frame height so the
-    text stays readable whether the clip is portrait or landscape.
+    Header strip (lift, score, band, confidence) and footer strip (first cue,
+    wrapped to two lines) drawn into `layer` in place. `layer` must be BGRA.
     """
-    # Sized from the width, because text runs across the frame: a tall portrait
-    # clip would otherwise get letters wider than the picture. These are output
-    # pixels, so the caller must pass the encoded size, not the source size.
-    base = max(display_width, 240)
-    title_size = max(14, int(base * 0.062))
-    body_size = max(12, int(base * 0.040))
-    pad = max(6, int(base * 0.022))
-    header_height = title_size + 2 * pad
-    color = BAND_COLORS.get(judgment.band, BAND_COLORS["unknown"])
+    import cv2  # type: ignore
+
+    pad = max(6, int(width * 0.022))
+    thickness = max(1, round(width / 500))
 
     score = "—" if judgment.score is None else f"{judgment.score}/10"
     headline = f"{judgment.lift.value.upper()}  {score}  {judgment.band.upper()}"
     if judgment.confidence is not None:
-        headline += f"   confidence {judgment.confidence:.0%}"
+        headline += f"   {int(round(judgment.confidence * 100))}%"
 
-    # Shrink the headline to fit rather than letting it run off the side of a
-    # portrait clip. The confidence is part of the honesty contract, so it is
-    # the font that gives way, not the text.
-    title_size = min(title_size, fitted_font_size(headline, display_width - 2 * pad))
-    header_height = title_size + 2 * pad
+    title_face = cv2.FONT_HERSHEY_DUPLEX
+    title_scale = _fit_scale(
+        headline,
+        width - 2 * pad,
+        font_face=title_face,
+        start_scale=max(0.5, width / 900),
+        thickness=thickness + 1,
+    )
+    (_, title_h), _ = cv2.getTextSize(headline, title_face, title_scale, thickness + 1)
+    header_h = title_h + 2 * pad
 
-    filters = [
-        f"drawbox=x=0:y=0:w=iw:h={header_height}:color=black@0.62:t=fill",
-        (
-            f"drawtext=fontfile='{font}':text='{escape_drawtext(headline)}'"
-            f":{NO_EXPANSION}:fontcolor={color}:fontsize={title_size}:x={pad}:y={pad}"
-        ),
-    ]
+    # Dark header strip with alpha, then the headline in the band's colour.
+    cv2.rectangle(layer, (0, 0), (width, header_h), (0, 0, 0, 160), -1)
+    cv2.putText(
+        layer,
+        headline,
+        (pad, header_h - pad),
+        title_face,
+        title_scale,
+        _band_color_bgra(judgment.band),
+        thickness + 1,
+        cv2.LINE_AA,
+    )
 
-    cue = judgment.cues[0] if judgment.cues else ""
+    # Footer with the first cue, if there is one.
+    cue = (judgment.cues or [""])[0] if judgment.cues else ""
     if cue:
-        # Roughly how many characters of this size fit the frame width.
-        columns = max(16, int(display_width / (body_size * 0.55))) if display_width else 32
-        lines = wrap_text(cue, columns)[:2]
-        footer_height = len(lines) * (body_size + 6) + 2 * pad
-        filters.append(f"drawbox=x=0:y=ih-{footer_height}:w=iw:h={footer_height}:color=black@0.62:t=fill")
-        for position, line in enumerate(lines):
-            offset = footer_height - pad - (len(lines) - position) * (body_size + 6) + 6
-            # drawtext has no `ih`: input height is `H` here, unlike in drawbox.
-            filters.append(
-                f"drawtext=fontfile='{font}':text='{escape_drawtext(line)}'"
-                f":{NO_EXPANSION}:fontcolor=white:fontsize={body_size}:x={pad}:y=H-{footer_height - offset}"
-            )
-    return filters
+        body_face = cv2.FONT_HERSHEY_SIMPLEX
+        body_scale = max(0.4, width / 1100)
+        body_thickness = max(1, round(width / 650))
+        lines = _wrap_to_pixels(
+            cue,
+            width - 2 * pad,
+            font_face=body_face,
+            scale=body_scale,
+            thickness=body_thickness,
+        )[:2]
+        if lines:
+            (_, line_h), _ = cv2.getTextSize("Hp", body_face, body_scale, body_thickness)
+            gap = max(2, int(line_h * 0.35))
+            footer_h = len(lines) * (line_h + gap) + 2 * pad
+            footer_y = height - footer_h
+            cv2.rectangle(layer, (0, footer_y), (width, height), (0, 0, 0, 160), -1)
+            y = footer_y + pad + line_h
+            for line in lines:
+                cv2.putText(
+                    layer,
+                    line,
+                    (pad, y),
+                    body_face,
+                    body_scale,
+                    (255, 255, 255, 255),
+                    body_thickness,
+                    cv2.LINE_AA,
+                )
+                y += line_h + gap
+
+
+def build_full_overlay(
+    judgment: "LiftJudgment",
+    bar_path: Optional["BarPath"],
+    width: int,
+    height: int,
+):
+    """
+    One BGRA image carrying everything the replay wants burned in: bar-path
+    trace, reference line, drift marker, header with score/band/confidence,
+    and a two-line cue footer. Returns the BGRA array or None when the size
+    is invalid. Transparent outside the overlay regions, so compositing it
+    with ffmpeg's `overlay` filter leaves the rest of the frame untouched.
+    """
+    import numpy as np  # type: ignore
+
+    if width <= 0 or height <= 0:
+        return None
+    layer = None
+    if bar_path is not None and bar_path.tracked:
+        layer = build_trace_overlay(bar_path, width, height)
+    if layer is None:
+        layer = np.zeros((height, width, 4), dtype=np.uint8)
+    _draw_banners(layer, judgment, width, height)
+    return layer
+
+
+def write_full_overlay(
+    judgment: "LiftJudgment",
+    bar_path: Optional["BarPath"],
+    width: int,
+    height: int,
+    out_path: str,
+) -> Optional[str]:
+    """Serialise `build_full_overlay` to disk for ffmpeg to pick up as input."""
+    import cv2  # type: ignore
+
+    layer = build_full_overlay(judgment, bar_path, width, height)
+    if layer is None:
+        return None
+    destination = Path(out_path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    return str(destination) if cv2.imwrite(str(destination), layer) else None
 
 
 # Overlay colours, BGRA to match OpenCV. Same palette as the app.
@@ -615,24 +699,33 @@ def render_annotated_replay(
     end_sec: Optional[float] = None,
     bar_path: Optional["BarPath"] = None,
     timeout: float = 180.0,
-) -> Optional[str]:
+) -> Tuple[Optional[str], bool]:
     """
-    Write an iOS-safe MP4 of [start_sec, end_sec] with the verdict burnt in, and
-    the bar-path trace drawn over it when `bar_path` was tracked confidently.
+    Write an iOS-safe MP4 of [start_sec, end_sec] with every overlay (score,
+    confidence, cue, bar-path trace, drift arrow) burnt in. The overlay is a
+    single transparent BGRA PNG built in Python with OpenCV, composited by
+    ffmpeg's `overlay` filter — no `drawtext`, which the imageio-ffmpeg
+    bundled binary does not carry and would silently drop the text.
 
-    Degrades in steps: trace + text, then text alone, then a plain clip. A replay
-    a coach can play is worth more than no replay at all. Returns the written
-    path, or None when ffmpeg is unavailable or every attempt failed.
+    Degrades in steps: full overlay, trace-only overlay, then a plain clip.
+    Returns `(path, annotated)`: `annotated` is False when nothing but the
+    plain clip could be produced, so the caller can be honest about it. A
+    None path means every attempt failed (or no ffmpeg binary is reachable).
     """
     ffmpeg = ffmpeg_exe()
     if not ffmpeg:
         logger.warning("render_annotated_replay: no ffmpeg binary available; skipping replay")
-        return None
+        return None, False
 
     destination = Path(out_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     info = probe_video(video_path)
-    scale = _scale_filter(info.display_width, info.display_height)
+    size = output_size(info.display_width, info.display_height)
+    if size is None:
+        logger.warning("render_annotated_replay: unknown clip size for %s", video_path)
+        return None, False
+    width, height = size
+    scale = f"scale={width}:{height}"
 
     trim_args: List[str] = []
     if start_sec is not None:
@@ -642,7 +735,7 @@ def render_annotated_replay(
         trim_args += ["-t", f"{duration:.3f}"]
 
     # Rotation metadata is baked in by the scaler, so clear it afterwards or a
-    # player would rotate the burnt-in text along with the picture.
+    # player would rotate the overlay along with the picture.
     audio_args = ["-c:a", "aac", "-b:a", "96k"] if info.has_audio else ["-an"]
     encode_args = [
         "-c:v",
@@ -655,6 +748,10 @@ def render_annotated_replay(
         "veryfast",
         "-crf",
         "25",
+        # Capping the output framerate keeps a 60 fps portrait clip inside the
+        # Basic dyno's job deadline. 30 reads as video and halves encode work.
+        "-r",
+        str(OUTPUT_FPS),
         *audio_args,
         "-movflags",
         "+faststart",
@@ -662,71 +759,77 @@ def render_annotated_replay(
         "rotate=0",
     ]
 
-    # Every filter below runs after `scale`, so all sizes are in output pixels.
-    size = output_size(info.display_width, info.display_height)
-    text_width, text_height = size if size else (info.display_width, info.display_height)
-
-    font = find_font()
-    text_filters = (
-        build_overlay_filters(
-            judgment,
-            font=font,
-            display_width=text_width,
-            display_height=text_height,
-        )
-        if font
-        else []
+    full_overlay = write_full_overlay(
+        judgment, bar_path, width, height, str(destination.with_suffix(".overlay.full.png"))
     )
-
-    # The trace is a transparent PNG built at exactly the encoded size, so it
-    # composites at 0:0 with no scaling of its own.
-    trace_file = None
-    if bar_path is not None and bar_path.tracked and size is not None:
-        trace_file = write_trace_overlay(bar_path, size[0], size[1], str(destination.with_suffix(".trace.png")))
-
-    # Best first, each step dropping one layer of annotation.
-    attempts: List[Tuple[str, List[str]]] = []
-    if trace_file:
-        chain = f"[0:v]{scale}[base];[base][1:v]overlay=0:0[traced]"
-        if text_filters:
-            chain += f";[traced]{','.join(text_filters)}[out]"
-        else:
-            chain += ";[traced]null[out]"
-        attempts.append(
-            ("trace+text", ["-i", trace_file, "-filter_complex", chain, "-map", "[out]", "-map", "0:a?"])
+    trace_overlay = None
+    if bar_path is not None and bar_path.tracked:
+        trace_overlay = write_trace_overlay(
+            bar_path, width, height, str(destination.with_suffix(".overlay.trace.png"))
         )
-    if text_filters:
-        attempts.append(("text", ["-vf", ",".join([scale, *text_filters])]))
-    attempts.append(("plain", ["-vf", scale]))
+
+    # Best first, each step dropping one layer of annotation. `annotated` is
+    # true for any overlay path and false for the bare "plain" fallback.
+    attempts: List[Tuple[str, Optional[str], bool]] = []
+    if full_overlay:
+        attempts.append(("full", full_overlay, True))
+    if trace_overlay and trace_overlay != full_overlay:
+        attempts.append(("trace", trace_overlay, True))
+    attempts.append(("plain", None, False))
 
     try:
-        for attempt, (label, filter_args) in enumerate(attempts):
-            args = [
-                ffmpeg,
-                "-y",
-                "-v",
-                "error",
-                *trim_args,
-                "-i",
-                str(video_path),
-                *filter_args,
-                *encode_args,
-                str(destination),
-            ]
+        for attempt_index, (label, overlay_path, annotated) in enumerate(attempts):
+            if overlay_path:
+                chain = f"[0:v]{scale}[base];[base][1:v]overlay=0:0[out]"
+                args = [
+                    ffmpeg,
+                    "-y",
+                    "-v",
+                    "error",
+                    *trim_args,
+                    "-i",
+                    str(video_path),
+                    "-i",
+                    overlay_path,
+                    "-filter_complex",
+                    chain,
+                    "-map",
+                    "[out]",
+                    "-map",
+                    "0:a?",
+                    *encode_args,
+                    str(destination),
+                ]
+            else:
+                args = [
+                    ffmpeg,
+                    "-y",
+                    "-v",
+                    "error",
+                    *trim_args,
+                    "-i",
+                    str(video_path),
+                    "-vf",
+                    scale,
+                    *encode_args,
+                    str(destination),
+                ]
             if _run(args, timeout) and destination.exists() and destination.stat().st_size > 1024:
-                if attempt:
-                    # The clip still plays, but with less on it than intended —
-                    # worth knowing rather than discovering in a shared replay.
+                if attempt_index > 0:
                     logger.warning(
                         "Replay fell back to %s; the fuller overlay could not be drawn.", label
                     )
-                return str(destination)
+                return str(destination), annotated
         logger.warning(
             "render_annotated_replay: all %d encode attempts failed for %s",
             len(attempts),
             video_path,
         )
-        return None
+        return None, False
     finally:
-        if trace_file:
-            Path(trace_file).unlink(missing_ok=True)
+        for _, path, _ in attempts:
+            if path:
+                try:
+                    Path(path).unlink(missing_ok=True)
+                except OSError:
+                    pass

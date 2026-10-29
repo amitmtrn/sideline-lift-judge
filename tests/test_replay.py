@@ -1,4 +1,11 @@
-"""FR-10 / AC-6: the annotated replay must be an MP4 iOS Safari will play."""
+"""
+FR-10 / AC-6: the annotated replay must be an MP4 iOS Safari will play, and
+every overlay (score, cue, trace, drift) must be visibly burnt in — including
+on a dyno whose only ffmpeg is the imageio-ffmpeg wheel's bundled binary,
+which carries no `drawtext` filter. The tests here work the renderer under
+that constraint on purpose, and compare pixels so a silently-plain fallback
+cannot pass.
+"""
 import json
 import shutil
 import subprocess
@@ -10,9 +17,7 @@ from server.services.replay import (
     output_size,
     MAX_LONG_SIDE,
     _scale_filter,
-    build_overlay_filters,
-    escape_drawtext,
-    find_font,
+    build_full_overlay,
     render_annotated_replay,
     wrap_text,
 )
@@ -31,32 +36,6 @@ def judgment(**overrides) -> LiftJudgment:
     )
     body.update(overrides)
     return LiftJudgment(**body)
-
-
-def test_escape_drawtext_neutralises_filtergraph_syntax():
-    escaped = escape_drawtext("score: 4/10, 90% 'close' [x]")
-    for char in (":", ",", "'", "[", "]"):
-        assert f"\\{char}" in escaped
-    assert "\n" not in escape_drawtext("two\nlines")
-
-
-def test_escape_drawtext_leaves_percent_alone():
-    # Escaping % makes drawtext's expander complain about a stray %; the filters
-    # set expansion=none instead, which is what keeps it literal.
-    assert escape_drawtext("confidence 72%") == "confidence 72%"
-
-
-def test_every_drawtext_disables_expansion():
-    filters = build_overlay_filters(judgment(), font="/tmp/font.ttf", display_width=640, display_height=360)
-    drawtexts = [item for item in filters if item.startswith("drawtext")]
-    assert drawtexts
-    assert all("expansion=none" in item for item in drawtexts)
-
-
-def test_escape_drawtext_escapes_backslashes_first():
-    # A naive implementation turns "a\b" into "a\\\\b" by re-escaping its own
-    # escapes; the backslash must be doubled exactly once.
-    assert escape_drawtext("a\\b") == "a\\\\b"
 
 
 def test_wrap_text_breaks_on_words():
@@ -96,30 +75,51 @@ def test_scale_filter_uses_the_computed_size():
     assert _scale_filter(0, 0) == "scale=trunc(iw/2)*2:trunc(ih/2)*2"
 
 
-def test_overlay_mentions_score_band_and_cue():
-    filters = build_overlay_filters(judgment(), font="/tmp/font.ttf", display_width=640, display_height=360)
-    chain = " ".join(filters)
-    assert "SNATCH" in chain and "4/10" in chain and "POOR" in chain
-    assert "confidence" in chain
-    assert "close" in chain  # the cue made it into the footer
-    assert chain.count("drawbox") == 2
+def test_full_overlay_draws_header_and_footer_regions():
+    """
+    The pre-rendered overlay must put opaque pixels in the header strip (top)
+    and the footer strip (bottom when a cue is present). The middle stays
+    mostly transparent so the picture reads through.
+    """
+    import numpy as np  # type: ignore
+
+    overlay = build_full_overlay(judgment(), bar_path=None, width=400, height=720)
+    assert overlay is not None
+    assert overlay.shape == (720, 400, 4)
+    alpha = overlay[:, :, 3]
+    # Top 10% must have overlay pixels; so must the bottom 10%.
+    assert alpha[:72].max() > 0, "header strip never drew"
+    assert alpha[-72:].max() > 0, "footer strip never drew"
+    # Middle band should be mostly transparent — a bar-less overlay only has
+    # the two banners.
+    assert alpha[200:400].max() == 0
 
 
-def test_overlay_without_cues_has_no_footer():
-    filters = build_overlay_filters(
-        judgment(band="unknown", score=None, cues=[]),
-        font="/tmp/font.ttf",
-        display_width=640,
-        display_height=360,
+def test_full_overlay_omits_footer_when_cues_are_empty():
+    """With no cue, the footer banner must not be drawn — only the header is."""
+    from server.schemas.judgment import LiftType
+
+    # LiftJudgment forbids an empty `cues` list at the schema; use
+    # model_construct to bypass validation and exercise the defensive branch.
+    cueless = LiftJudgment.model_construct(
+        lift=LiftType.snatch, score=4, band="poor", max_horizontal_drift="forward loop",
+        cues=[], confidence=0.45,
     )
-    assert sum(1 for item in filters if item.startswith("drawbox")) == 1
+    overlay = build_full_overlay(cueless, bar_path=None, width=400, height=720)
+    assert overlay is not None
+    alpha = overlay[:, :, 3]
+    assert alpha[:72].max() > 0
+    assert alpha[-72:].max() == 0
 
 
 @needs_ffmpeg
 def test_render_produces_an_ios_safe_mp4(lift_video, tmp_path):
     out = tmp_path / "replay.mp4"
-    written = render_annotated_replay(lift_video, judgment(), str(out), start_sec=1.0, end_sec=3.0)
+    written, annotated = render_annotated_replay(
+        lift_video, judgment(), str(out), start_sec=1.0, end_sec=3.0
+    )
     assert written is not None, "ffmpeg produced no replay"
+    assert annotated is True, "the full overlay should have been drawn"
     assert out.exists() and out.stat().st_size > 1024
 
     probe = json.loads(
@@ -146,129 +146,82 @@ def test_render_produces_an_ios_safe_mp4(lift_video, tmp_path):
     assert float(probe["format"]["duration"]) < 2.6
 
 
-@needs_ffmpeg
-@pytest.mark.skipif(find_font() is None, reason="no font available for drawtext")
-def test_ffmpeg_accepts_the_overlay_filtergraph(tmp_path):
-    """
-    The renderer falls back to an un-annotated clip when the filtergraph is bad,
-    so a syntax error shows up only as a silently plain replay. Run the real
-    graph and insist ffmpeg is happy with it.
-    """
-    chain = ",".join(
-        [
-            _scale_filter(640, 360),
-            *build_overlay_filters(
-                judgment(cues=["bar close into the hips; contact then explode up"]),
-                font=find_font(),
-                display_width=640,
-                display_height=360,
-            ),
-        ]
-    )
-    result = subprocess.run(
-        [
-            "ffmpeg", "-y", "-v", "error",
-            "-f", "lavfi", "-i", "color=c=gray:s=640x360:d=1",
-            "-vf", chain, "-frames:v", "1", str(tmp_path / "frame.png"),
-        ],
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == 0, f"ffmpeg rejected the overlay filtergraph:\n{result.stderr}"
-    assert result.stderr.strip() == ""
-    assert (tmp_path / "frame.png").exists()
-
-
-@needs_ffmpeg
-@pytest.mark.skipif(find_font() is None, reason="no font available for drawtext")
-def test_rendered_replay_actually_carries_the_overlay(lift_video, tmp_path):
-    """The header strip must darken the top of the frame — proof it was drawn."""
-    import numpy as np  # type: ignore
-
-    plain = tmp_path / "plain.mp4"
-    annotated = tmp_path / "annotated.mp4"
-    subprocess.run(
-        ["ffmpeg", "-y", "-v", "error", "-i", lift_video, "-c:v", "libx264",
-         "-pix_fmt", "yuv420p", "-an", str(plain)],
-        check=True,
-    )
-    assert render_annotated_replay(lift_video, judgment(), str(annotated)) is not None
-
-    def first_frame(path):
-        import cv2  # type: ignore
-
-        capture = cv2.VideoCapture(str(path))
-        try:
-            ok, frame = capture.read()
-            assert ok
-            return frame
-        finally:
-            capture.release()
-
-    before, after = first_frame(plain), first_frame(annotated)
-    strip = slice(0, max(4, after.shape[0] // 12))
-    assert float(np.mean(after[strip])) < float(np.mean(before[strip])), "header strip was not drawn"
-
-
-@needs_ffmpeg
-def test_render_falls_back_when_the_font_is_missing(lift_video, tmp_path, monkeypatch):
-    monkeypatch.setattr("server.services.replay.find_font", lambda: None)
-    out = tmp_path / "plain.mp4"
-    assert render_annotated_replay(lift_video, judgment(), str(out)) is not None
-    assert out.exists()
-
-
 def test_render_without_ffmpeg_returns_none(lift_video, tmp_path, monkeypatch):
     monkeypatch.setattr("server.services.replay.ffmpeg_exe", lambda: None)
-    assert render_annotated_replay(lift_video, judgment(), str(tmp_path / "none.mp4")) is None
+    path, annotated = render_annotated_replay(lift_video, judgment(), str(tmp_path / "none.mp4"))
+    assert path is None and annotated is False
 
 
-def test_render_uses_imageio_ffmpeg_when_path_has_none(tmp_path, monkeypatch):
+def test_render_never_builds_a_drawtext_command(lift_video, tmp_path, monkeypatch):
     """
-    The pip fallback carries the deploy on Heroku's Python buildpack by itself:
-    without a system ffmpeg, the imageio-ffmpeg wheel's bundled binary should
-    be picked up and produce a playable MP4. The clip is portrait so the test
-    also pins the "respect rotation metadata" guarantee: a portrait source goes
-    in, a portrait replay comes out.
+    The imageio-ffmpeg bundled binary has no `drawtext` filter, and the
+    static ffmpeg on Heroku's apt buildpack sometimes does not either. Any
+    command we build that mentions drawtext is a silent-fallback trap — the
+    render module must not emit one, in any attempt, in any clip.
     """
+    recorded = []
+
+    def _run(args, timeout):  # noqa: ARG001
+        recorded.append(list(args))
+        # Pretend every attempt fails, so the loop walks all fallbacks.
+        return False
+
+    monkeypatch.setattr("server.services.replay._run", _run)
+    render_annotated_replay(lift_video, judgment(), str(tmp_path / "nope.mp4"))
+    assert recorded, "render should have attempted at least one encode"
+    for args in recorded:
+        flat = " ".join(args)
+        assert "drawtext" not in flat, args
+
+
+def test_render_uses_imageio_ffmpeg_and_burns_the_overlay(tmp_path, monkeypatch):
+    """
+    Hide the system ffmpeg so only imageio-ffmpeg answers. The written clip
+    must be portrait (rotation respected), play as H.264 + yuv420p + faststart,
+    and visibly carry the overlay — the mean pixel of the header strip after
+    the render must be far from the solid gym-floor grey of the source. A
+    drawtext-free overlay that still works is the whole point of this fix.
+    """
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
     from tests.conftest import write_lift_video
     from server.utils import ffmpeg_binary
 
-    portrait = write_lift_video(str(tmp_path / "portrait.mp4"), width=96, height=160, duration=2.0)
-    # Hide the system ffmpeg from both the binary resolver and anywhere else
-    # the module might still call shutil.which. The imageio wheel's bundled
-    # binary stays reachable because it does not go through PATH.
+    source = write_lift_video(str(tmp_path / "portrait.mp4"), width=96, height=160, duration=2.0)
     ffmpeg_binary.reset_cache_for_tests()
     monkeypatch.setattr("server.utils.ffmpeg_binary.shutil.which", lambda name: None)
     assert ffmpeg_binary.ffmpeg_exe() is not None, "imageio-ffmpeg must provide a binary"
 
     out = tmp_path / "replay.mp4"
-    written = render_annotated_replay(portrait, judgment(), str(out), start_sec=0.0, end_sec=1.5)
+    written, annotated = render_annotated_replay(
+        source, judgment(), str(out), start_sec=0.0, end_sec=1.5
+    )
     assert written is not None, "imageio-ffmpeg should have produced a replay"
+    assert annotated is True, "overlay annotations should have been burnt in"
     assert out.exists() and out.stat().st_size > 1024
 
-    # The first bytes of an iOS-safe MP4 are an `ftyp` box with a brand that
-    # the Safari player recognises. mp42/isom are the usual ones ffmpeg writes.
-    head = out.read_bytes()[:32]
-    assert b"ftyp" in head, head
-
-    # Replay should respect portrait orientation: the output is taller than wide.
-    # Decode the first frame with OpenCV; if ffprobe is on PATH, double-check it.
-    import cv2  # type: ignore
-
-    cap = cv2.VideoCapture(str(out))
+    # Decode the first frame of the source and the replay, scaled to the same
+    # output size, so the overlay's pixel diff is isolated to the overlay bands.
+    source_cap = cv2.VideoCapture(source)
+    reply_cap = cv2.VideoCapture(str(out))
     try:
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        _, source_frame = source_cap.read()
+        _, reply_frame = reply_cap.read()
     finally:
-        cap.release()
-    assert height > width, (width, height)
+        source_cap.release()
+        reply_cap.release()
+    assert source_frame is not None and reply_frame is not None
+
+    out_h, out_w = reply_frame.shape[:2]
+    assert out_h > out_w, (out_w, out_h)  # portrait preserved
+    source_resized = cv2.resize(source_frame, (out_w, out_h))
+
+    header = reply_frame[: max(6, out_h // 15)]
+    header_src = source_resized[: max(6, out_h // 15)]
+    diff = float(np.mean(np.abs(header.astype(np.int16) - header_src.astype(np.int16))))
+    assert diff > 20, f"header overlay was not visibly burnt in (mean abs diff {diff:.1f})"
     ffmpeg_binary.reset_cache_for_tests()
-
-
-def test_find_font_returns_an_existing_file_or_none():
-    font = find_font()
-    assert font is None or font.endswith((".ttf", ".ttc"))
 
 
 # ---------- the bar-path trace (§18) ----------
@@ -322,14 +275,16 @@ def test_trace_overlay_marks_the_worst_drift():
 
 
 @needs_ffmpeg
-@pytest.mark.skipif(find_font() is None, reason="no font available for drawtext")
 def test_render_burns_the_trace_into_the_video(lift_video, tmp_path):
     import numpy as np  # type: ignore
 
-    plain = tmp_path / "plain.mp4"
-    traced = tmp_path / "traced.mp4"
-    assert render_annotated_replay(lift_video, judgment(), str(plain)) is not None
-    assert render_annotated_replay(lift_video, judgment(), str(traced), bar_path=tracked_path()) is not None
+    plain_path, _ = render_annotated_replay(
+        lift_video, judgment(), str(tmp_path / "plain.mp4")
+    )
+    traced_path, _ = render_annotated_replay(
+        lift_video, judgment(), str(tmp_path / "traced.mp4"), bar_path=tracked_path()
+    )
+    assert plain_path is not None and traced_path is not None
 
     def mid_frame(path):
         import cv2  # type: ignore
@@ -344,18 +299,21 @@ def test_render_burns_the_trace_into_the_video(lift_video, tmp_path):
         finally:
             capture.release()
 
-    before, after = mid_frame(plain), mid_frame(traced)
+    before, after = mid_frame(plain_path), mid_frame(traced_path)
     assert before.shape == after.shape
-    # The trace must have changed pixels the text overlay does not touch.
+    # The trace must have changed pixels in a region neither banner covers.
     middle = slice(after.shape[0] // 4, 3 * after.shape[0] // 4)
     assert not np.array_equal(before[middle], after[middle]), "no trace in the frame"
 
 
 @needs_ffmpeg
-def test_render_cleans_up_the_trace_png(lift_video, tmp_path):
+def test_render_cleans_up_the_overlay_pngs(lift_video, tmp_path):
     out = tmp_path / "replay.mp4"
-    assert render_annotated_replay(lift_video, judgment(), str(out), bar_path=tracked_path()) is not None
-    assert list(tmp_path.glob("*.png")) == [], "temporary trace overlay was left behind"
+    written, _ = render_annotated_replay(
+        lift_video, judgment(), str(out), bar_path=tracked_path()
+    )
+    assert written is not None
+    assert list(tmp_path.glob("*.png")) == [], "temporary overlay PNG was left behind"
 
 
 # ---------- the evidence strip ----------

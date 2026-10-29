@@ -173,9 +173,17 @@ class ScoredLift:
     activity: str = ""
     observations: Optional[str] = None
     replay_path: Optional[str] = None
+    # True only when the replay carries overlay annotations (score, cue, trace),
+    # false when every annotated attempt failed and we fell back to a plain clip.
+    # The API surfaces this so a card can be honest about it.
+    replay_annotated: bool = False
     bar_path_tracked: bool = False
     # What the tracker measured; goes to the judge, the API and the replay.
     measurement: Optional[BarPathMeasurement] = None
+    # The full tracked path (not just the summary measurement) — the replay
+    # trace is drawn from it, and the sample bundle serialises it so the dyno
+    # can re-render the replay without re-running the tracker.
+    bar_path: Optional["BarPath"] = None
     # Which model did what for this verdict (see models_used), so the card can
     # say so — and say when the fallback judge answered instead of the primary.
     models: Dict[str, Any] = field(default_factory=dict)
@@ -584,6 +592,7 @@ async def _score_one_lift(
     measurement = measure(bar_path)
     scored.measurement = measurement
     scored.bar_path_tracked = measurement.tracked
+    scored.bar_path = bar_path
 
     try:
         progress("observing", f"Reading bar path — {label}…", low + 0.15 * (high - low))
@@ -656,7 +665,7 @@ async def _score_one_lift(
 
     if request.render_replay and request.replay_dir:
         progress("rendering", f"Rendering replay — {label}…", low + 0.8 * (high - low))
-        replay = await _offload(
+        replay, annotated = await _offload(
             render_annotated_replay,
             request.video_path,
             scored.judgment,
@@ -666,8 +675,11 @@ async def _score_one_lift(
             bar_path=bar_path,
         )
         scored.replay_path = replay
+        scored.replay_annotated = annotated
         if replay is None:
             logger.info("Replay rendering unavailable for %s", label)
+        elif not annotated:
+            logger.warning("Replay produced for %s but every annotated attempt failed", label)
     return scored
 
 

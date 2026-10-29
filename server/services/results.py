@@ -38,8 +38,13 @@ def lift_payload(
         body.update(item.judgment.model_dump(exclude={"evidenced_cues"}))
         if item.replay_path and replay_url is not None:
             body["annotated_video_url"] = replay_url(item.index)
+            # True only when the replay carries the overlay. False tells the
+            # UI the file is still playable but the score and cue are not
+            # burnt in — a drawtext-less ffmpeg fell through to a plain clip.
+            body["replay_annotated"] = bool(item.replay_annotated)
         else:
             body["annotated_video_url"] = None
+            body["replay_annotated"] = False
         # The card's drift line: from the measurement when there is one, so it
         # cannot contradict the number; the judge's own words stay in
         # `max_horizontal_drift` for the record.
