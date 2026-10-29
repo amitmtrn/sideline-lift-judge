@@ -235,3 +235,48 @@ class TestCueMapping:
         assert cue_to_issue(cue_text) == expected_issue, (
             f"cue_to_issue({short!r}) should be {expected_issue!r}"
         )
+
+
+class TestPhaseRestrictedWindows:
+    """The jerk sample bug: a 'dip straight down' cue read its evidence from
+    the lockout at 4.4-4.9 s and claimed "48 cm forward". The dip is at the
+    start of the jerk window; the lockout is at the end. Each cue's evidence
+    must live in its own phase."""
+
+    def test_dip_cue_reads_from_the_dip_phase_not_lockout(self):
+        # A jerk window of [4.0, 6.0] s; the real jerk-dip forward spike
+        # happens near t=4.2 s, and a (bigger) lockout drift at t=5.6 s.
+        n = 40
+        duration = 2.0
+        points: List[BarPoint] = []
+        for i in range(n):
+            frac = i / (n - 1)
+            t = 4.0 + frac * duration
+            # Reference x is ~0.40 (median of opening); dip adds 0.03,
+            # lockout adds 0.10 — so lockout is clearly the larger drift,
+            # but a dip cue must not read it.
+            if frac < 0.25:
+                x = 0.40 + 0.03 * (frac / 0.25)
+            elif frac > 0.75:
+                x = 0.40 + 0.10 * ((frac - 0.75) / 0.25)
+            else:
+                x = 0.40
+            y = 0.85 - frac * (0.85 - 0.15)
+            points.append(BarPoint(t=t, x=x, y=y))
+        path = BarPath(
+            points=points, plate_radius=0.10, coverage=1.0, sampled=n,
+            frame_width=1080, frame_height=1920,
+        )
+        measurement = BarPathMeasurement(
+            tracked=True, coverage=1.0, points=n,
+            max_drift_diameters=0.3, max_drift_cm=14.0,
+            drift_at_rise_fraction=0.9,
+        )
+        cues = ["dip straight down (no forward knee slide); bar stays over mid-foot"]
+        result = build_evidence_cues(cues, measurement, path, "jerk", 4.0, 6.0)
+        assert len(result) == 1
+        ec = result[0]
+        assert ec.issue == "jerk_dip_forward"
+        # The evidence window must sit inside the dip, not the lockout.
+        assert ec.evidence.t_start_s < 4.9
+        assert ec.evidence.t_end_s <= 4.9

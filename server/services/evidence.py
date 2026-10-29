@@ -145,22 +145,65 @@ def _drift_cm_in_window(bar_path: BarPath, t_start: float, t_end: float) -> Opti
     return (drift_px / plate_px) * PLATE_DIAMETER_M * 100.0
 
 
+def _phase_time_range(
+    phase: str,
+    window_start: float,
+    window_end: float,
+) -> Tuple[float, float]:
+    """
+    Approximate (t_start, t_end) for a cue's phase within the scored window.
+    An "incomplete_extension" cue should not read evidence from the lockout,
+    and a "dip straight down" cue should not read evidence from the lockout
+    either — each one lives in its own slice of the lift.
+    """
+    span = max(0.0, window_end - window_start)
+    # Fraction-of-window ranges tuned to a typical lift's duration. The scored
+    # window is the whole trimmed lift, so the first_pull sits at the start,
+    # the lockout at the end. A cue without a known phase gets the whole
+    # window — same as before this helper existed.
+    fractions = {
+        "first_pull": (0.00, 0.35),
+        "transition": (0.20, 0.55),
+        "second_pull": (0.40, 0.80),
+        "turnover": (0.60, 0.95),
+        "catch": (0.80, 1.00),
+        "jerk_dip": (0.00, 0.45),
+        "jerk_drive": (0.25, 0.75),
+    }
+    low, high = fractions.get(phase, (0.0, 1.0))
+    return window_start + low * span, window_start + high * span
+
+
 def _time_window(
     bar_path: Optional[BarPath],
     measurement: BarPathMeasurement,
     window_start: float,
     window_end: float,
+    phase: str = "",
 ) -> Tuple[float, float]:
-    """Compute the cue's time window: 0.5 s each side of max-drift point."""
+    """
+    The time window the cue's evidence is read from: a short span centred on
+    the max-drift point *inside the cue's phase*. A cue tagged for the dip
+    cannot pull its number from the lockout, and vice versa.
+    """
+    phase_t_start, phase_t_end = _phase_time_range(phase, window_start, window_end)
     if bar_path is not None and bar_path.tracked and bar_path.points:
         ref = bar_path.reference_x
-        worst = max(bar_path.points, key=lambda p: abs(p.x - ref))
+        in_phase = [p for p in bar_path.points if phase_t_start <= p.t <= phase_t_end]
+        candidates = in_phase or bar_path.points
+        worst = max(candidates, key=lambda p: abs(p.x - ref))
         key_t = worst.t
     else:
         frac = measurement.drift_at_rise_fraction or 0.5
         key_t = window_start + frac * (window_end - window_start)
-    t_start = max(window_start, key_t - 0.5)
-    t_end = min(window_end, key_t + 0.5)
+        key_t = min(max(key_t, phase_t_start), phase_t_end)
+    t_start = max(phase_t_start, key_t - 0.5)
+    t_end = min(phase_t_end, key_t + 0.5)
+    # Keep at least a one-second slice if the phase is wider than one second.
+    if phase_t_end - phase_t_start >= 1.0 and t_end - t_start < 1.0:
+        centre = (t_start + t_end) / 2
+        t_start = max(phase_t_start, centre - 0.5)
+        t_end = min(phase_t_end, centre + 0.5)
     return t_start, t_end
 
 
@@ -287,7 +330,7 @@ def build_evidence_cues(
         cue_id = f"c{n}"
         issue = cue_to_issue(cue_text)
         phase = issue_to_phase(issue, measurement, lift)
-        t_start, t_end = _time_window(bar_path, measurement, window_start_sec, window_end_sec)
+        t_start, t_end = _time_window(bar_path, measurement, window_start_sec, window_end_sec, phase=phase)
         is_vision_only = issue in VISION_ONLY_ISSUES
 
         if is_vision_only:
