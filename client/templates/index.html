@@ -96,12 +96,15 @@
           </div>
 
           <!-- The typed code, in code mode only. In link mode the code rides in
-               the URL and is never shown; in open mode there is none. -->
+               the URL and is never shown; in open mode there is none. The input
+               is type=password so the characters never read out of a shoulder-
+               surf or a screenshot; autocomplete is off so a browser does not
+               offer to remember a shared code against a judge's own account. -->
           <div class="field" id="access-field" {% if not (access_required and access_mode == "code") %}hidden{% endif %}>
             <label for="access-code">Access code</label>
             <input
               id="access-code"
-              type="text"
+              type="password"
               inputmode="text"
               autocomplete="off"
               autocapitalize="characters"
@@ -113,6 +116,13 @@
               page, or open the link that already carries it.
             </p>
           </div>
+          <!-- Shown instead of the field once a code is remembered on this
+               device (typed earlier, or opened from the ?code= link). The code
+               value itself is never rendered. -->
+          <p id="access-saved" class="field-hint" hidden>
+            Access code saved <span aria-hidden="true">✓</span>
+            <button type="button" class="link" data-action="change-code">change</button>
+          </p>
           <p id="access-error" class="notice" hidden></p>
           <div class="actions" id="access-actions" hidden>
             {% if sample_available %}

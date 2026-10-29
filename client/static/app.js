@@ -57,8 +57,19 @@
   const startSlider = $("#trim-start");
   const endSlider = $("#trim-end");
   const accessInput = $("#access-code");
+  const accessField = $("#access-field");
+  const accessSaved = $("#access-saved");
 
   /* ---------- Access code ---------- */
+
+  // Swap between the typing field and the "saved ✓ (change)" line without ever
+  // writing the code value into any text node. In link mode the field is
+  // already hidden by the template and never shown again, so this is a no-op.
+  function reflectAccessCodeSaved(saved) {
+    if (ACCESS_MODE !== "code") return;
+    if (accessField) accessField.hidden = saved;
+    if (accessSaved) accessSaved.hidden = !saved;
+  }
 
   // Judges get a link with ?code=… in it. Keep the code on the device and take
   // it out of the address bar so it is not in every screenshot and share.
@@ -105,13 +116,25 @@
       window.history.replaceState(null, "", url.pathname + (url.search || "") + url.hash);
     }
     const resolved = fromCookie || fromUrl || storedAccessCode();
+    // The input is type=password so a value in it is masked, but keep the field
+    // hidden entirely when there is a saved code: "saved ✓" with the change
+    // link means a judge arriving from a link does not see a password box at
+    // all, and no screen-reader output speaks the field.
     if (accessInput) accessInput.value = resolved;
+    reflectAccessCodeSaved(Boolean(resolved));
   }
 
   function currentAccessCode() {
     if (!ACCESS_REQUIRED) return "";
     // In link mode the field is hidden and the stored code is the only source.
-    const code = ACCESS_MODE === "code" && accessInput ? accessInput.value.trim() : storedAccessCode();
+    // In code mode, the stored code wins while the "saved ✓" row is shown
+    // (field hidden); typing happens only after the judge clicks "change".
+    let code;
+    if (ACCESS_MODE === "code" && accessField && !accessField.hidden && accessInput) {
+      code = accessInput.value.trim();
+    } else {
+      code = storedAccessCode();
+    }
     rememberAccessCode(code);
     return code;
   }
@@ -122,8 +145,14 @@
   function accessProblem(message) {
     show("lift");
     if (ACCESS_MODE === "code") {
-      $("#access-field").hidden = false;
-      if (accessInput) accessInput.focus();
+      reflectAccessCodeSaved(false);
+      if (accessInput) {
+        // Clear the stored value so the retype starts clean. The value lives
+        // in localStorage and the input; neither needs the old code any more.
+        accessInput.value = "";
+        rememberAccessCode("");
+        accessInput.focus();
+      }
     }
     fail($("#access-error"), message);
     $("#access-actions").hidden = !SAMPLE_AVAILABLE;
@@ -211,6 +240,12 @@
         break;
       case "sample":
         loadSample();
+        break;
+      case "change-code":
+        rememberAccessCode("");
+        if (accessInput) accessInput.value = "";
+        reflectAccessCodeSaved(false);
+        if (accessInput) accessInput.focus();
         break;
     }
   });

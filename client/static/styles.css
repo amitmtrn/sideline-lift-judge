@@ -390,6 +390,24 @@ input[type="text"]::placeholder {
   color: var(--chalk-faint);
 }
 
+/* An inline button that reads as a link — used by "change" on the saved
+   access-code row so the field never sits visibly on a page carrying a code. */
+button.link {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin-left: 6px;
+  font: inherit;
+  color: var(--accent);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+button.link:hover,
+button.link:focus-visible {
+  color: var(--chalk);
+}
+
 /* The primary action sits where a thumb already is. */
 .dock {
   position: sticky;
