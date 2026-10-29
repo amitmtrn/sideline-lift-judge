@@ -1,7 +1,7 @@
 {
   "version": 2,
   "source": "_source_download.mp4",
-  "created_at": "2026-10-29T19:24:33Z",
+  "created_at": "2026-10-29T19:51:21Z",
   "replays": {
     "1": "replay_01_clean.mp4"
   },
@@ -24,15 +24,15 @@
           "sideways_range_plate_diameters": 0.37,
           "rise_plate_diameters": 3.8
         },
-        "score": 4,
-        "band": "poor",
-        "max_horizontal_drift": "noticeable forward drift peaking at ~0.28 plate diameters during second pull/contact",
+        "score": 5,
+        "band": "mixed",
+        "max_horizontal_drift": "Noticeable forward drift during second pull/contact, ~0.28 plate diameters measured (inflated by oblique view)",
         "cues": [
           "keep the bar close to the body",
           "finish the legs/hips (triple extension) before the arms take over"
         ],
         "confidence": 0.5,
-        "notes": "Observations show continuous forward drift; measurement confirms notable drift though inflated by oblique view. Film square from the side; this angle may overstate forward drift.",
+        "notes": "Observations show forward drift throughout pull and catch; measurement confirms peak drift in second pull but likely inflated due to non-square camera angle. Film square from the side; this angle may overstate forward drift.",
         "warnings": [
           "Film square from the side; this angle may overstate forward drift."
         ],
@@ -83,11 +83,7 @@
               "source": "vision"
             },
             "why": "Full triple extension (hip, knee, ankle) not reached before the pull-under (second pull, 2.0–2.9 s). Finish the legs before the arms take over.",
-            "media": {
-              "still_url": null,
-              "clip_url": null,
-              "layout": "strip"
-            },
+            "media": null,
             "verified": false,
             "vision_only": true
           }
