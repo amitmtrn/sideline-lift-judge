@@ -1,0 +1,9 @@
+{
+  "name": "Sideline Lift Judge",
+  "description": "Public demo of the sideline lift judge.",
+  "stack": "heroku-22",
+  "buildpacks": [
+    { "url": "heroku-community/apt" },
+    { "url": "heroku/python" }
+  ]
+}
