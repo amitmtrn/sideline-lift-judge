@@ -36,13 +36,16 @@
   // Refusals after which trying the same clip again cannot help today.
   const NO_RETRY_REASONS = new Set(["daily_limit", "disabled", "access_code", "too_long"]);
 
-  // Pre-upload re-encode kicks in above this size, or whenever the user
-  // trimmed the clip. 6 MB on a gym 4G link takes ~30 s to upload, which is
-  // what Heroku's router timeout cuts off; smaller clips are left alone.
-  const PRE_UPLOAD_SHRINK_MIN_BYTES = 4 * 1024 * 1024;
-  const PRE_UPLOAD_MAX_LONG_SIDE = 720;
-  const PRE_UPLOAD_FPS = 30;
-  const PRE_UPLOAD_BITRATE = 2_500_000;
+  // Pre-upload re-encode kicks in only above this size — the point where
+  // a gym-4G upload risks Heroku's 30 s router timeout. Smaller clips go
+  // up untouched: a browser re-encode is lossy for the tracker (a 720 px
+  // copy of a 5.7 MB jerk seeded on the far plate and lost a third of the
+  // rise), so it is a last resort, not a default. The long side is kept
+  // at 1080 px and the capture runs at the source frame rate.
+  const PRE_UPLOAD_SHRINK_MIN_BYTES = 15 * 1024 * 1024;
+  const PRE_UPLOAD_MAX_LONG_SIDE = 1080;
+  const PRE_UPLOAD_MAX_FPS = 60;
+  const PRE_UPLOAD_BITRATE = 6_000_000;
 
   const state = {
     lift: "snatch",
@@ -546,7 +549,12 @@
       if (typeof canvas.captureStream !== "function") {
         throw new Error("canvas.captureStream not supported");
       }
-      const stream = canvas.captureStream(PRE_UPLOAD_FPS);
+      // Capture at up to 60 fps and paint once per *decoded source frame*
+      // (requestVideoFrameCallback) so the copy keeps the clip's own frame
+      // rate and timing; rAF is the fallback where rVFC is missing. A fixed
+      // 30 fps capture of a 60 fps clip halved the frames and threw the
+      // tracker's timestamps off by a third.
+      const stream = canvas.captureStream(PRE_UPLOAD_MAX_FPS);
       const recorder = new MediaRecorder(stream, {
         mimeType: mime,
         videoBitsPerSecond: PRE_UPLOAD_BITRATE,
@@ -562,8 +570,24 @@
 
       const windowDuration = end - start;
       const t0 = performance.now();
-      let rafToken = null;
+      const hasFrameCallback = typeof videoEl.requestVideoFrameCallback === "function";
+      let pending = null;
+      const schedule = () => {
+        pending = hasFrameCallback
+          ? videoEl.requestVideoFrameCallback(paintAndWatch)
+          : requestAnimationFrame(paintAndWatch);
+      };
+      const cancel = () => {
+        if (pending == null) return;
+        if (hasFrameCallback && typeof videoEl.cancelVideoFrameCallback === "function") {
+          videoEl.cancelVideoFrameCallback(pending);
+        } else {
+          cancelAnimationFrame(pending);
+        }
+        pending = null;
+      };
       const paintAndWatch = () => {
+        pending = null;
         try {
           ctx.drawImage(videoEl, 0, 0, canvasW, canvasH);
         } catch (_err) {
@@ -582,12 +606,12 @@
           if (recorder.state === "recording") recorder.stop();
           try { videoEl.pause(); } catch (_err) { /* ignore */ }
         } else {
-          rafToken = requestAnimationFrame(paintAndWatch);
+          schedule();
         }
       };
-      rafToken = requestAnimationFrame(paintAndWatch);
+      schedule();
       await stopped;
-      if (rafToken) cancelAnimationFrame(rafToken);
+      cancel();
 
       if (!chunks.length) throw new Error("no recorded data");
       const outType = mime.split(";")[0];
@@ -624,14 +648,15 @@
     $("#progress-actions").hidden = true;
     show("progress");
 
-    // Shrink the upload before it goes over gym 4G: trim to the window and
-    // scale the long side to ~720 px. The browser renderer falls back to
-    // the original file on any error — iOS Safari's MediaRecorder has
-    // enough edge cases to make the fallback a safe default, not a bug.
+    // Shrink the upload only when it is big enough to risk the router
+    // timeout: trim to the window and scale the long side to ≤ 1080 px.
+    // A small clip goes up as recorded and is trimmed on the server — the
+    // original file always tracks better than a browser re-encode. The
+    // re-encode falls back to the original on any error, too.
     let fileToUpload = state.file;
     let serverSideTrim = state.trimAvailable && state.duration && (state.start > 0.05 || state.end < state.duration - 0.05);
     const oversize = state.file.size > PRE_UPLOAD_SHRINK_MIN_BYTES;
-    if ((serverSideTrim || oversize) && typeof MediaRecorder !== "undefined") {
+    if (oversize && typeof MediaRecorder !== "undefined") {
       setStage("uploading", "Preparing the clip for upload…", 0.01);
       try {
         const trimStart = state.trimAvailable ? state.start : 0;
