@@ -10,11 +10,14 @@ Built for the Nebius × NVIDIA Global AI Hackathon. The judge is an **NVIDIA Nem
 **Nebius Token Factory**.
 
 **Demo:** <https://sideline-lift-judge-99d464f34df0.herokuapp.com/> — open it on a phone.
-**No code needed**: the sample result is one tap away, your own clip two. The live judge is
-`nvidia/nemotron-3-super-120b-a12b` (no Ultra fallback) so the bill stays bounded; a local
-checkout defaults to **Ultra (`nvidia/Nemotron-3-Ultra-550b-a55b`)** with a Super fallback.
-The demo has a daily limit and its counters reset when the dyno restarts (see
-[Limitations](#limitations)).\
+**No code needed**: the sample result is one tap away, your own clip two. The live
+judge is `nvidia/nemotron-3-super-120b-a12b` (no Ultra fallback) so the bill stays
+bounded; a local checkout defaults to **Ultra (`nvidia/Nemotron-3-Ultra-550b-a55b`)**
+with a Super fallback. The sample result is served from a Google Drive-hosted clip
+the dyno downloads once (see
+[Running the public demo](#running-the-public-demo-without-a-surprise-bill) for
+the `SAMPLE_CLIP_URL` env var). The demo has a daily limit and its counters reset
+when the dyno restarts (see [Limitations](#limitations)).\
 **Video:** TODO — paste the submission YouTube URL here (under three minutes).
 
 - Mobile-first web app, installable as a PWA — film or upload, trim, score, share
@@ -139,7 +142,36 @@ Environment variables:
 - Public-demo caps, off in a checkout and **on in the Docker image** — see
   [Running the public demo](#running-the-public-demo-without-a-surprise-bill):
   `DEMO_ACCESS_CODE`, `DEMO_DAILY_LIMIT`, `DEMO_IP_HOURLY_LIMIT`, `TRUSTED_PROXIES`,
-  `MAX_CONCURRENT_JOBS`, `MAX_CLIP_SECONDS`, `MAX_FRAMES`, `DEMO_SAMPLE_DIR`
+  `MAX_CONCURRENT_JOBS`, `MAX_CLIP_SECONDS`, `MAX_FRAMES`, `DEMO_SAMPLE_DIR`,
+  `SAMPLE_RESULT_URL`, `SAMPLE_CLIP_URL`
+- `SAMPLE_CLIP_URL` — Google Drive "anyone-with-link" URL for the sample video.
+  The dyno downloads the clip once (handling Drive's virus-scan interstitial),
+  caches it under `SAMPLE_CACHE_DIR` (default `/tmp/lift-judge-samples`), and
+  re-renders the annotated replay from the bar-path points stored in the
+  committed `demo_sample/sample.json`. No video is ever committed to the repo,
+  and no model call is made at serve time. `SAMPLE_RESULT_URL` — alternative to
+  the committed `sample.json`, for the case where the whole bundle is hosted
+  externally (JSON only, replay still rendered from `SAMPLE_CLIP_URL`).
+
+  Build the bundle once locally and commit the JSON + evidence stills:
+    ```
+    python tools/make_demo_sample.py \
+      "https://drive.google.com/uc?export=download&id=<file-id>" \
+      --lift clean --out demo_sample/
+    git add demo_sample/sample.json demo_sample/*.jpg   # NOT the mp4
+    git commit -m "Build demo sample"
+    ```
+  Then on Heroku:
+    ```
+    heroku config:set \
+      SAMPLE_CLIP_URL="https://drive.google.com/uc?export=download&id=<file-id>" \
+      DEMO_SAMPLE_DIR=demo_sample \
+      -a sideline-lift-judge-99d464f34df0
+    git push heroku main
+    ```
+  Verify: `curl https://<app>/api/config` reports `"sample_available": true`;
+  `curl -I https://<app>/api/sample` returns 200 and the daily-call counter
+  (visible via `/api/config`) stays unchanged after fetching the sample.
 
 Both stages request `chat_template_kwargs.enable_thinking = false`. The judge models are
 reasoning models: left to think, they spend the whole completion budget on reasoning, get cut
@@ -670,6 +702,24 @@ given: these are things that happened on the 39 clips, not hypotheticals.
   plus a drift figure tracked from one plate's apparent position. That figure is scaled by the
   plate's size, not calibrated against the scene, so parallax and an off-axis camera leak into
   it; there is no pose estimation. Treat the score as a coach's first read, not a lab result.
+- **The judge's score varies by about ±1 between runs on the same clip.** The vision model's
+  frame sampling and the judge's generation are both stochastic, so two scorings of the same
+  lift can disagree by a point. The measured drift stays stable to a centimetre or two; it is
+  the judge's rounded 1–10 verdict that moves. Shown here so a card is read as "around 6",
+  not "exactly 6".
+- **One scored clip is about three model calls** (vision observation + judge + repair/evidence),
+  so the live demo's daily cap of 150 model calls is roughly 50 clips before the sample becomes
+  the only answer. The counter is per-process and resets with the dyno; `heroku ps:restart`
+  resets it on purpose. (Measured: a single untrimmed clean upload took the counter from 150
+  to 147.)
+- **Portrait clips are capped at 60% confidence,** with a visible warning. Side-on from a tripod
+  (landscape) is what the rubric and the tracker expect; a vertical phone frame costs you both
+  the drift arc that reads at distance and the camera's own line of sight, so the judge is told
+  to doubt itself.
+- **Oblique camera angles overstate forward drift.** The tracker reports the plate's apparent
+  horizontal position; if the camera is not square to the side, an athlete stepping toward or
+  away from the lens reads as sideways travel and the confidence cap says so — but the
+  centimetre number is still the one the judge saw and can be visibly wrong on an off-axis clip.
 - **The centimetres assume a 450 mm competition bumper.** Training plates are smaller, so on
   them the figure overstates the drift by the same ratio. The plate-width figure is the one that
   does not depend on the assumption.
