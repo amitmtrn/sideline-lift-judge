@@ -298,9 +298,9 @@ def _draw_progressive_trace(
 ) -> None:
     """
     Draw the bar path up to `current_t` on `frame` in place, plus a moving
-    dot at the latest tracked point. The reference line and the furthest-
-    point marker are always drawn (constant for the clip), so a coach pausing
-    on any frame still sees them.
+    dot at the latest tracked point. The reference line is always drawn; the
+    furthest-point marker appears once the bar has reached that point and
+    stays, so a coach pausing on any later frame still sees it.
     """
     import cv2  # type: ignore
     import numpy as np  # type: ignore
@@ -324,11 +324,12 @@ def _draw_progressive_trace(
             cv2.LINE_AA,
         )
 
-    # Max-drift marker — constant across the clip (the whole path's answer),
-    # so the coach can anticipate it. Drawn before the live trace so the
-    # trace covers it as the lift reaches that moment.
+    # Max-drift marker — appears the moment the bar reaches its furthest
+    # point and stays for the rest of the clip. Drawing it from frame 0 gave
+    # the plot's answer away before the lift started; now it arrives with
+    # the bar. Drawn before the live trace so the trace sits on top of it.
     _drift, worst = bar_path.max_drift()
-    if worst is not None:
+    if worst is not None and current_t >= worst.t - 1e-6:
         wx, wy = int(worst.x * width), int(worst.y * height)
         for x in range(min(reference_x, wx), max(reference_x, wx), thickness * 6):
             cv2.line(

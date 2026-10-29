@@ -831,26 +831,19 @@ def _build_evidence(
     )
 
     result = []
-    # Two cues can map to the same issue, phase and time window — then the
-    # evidence (and the strip) would be identical, and a card showing both
-    # strips wastes space and misleads. The second one keeps its text but
-    # the evidence is dropped from the schema so the card renders a plain
-    # cue row instead of a duplicate strip.
-    seen_keys: set = set()
+    # Two cues about the same phase of the lift would get the same frames:
+    # the strip is cut from the phase's window, so a second strip for the
+    # same phase is the same picture twice. The first cue in a phase gets
+    # the strip; later cues in that phase keep their own text, evidence and
+    # "why" sentence but render without a picture. (Two cues really about
+    # different moments — a dip cue and a lockout cue — land in different
+    # phases and each get their own strip.)
+    seen_phases: set = set()
     for ec in evidenced:
-        evidence = ec.evidence
-        key = (
-            ec.issue,
-            ec.phase,
-            round(evidence.t_start_s, 2) if evidence else None,
-            round(evidence.t_end_s, 2) if evidence else None,
-        )
-        if key in seen_keys:
-            # Keep the cue text, strip the evidence (and thus the strip) so
-            # the client renders it as a plain follow-up cue, not a repeat.
-            result.append((ec.model_copy(update={"evidence": None, "media": None}), None))
+        if ec.phase in seen_phases:
+            result.append((ec.model_copy(update={"media": None}), None))
             continue
-        seen_keys.add(key)
+        seen_phases.add(ec.phase)
 
         still_path = str(_Path(replay_dir) / f"still_{lift_index}_{ec.id}.jpg")
         path = render_cue_strip(video_path=video_path, cue=ec, bar_path=bar_path, out_path=still_path)

@@ -1,5 +1,6 @@
 """Scoring pipeline: trim validation, the clean & jerk split, and failure paths."""
 import asyncio
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -215,6 +216,38 @@ def test_partial_judgment_when_judge_fails_but_tracker_tracked():
     assert "judge did not answer" in (judgment.notes or "")
     assert "14 cm" in (judgment.max_horizontal_drift or "")
     assert judgment.warnings and "unavailable" in judgment.warnings[0].lower()
+
+
+def test_second_cue_in_the_same_phase_keeps_its_evidence_but_not_the_strip(lift_video):
+    """
+    Two cues about the same phase would cut the same frames into two
+    strips. The first gets the picture; the second keeps its own evidence
+    and why-sentence and renders without one — never a duplicate image.
+    """
+    from server.services.measurement import BarPathMeasurement
+    from server.services.pipeline import _build_evidence
+    from server.utils.bar_track import BarPath, BarPoint
+
+    # A tracked path inside the 5 s synthetic clip, drifting forward mid-lift.
+    points = [
+        BarPoint(t=0.5 + 0.1 * i, x=0.40 + (0.08 if 8 <= i <= 12 else 0.0), y=0.85 - 0.035 * i)
+        for i in range(20)
+    ]
+    path = BarPath(points=points, plate_radius=0.10, coverage=1.0, sampled=20, frame_width=96, frame_height=72)
+    measurement = BarPathMeasurement(
+        tracked=True, coverage=1.0, points=20, max_drift_diameters=0.4,
+        max_drift_cm=18.0, drift_at_rise_fraction=0.6,
+    )
+    out_dir = str(Path(lift_video).parent)
+    cues = ["keep the bar close to the body", "finish the legs/hips (triple extension) before the arms take over"]
+    result = _build_evidence(cues, measurement, path, "clean", 0.5, 2.5, lift_video, out_dir, 1)
+    assert len(result) == 2
+    (first, first_path), (second, second_path) = result
+    assert first.phase == second.phase == "second_pull"
+    assert first_path is not None and first.media is not None
+    assert second_path is None and second.media is None
+    # The second cue is still a real cue, with its own evidence and sentence.
+    assert second.evidence is not None and second.why
 
 
 def test_the_judge_is_given_the_tracker_measurement(lift_video):

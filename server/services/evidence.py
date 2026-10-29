@@ -174,6 +174,51 @@ def _phase_time_range(
     return window_start + low * span, window_start + high * span
 
 
+# A dip has to go down by at least this much of the plate's diameter before
+# it counts as one; less than that is the bar settling in the rack.
+MIN_DIP_DEPTH_DIAMETERS = 0.25
+
+
+def _dip_window(bar_path: Optional[BarPath]) -> Optional[Tuple[float, float]]:
+    """
+    The jerk's dip, read off the tracked path: the last stretch where the
+    bar travelled *down* before its main drive up. Returns (t_start, t_end)
+    from where the descent began to its lowest point, or None when the path
+    shows no dip worth the name (then the caller falls back to the first
+    part of the window). Image y grows downward, so "down" is y increasing.
+    """
+    if bar_path is None or not bar_path.tracked or len(bar_path.points) < 6:
+        return None
+    points = bar_path.points
+    ys = [p.y for p in points]
+    top = min(range(len(points)), key=lambda i: ys[i])  # highest the bar got
+    if top < 2:
+        return None
+    bottom = max(range(top), key=lambda i: ys[i])  # lowest before the drive
+    # Walk back from the bottom while the bar was still on its way down —
+    # strictly, so the level hold in the rack before the dip ends the walk.
+    # One flat or wobbly step is forgiven (tracker jitter), two end it.
+    eps = 0.002
+    start = bottom
+    slack = 1
+    while start > 0:
+        descending = ys[start - 1] < ys[start] - eps
+        if not descending:
+            if slack == 0:
+                break
+            slack -= 1
+        start -= 1
+    # Do not count the forgiven flat step as part of the dip.
+    while start < bottom and ys[start + 1] <= ys[start] + eps:
+        start += 1
+    if not bar_path.frame_height or not bar_path.frame_width or not bar_path.plate_radius:
+        return None
+    diameter_norm = 2.0 * bar_path.plate_radius * bar_path.frame_width / bar_path.frame_height
+    if ys[bottom] - ys[start] < MIN_DIP_DEPTH_DIAMETERS * diameter_norm:
+        return None
+    return points[start].t, points[bottom].t
+
+
 def _time_window(
     bar_path: Optional[BarPath],
     measurement: BarPathMeasurement,
@@ -184,9 +229,15 @@ def _time_window(
     """
     The time window the cue's evidence is read from: a short span centred on
     the max-drift point *inside the cue's phase*. A cue tagged for the dip
-    cannot pull its number from the lockout, and vice versa.
+    cannot pull its number from the lockout, and vice versa. The dip itself
+    is found on the tracked path (the downward run just before the drive)
+    rather than assumed to be the opening slice of the window.
     """
     phase_t_start, phase_t_end = _phase_time_range(phase, window_start, window_end)
+    if phase == "jerk_dip":
+        dip = _dip_window(bar_path)
+        if dip is not None:
+            phase_t_start, phase_t_end = dip
     if bar_path is not None and bar_path.tracked and bar_path.points:
         ref = bar_path.reference_x
         in_phase = [p for p in bar_path.points if phase_t_start <= p.t <= phase_t_end]
@@ -204,6 +255,9 @@ def _time_window(
         centre = (t_start + t_end) / 2
         t_start = max(phase_t_start, centre - 0.5)
         t_end = min(phase_t_end, centre + 0.5)
+    # A phase shorter than the strip wants (a 0.3 s dip) is shown whole.
+    if t_end <= t_start:
+        t_start, t_end = phase_t_start, max(phase_t_end, phase_t_start + 0.1)
     return t_start, t_end
 
 

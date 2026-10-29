@@ -233,6 +233,30 @@ def test_render_uses_imageio_ffmpeg_and_burns_the_overlay(tmp_path, monkeypatch)
 # ---------- the bar-path trace (§18) ----------
 
 
+def test_furthest_marker_appears_only_once_the_bar_gets_there():
+    """
+    The orange furthest-point marker used to be drawn from frame 0, giving
+    the plot's answer away before the lift started. It must appear at the
+    moment the bar reaches that point and stay from then on.
+    """
+    import numpy as np  # type: ignore
+    from server.services.replay import DRIFT_ORANGE, _draw_progressive_trace
+
+    path = tracked_path(drift=0.2)
+    _drift, worst = path.max_drift()
+    assert worst is not None and worst.t == 0.5
+
+    def orange_pixels(at_t: float) -> int:
+        frame = np.full((720, 404, 3), 128, dtype=np.uint8)
+        _draw_progressive_trace(frame, path, at_t, 404, 720)
+        hit = np.all(frame == np.array(DRIFT_ORANGE[:3], dtype=np.uint8), axis=-1)
+        return int(hit.sum())
+
+    assert orange_pixels(0.3) == 0, "marker drawn before the bar reached its furthest point"
+    assert orange_pixels(0.5) > 0
+    assert orange_pixels(0.9) > 0
+
+
 def tracked_path(drift: float = 0.12):
     """A short rising path that loops sideways by `drift` of the frame width."""
     from server.utils.bar_track import BarPath, BarPoint

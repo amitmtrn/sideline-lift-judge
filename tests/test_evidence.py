@@ -237,6 +237,70 @@ class TestCueMapping:
         )
 
 
+def _jerk_path_with_dip() -> BarPath:
+    """
+    A jerk as the tracker sees it: bar level in the rack (y≈0.50) for half a
+    second, dips to y≈0.60 by t=0.8, drives to lockout (y≈0.15) by t=1.8,
+    holds. A small forward nudge inside the dip (t≈0.7) and a larger one at
+    the lockout (t≈2.1), so the lockout is the overall max-drift point.
+    """
+    points: List[BarPoint] = []
+    t = 0.0
+    while t <= 2.4 + 1e-9:
+        if t < 0.5:
+            y = 0.50
+        elif t < 0.8:
+            y = 0.50 + 0.10 * (t - 0.5) / 0.3
+        elif t < 1.8:
+            y = 0.60 - 0.45 * (t - 0.8) / 1.0
+        else:
+            y = 0.15
+        x = 0.40
+        if 0.6 <= t <= 0.8:
+            x += 0.03
+        if t >= 2.0:
+            x += 0.10
+        points.append(BarPoint(t=round(t, 3), x=x, y=y))
+        t += 0.05
+    return BarPath(
+        points=points, plate_radius=0.10, coverage=1.0, sampled=len(points),
+        frame_width=1080, frame_height=1920,
+    )
+
+
+class TestDipDetection:
+    def test_dip_window_is_the_descent_before_the_drive(self):
+        from server.services.evidence import _dip_window
+
+        dip = _dip_window(_jerk_path_with_dip())
+        assert dip is not None
+        start, end = dip
+        assert 0.4 <= start <= 0.55, start   # where the bar began to go down
+        assert 0.75 <= end <= 0.85, end      # the bottom of the dip
+
+    def test_dip_cue_evidence_sits_in_the_dip_not_the_drive(self):
+        path = _jerk_path_with_dip()
+        measurement = BarPathMeasurement(
+            tracked=True, coverage=1.0, points=len(path.points),
+            max_drift_diameters=0.45, max_drift_cm=20.0, drift_at_rise_fraction=1.0,
+        )
+        cues = ["dip straight down (no forward knee slide); bar stays over mid-foot"]
+        result = build_evidence_cues(cues, measurement, path, "jerk", 0.0, 2.4)
+        assert len(result) == 1
+        ec = result[0]
+        assert ec.issue == "jerk_dip_forward"
+        assert ec.evidence.t_start_s >= 0.4
+        assert ec.evidence.t_end_s <= 0.85, ec.evidence.t_end_s
+        # The number is the dip's own 3 cm nudge, not the 10 cm lockout drift.
+        assert ec.evidence.value is not None and ec.evidence.value < 8.0, ec.evidence.value
+
+    def test_a_path_without_a_dip_returns_none(self):
+        from server.services.evidence import _dip_window
+
+        assert _dip_window(_make_bar_path(8.0)) is None  # monotone rise, no dip
+        assert _dip_window(None) is None
+
+
 class TestPhaseRestrictedWindows:
     """The jerk sample bug: a 'dip straight down' cue read its evidence from
     the lockout at 4.4-4.9 s and claimed "48 cm forward". The dip is at the
