@@ -598,9 +598,13 @@ async def create_job(
 async def read_job(job_id: str):
     job = get_store().get(job_id)
     if job is None:
+        # The in-memory store loses jobs both when the TTL elapses and when
+        # the dyno restarts (`heroku config:set` cycles it). The second case
+        # is by far the more common one for a user polling a few seconds
+        # after submitting, so lead with it.
         raise HTTPException(
             status_code=404,
-            detail=f"That result has expired. Results are kept for {job_ttl_seconds() // 60} minutes.",
+            detail="The server restarted while this was running. Please try again.",
         )
     return JSONResponse(content=job.as_dict())
 

@@ -250,7 +250,7 @@ def test_the_uploaded_clip_is_deleted_once_scoring_ends(client, clip):
 def test_expired_job_explains_itself(client):
     response = client.get("/api/jobs/does-not-exist")
     assert response.status_code == 404
-    assert "expired" in response.json()["detail"]
+    assert "restarted" in response.json()["detail"]
 
 
 def test_replay_for_an_unknown_lift_is_404(client, clip):
