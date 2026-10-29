@@ -171,6 +171,17 @@ def _plural(lift: str) -> str:
     return f"{lift}s"
 
 
+def _number(target: str) -> str:
+    """
+    "≤ 4 cm" reads as a rubric limit on an evidence card, but inside the
+    sentence "Good cleans stay within about ≤ 4 cm here" the inequality
+    sign duplicates the "within about" and reads oddly. Strip the comparison
+    for the sentence; the card still carries the full target string.
+    """
+    stripped = target.lstrip("≤<= ").strip()
+    return stripped or target
+
+
 def _why_sentence(
     issue: str,
     lift: str,
@@ -188,7 +199,7 @@ def _why_sentence(
         if value_cm is not None:
             return (
                 f"Measured {value_cm:.0f} cm forward drift at {time_label}. "
-                f"Good {_plural(lift)} stay within about {target} here."
+                f"Good {_plural(lift)} stay within about {_number(target)} here."
             )
         return f"Bar appeared to drift forward during the {phase_label}. Keep it close."
 
@@ -338,7 +349,9 @@ def build_evidence_cues(
             t_start_s=t_start,
             t_end_s=t_end,
             metric="horizontal_drift_cm",
-            value=round(value_cm, 1) if value_cm is not None else None,
+            # Round to a whole centimetre so the number on the card, the
+            # label on the replay strip and the why sentence all agree.
+            value=float(round(value_cm)) if value_cm is not None else None,
             target=RUBRIC_TARGETS.get(issue, ""),
             source=source,
         )
