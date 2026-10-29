@@ -33,13 +33,19 @@ DEFAULT_JUDGE_MODEL = "nvidia/Nemotron-3-Ultra-550b-a55b"
 DEFAULT_JUDGE_FALLBACK_MODEL = "nvidia/nemotron-3-super-120b-a12b"
 
 # A healthy call answers in a few seconds (2-3 s measured for both stages), so
-# a hung one should not hold a phone for a minute: connect fast, read within
+# a hung one should not hold a phone for ever: connect fast, read within
 # NEBIUS_TIMEOUT_SECONDS. The judge has its fallback model for what fails.
+#
+# Previous default was 45 s; a live jerk job hit it on the primary and the
+# fallback both, so judges saw "The model service took too long to answer".
+# 90 s leaves headroom for the primary to actually finish, while still fitting
+# inside the default JOB_TIMEOUT_SECONDS (120) with room for other stages.
 CONNECT_TIMEOUT_SECONDS = 10.0
-DEFAULT_READ_TIMEOUT_SECONDS = 45.0
-# Transient provider trouble gets exactly one more try after a short pause.
+DEFAULT_READ_TIMEOUT_SECONDS = 90.0
+# Transient provider trouble (and a provider-side timeout the client could not
+# detect in time) gets exactly one more try after a short pause.
 RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
-RETRY_BACKOFF_SECONDS = 1.0
+RETRY_BACKOFF_SECONDS = 1.5
 # Status codes that mean "I do not know that parameter": the one case where
 # dropping the no-thinking hint and asking again makes sense.
 UNKNOWN_PARAMETER_STATUS = frozenset({400, 422})
@@ -161,18 +167,31 @@ class NebiusChatClient:
         async def attempt(body: Dict[str, Any]):
             if self.meter is not None:
                 self.meter()
-            # The request blocks, so it runs on a worker thread.
-            return await asyncio.to_thread(post, body)
+            # The request blocks, so it runs on a worker thread. A timeout or
+            # a dropped connection is returned as a (None, exc) sentinel so
+            # the retry loop below treats it like a 5xx — Token Factory does
+            # on-prem queueing that occasionally runs past our read timeout.
+            try:
+                return await asyncio.to_thread(post, body), None
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                return None, exc
 
-        response = await attempt(payload)
-        if response.status_code in UNKNOWN_PARAMETER_STATUS and extra_body:
+        response, timeout_exc = await attempt(payload)
+        if response is not None and response.status_code in UNKNOWN_PARAMETER_STATUS and extra_body:
             # The provider rejected a parameter it does not know: ask again
             # without the no-thinking hint.
             payload = base_payload
-            response = await attempt(payload)
-        if response.status_code in RETRYABLE_STATUS:
+            response, timeout_exc = await attempt(payload)
+        retryable = timeout_exc is not None or (
+            response is not None and response.status_code in RETRYABLE_STATUS
+        )
+        if retryable:
             await asyncio.sleep(RETRY_BACKOFF_SECONDS)
-            response = await attempt(payload)
+            response, timeout_exc = await attempt(payload)
+        if timeout_exc is not None:
+            # One retry wasn't enough; let the caller fall back to the
+            # second judge model or surface a partial result.
+            raise timeout_exc
         if response.status_code != 200:
             raise NebiusAPIError(response.status_code, str(response.text)[:500])
         data = response.json()

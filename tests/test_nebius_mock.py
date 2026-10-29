@@ -63,6 +63,41 @@ def test_a_busy_provider_gets_exactly_one_more_try(monkeypatch):
     assert failure.value.status == 503 and post.call_count == 2
 
 
+def test_a_timeout_gets_exactly_one_more_try(monkeypatch):
+    """A ReadTimeout from Token Factory is treated like a 503 — one retry."""
+    import requests
+
+    from server.services import nebius_client
+
+    monkeypatch.setattr(nebius_client, "RETRY_BACKOFF_SECONDS", 0.0)
+    client = NebiusChatClient(api_key="k", base_url="https://example.test/v1")
+
+    # First attempt times out; second succeeds — the client should recover.
+    attempt = {"n": 0}
+
+    def side_effect(*args, **kwargs):  # noqa: ARG001
+        attempt["n"] += 1
+        if attempt["n"] == 1:
+            raise requests.exceptions.ReadTimeout("provider read timeout")
+        return _reply(200)
+
+    with patch("server.services.nebius_client.requests.post", side_effect=side_effect) as post:
+        text = asyncio.run(client.create_chat_completion(messages=[{"role": "user", "content": "hi"}], model="m"))
+    assert text == '{"ok":true}' and post.call_count == 2
+
+    # Two timeouts in a row surface the exception, so the fallback judge /
+    # partial-result path upstream has something to react to.
+    import pytest
+
+    with patch(
+        "server.services.nebius_client.requests.post",
+        side_effect=requests.exceptions.ReadTimeout("provider read timeout"),
+    ) as post:
+        with pytest.raises(requests.exceptions.ReadTimeout):
+            asyncio.run(client.create_chat_completion(messages=[{"role": "user", "content": "hi"}], model="m"))
+    assert post.call_count == 2
+
+
 def test_only_an_unknown_parameter_drops_the_no_thinking_hint(monkeypatch):
     from server.services import nebius_client
 
