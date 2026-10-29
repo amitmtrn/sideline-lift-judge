@@ -94,9 +94,80 @@ def probe_video(video_path: str) -> VideoInfo:
                 info.duration_sec = max(0.0, float((data.get("format") or {}).get("duration") or 0.0))
             except (TypeError, ValueError):
                 info.duration_sec = 0.0
+            format_name = str((data.get("format") or {}).get("format_name") or "").lower()
             if info.duration_sec > 0 or info.width:
+                # A MediaRecorder file (webm/matroska) carries no reliable
+                # duration or frame rate in its header; a container that
+                # claims none at all is in the same boat. Read the clock off
+                # the decoded frames in those cases.
+                suspect = (
+                    info.duration_sec <= 0
+                    or info.fps <= 0
+                    or info.fps > 240
+                    or "webm" in format_name
+                    or "matroska" in format_name
+                )
+                if suspect:
+                    _reconcile_with_decoded(info, video_path)
                 return info
     return _probe_with_opencv(video_path)
+
+
+def _measure_by_decoding(video_path: str, max_seconds: float = 60.0) -> Optional[tuple]:
+    """
+    Walk the frames and return (duration_sec, fps, frames) from the decoder's
+    own presentation times — the clock the tracker, the trim and the replay
+    actually run on. Container metadata is what a browser's MediaRecorder
+    gets wrong (webm with no duration, a nominal 30 fps on a 60 fps capture);
+    the frames themselves cannot lie about when they were shown. Bounded at
+    `max_seconds` of media so a long upload does not stall the request.
+    """
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return None
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        cap.release()
+        return None
+    first_t: Optional[float] = None
+    last_t = 0.0
+    count = 0
+    try:
+        while cap.grab():
+            t = round(cap.get(cv2.CAP_PROP_POS_MSEC) / 1000.0, 6)
+            if first_t is None:
+                first_t = t
+            # A decoder that reports no clock at all (0.0 on every frame)
+            # cannot be measured this way; fall back to what we had.
+            if count and t <= last_t and t == 0.0:
+                return None
+            last_t = max(last_t, t)
+            count += 1
+            if first_t is not None and last_t - first_t > max_seconds:
+                break
+    finally:
+        cap.release()
+    if count < 2 or first_t is None:
+        return None
+    span = last_t - first_t
+    if span <= 0:
+        return None
+    fps = (count - 1) / span
+    duration = last_t + 1.0 / fps
+    return max(0.0, duration), max(0.0, fps), count
+
+
+def _reconcile_with_decoded(info: "VideoInfo", video_path: str) -> None:
+    """Replace a suspect container duration/fps with what the frames say."""
+    measured = _measure_by_decoding(video_path)
+    if measured is None:
+        return
+    duration, fps, _frames = measured
+    if duration > 0:
+        info.duration_sec = duration
+    if fps > 0:
+        info.fps = fps
 
 
 def _probe_with_opencv(video_path: str) -> VideoInfo:
@@ -123,7 +194,7 @@ def _probe_with_opencv(video_path: str) -> VideoInfo:
     if not (width and height):
         return VideoInfo()
     duration = frame_count / fps if fps > 0 and frame_count > 0 else 0.0
-    return VideoInfo(
+    info = VideoInfo(
         width=width,
         height=height,
         rotation=0,
@@ -131,6 +202,12 @@ def _probe_with_opencv(video_path: str) -> VideoInfo:
         fps=max(0.0, fps),
         probed=True,
     )
+    # Without ffprobe (the Heroku dyno) this is the only probe, and the
+    # container's frame count and rate are exactly what a MediaRecorder
+    # upload gets wrong. Always read the clock off the decoded frames here;
+    # the clip-length cap keeps the pass short.
+    _reconcile_with_decoded(info, video_path)
+    return info
 
 
 def _is_display_matrix(side_data_type: object) -> bool:

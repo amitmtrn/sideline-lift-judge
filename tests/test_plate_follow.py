@@ -184,6 +184,74 @@ def test_full_pipeline_follows_the_rising_plate_not_the_static_one(tmp_path):
     )
 
 
+def _write_two_plate_bar(path, *, scale: float = 1.0, duration: float = 2.5):
+    """
+    A bar seen from the side with both plates in view: the near plate large,
+    the far plate smaller (perspective), rising together on the same y(t),
+    plus a plate parked on a stand. `scale` < 1 writes a downscaled copy —
+    what a browser re-encode of the same clip looks like to the tracker.
+    """
+    import cv2  # type: ignore
+
+    width, height = int(round(WIDTH * scale)), int(round(HEIGHT * scale))
+    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (width, height))
+    assert writer.isOpened()
+    rng = np.random.default_rng(11)
+    backdrop = np.clip(rng.normal(80, 6, (HEIGHT, WIDTH, 3)), 0, 255).astype(np.uint8)
+    near_x, far_x = 120, 250
+    near_r, far_r = 40, 26
+    try:
+        total = int(duration * FPS)
+        for index in range(total):
+            fraction = index / (total - 1)
+            frame = backdrop.copy()
+            _plate(frame, 320, HEIGHT - 70, 36, (150, 90, 30))  # parked on a stand
+            rise = min(1.0, max(0.0, (fraction - 0.2) / 0.6))
+            y = HEIGHT - 90 - rise * (HEIGHT - 260)
+            drift = 30 * np.sin(np.pi * rise)
+            _plate(frame, far_x + drift, y, far_r, (40, 40, 180))   # far plate, smaller
+            _plate(frame, near_x + drift, y, near_r, (60, 160, 60))  # near plate, larger
+            if scale != 1.0:
+                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+            writer.write(frame)
+    finally:
+        writer.release()
+    return path, near_x / WIDTH, near_r / WIDTH
+
+
+def test_downscaled_copy_picks_the_same_near_plate(tmp_path):
+    """
+    The live bug: a browser-re-encoded 720 px copy of a jerk clip seeded the
+    tracker on the far (smaller) plate; the original picked the near one.
+    Both plates rise identically because they are on the same bar, so the
+    choice must come down to size — and it must come out the same way on a
+    downscaled copy, with a similar rise and drift.
+    """
+    from server.utils.plate_follow import follow_bar_path
+
+    full, near_x_norm, near_r_norm = _write_two_plate_bar(str(tmp_path / "full.mp4"))
+    small, _, _ = _write_two_plate_bar(str(tmp_path / "small.mp4"), scale=0.6)
+
+    results = []
+    for clip in (full, small):
+        path = follow_bar_path(clip, 0.0, 2.5)
+        assert path.tracked, path.reason
+        start_x = np.median([p.x for p in path.points[:6]])
+        # On the near plate (x≈0.33 of the width), not the far one (≈0.69).
+        assert abs(start_x - near_x_norm) < 0.08, f"{clip}: started at x={start_x:.2f}, near plate is at {near_x_norm:.2f}"
+        assert abs(path.plate_radius - near_r_norm) < 0.35 * near_r_norm, f"{clip}: radius {path.plate_radius:.3f} vs near {near_r_norm:.3f}"
+        results.append(path)
+
+    full_path, small_path = results
+    # Same lift, same answer: rise within 10 %, drift within a quarter (the
+    # cm figure divides by the plate radius, and Hough reads a 24 px plate a
+    # pixel or two small). The live bug this guards against was off by half.
+    assert abs(full_path.vertical_travel - small_path.vertical_travel) < 0.1 * full_path.vertical_travel
+    full_drift, small_drift = full_path.drift_cm(), small_path.drift_cm()
+    assert full_drift is not None and small_drift is not None
+    assert abs(full_drift - small_drift) < max(4.0, 0.25 * full_drift), (full_drift, small_drift)
+
+
 def test_axis_ratio_is_measured_from_the_plate_ellipse(tmp_path):
     """
     A plate drawn as an ellipse (short vertical axis = oblique view) must

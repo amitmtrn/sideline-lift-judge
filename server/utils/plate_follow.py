@@ -76,6 +76,10 @@ class _Seed:
     # trail. A plate filmed square to the side has values close to 1; an
     # oblique view flattens the ellipse so the median drops.
     axis_ratios: List[float] = field(default_factory=list)
+    # How many of the opening frames found this same circle. A plate on the
+    # bar turns up in every seed frame; a one-off detection (a hub, a rim of
+    # the far plate catching the light) does not.
+    sightings: int = 1
     checks: int = 0
     found: int = 0
 
@@ -112,6 +116,7 @@ def _seeds(frames, hint: Optional[Tuple[float, float, float, float]]) -> List[_S
     def add(frame: int, x: float, y: float, r: float) -> None:
         for other in seeds:
             if (x - other.x) ** 2 + (y - other.y) ** 2 < (0.5 * other.radius) ** 2 and abs(r - other.radius) < 0.3 * other.radius:
+                other.sightings += 1
                 return
         seeds.append(_Seed(frame, float(x), float(y), float(r)))
 
@@ -395,9 +400,20 @@ def follow_bar_path(
         # Back from where they were found to the start of the window.
         _follow(frames, range(max(s.frame for s in late), -1, -1), late)
 
-    def score(seed: _Seed) -> Tuple[float, float]:
+    # Both plates on the bar rise together, so rise alone cannot tell the
+    # near plate from the far one — and on a downscaled upload the far
+    # (smaller) plate sometimes snaps to Hough circles a little more often
+    # and used to win on support. Weight by radius so the nearest, largest
+    # plate wins when rises are comparable; a plate on a stand or a head
+    # still scores zero because it does not rise.
+    largest = max(seed.radius for seed in seeds) or 1.0
+
+    def score(seed: _Seed) -> Tuple[float, int, float]:
         rise = _rise(seed.track) / height
-        return (rise * seed.support if seed.support >= MIN_SUPPORT and rise >= MIN_RISE else 0.0, seed.radius)
+        if seed.support < MIN_SUPPORT or rise < MIN_RISE:
+            return (0.0, seed.sightings, seed.radius)
+        size_weight = 0.5 + 0.5 * (seed.radius / largest)
+        return (rise * seed.support * size_weight, seed.sightings, seed.radius)
 
     best = max(seeds, key=score)
     if score(best)[0] <= 0.0:

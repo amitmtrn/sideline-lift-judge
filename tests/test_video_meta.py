@@ -105,6 +105,29 @@ def test_probe_reads_a_real_file(lift_video):
     assert not info.is_portrait
 
 
+def test_duration_and_fps_are_read_off_the_decoded_frames(tmp_path):
+    """
+    A browser MediaRecorder upload carries no trustworthy duration or frame
+    rate in its container. The decoder's own presentation times are the
+    clock everything else runs on, so that is what the probe reports.
+    """
+    from tests.conftest import write_lift_video
+    from server.utils.video_meta import _measure_by_decoding, _probe_with_opencv
+
+    clip = write_lift_video(str(tmp_path / "sixty.mp4"), duration=2.0, fps=60)
+    measured = _measure_by_decoding(clip)
+    assert measured is not None
+    duration, fps, frames = measured
+    assert abs(fps - 60.0) < 3.0, fps
+    assert abs(duration - 2.0) < 0.1, duration
+    assert frames == 120
+
+    info = _probe_with_opencv(clip)
+    assert info.probed
+    assert abs(info.fps - 60.0) < 3.0
+    assert abs(info.duration_sec - 2.0) < 0.1
+
+
 def test_probe_of_a_missing_file_degrades(tmp_path):
     info = probe_video(str(tmp_path / "nope.mp4"))
     assert not info.probed
