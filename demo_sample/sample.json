@@ -1,7 +1,7 @@
 {
   "version": 2,
   "source": "_source_download.mp4",
-  "created_at": "2026-10-29T15:38:27Z",
+  "created_at": "2026-10-29T16:23:23Z",
   "replays": {
     "1": "replay_01_clean.mp4"
   },
@@ -24,15 +24,15 @@
           "sideways_range_plate_diameters": 0.39,
           "rise_plate_diameters": 3.8
         },
-        "score": 6,
+        "score": 5,
         "band": "mixed",
-        "max_horizontal_drift": "Noticeable forward drift of ~0.28 plate diameters (~12 cm) occurring during the second pull/contact phase.",
+        "max_horizontal_drift": "The bar drifted forward up to 0.28 plate diameters (~12 cm) during the second pull/contact phase.",
         "cues": [
           "keep the bar close to the body",
-          "finish the legs/hips (triple extension) before the arms take over"
+          "bar close into the hips; contact then explode up"
         ],
         "confidence": 0.85,
-        "notes": "Observations confirm consistent forward bar path from setup through catch; measurement quantifies peak drift at 0.28 diameters in second pull, aligning with 'noticeable drift' band.",
+        "notes": "Observations consistently describe forward bar travel throughout all phases; measurement confirms peak drift occurred in second pull/contact.",
         "warnings": [],
         "annotated_video_url": "/api/sample/replay/1.mp4",
         "judged_by": "nvidia/nemotron-3-super-120b-a12b",
@@ -53,11 +53,11 @@
               "t_start_s": 1.666667,
               "t_end_s": 2.666667,
               "metric": "horizontal_drift_cm",
-              "value": 12.5,
+              "value": 12.0,
               "target": "≤ 4 cm",
               "source": "tracker"
             },
-            "why": "Measured 12 cm forward drift at 1.7–2.7 s. Good cleans stay within about ≤ 4 cm here.",
+            "why": "Measured 12 cm forward drift at 1.7–2.7 s. Good cleans stay within about 4 cm here.",
             "media": {
               "still_url": null,
               "clip_url": null,
@@ -68,26 +68,15 @@
           },
           {
             "id": "c2",
-            "text": "finish the legs/hips (triple extension) before the arms take over",
+            "text": "bar close into the hips; contact then explode up",
             "phase": "second_pull",
-            "issue": "incomplete_extension",
+            "issue": "bar_forward_drift",
             "frame_refs": [],
-            "evidence": {
-              "t_start_s": 1.666667,
-              "t_end_s": 2.666667,
-              "metric": null,
-              "value": null,
-              "target": "full hip/knee/ankle extension before pull-under",
-              "source": "vision"
-            },
-            "why": "Full triple extension (hip, knee, ankle) not reached before the pull-under (second pull, 1.7–2.7 s). Finish the legs before the arms take over.",
-            "media": {
-              "still_url": null,
-              "clip_url": null,
-              "layout": "strip"
-            },
-            "verified": false,
-            "vision_only": true
+            "evidence": null,
+            "why": "Measured 12 cm forward drift at 1.7–2.7 s. Good cleans stay within about 4 cm here.",
+            "media": null,
+            "verified": true,
+            "vision_only": false
           }
         ],
         "models": {
