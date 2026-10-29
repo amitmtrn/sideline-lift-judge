@@ -79,7 +79,24 @@
     }
   }
 
+  // The server redirects `/?code=X` to `/` and leaves the code in a short
+  // cookie, so the address bar never shows it. A really old browser that
+  // somehow lands on `/?code=…` directly is still handled by the URL branch.
+  function readAccessCodeCookie() {
+    const match = document.cookie.match(/(?:^|; )lj_access_code=([^;]+)/);
+    return match ? decodeURIComponent(match[1]).trim() : "";
+  }
+
+  function clearAccessCodeCookie() {
+    document.cookie = "lj_access_code=; Max-Age=0; Path=/; SameSite=Lax";
+  }
+
   function adoptAccessCodeFromUrl() {
+    const fromCookie = readAccessCodeCookie();
+    if (fromCookie) {
+      rememberAccessCode(fromCookie);
+      clearAccessCodeCookie();
+    }
     const url = new URL(window.location.href);
     const fromUrl = (url.searchParams.get("code") || "").trim();
     if (fromUrl) {
@@ -87,7 +104,8 @@
       url.searchParams.delete("code");
       window.history.replaceState(null, "", url.pathname + (url.search || "") + url.hash);
     }
-    if (accessInput) accessInput.value = fromUrl || storedAccessCode();
+    const resolved = fromCookie || fromUrl || storedAccessCode();
+    if (accessInput) accessInput.value = resolved;
   }
 
   function currentAccessCode() {

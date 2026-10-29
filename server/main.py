@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -336,6 +336,24 @@ def _public_config() -> Dict[str, Any]:
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    # Link-mode judges open the page with `?code=…` on the URL. Stripping it
+    # client-side with history.replaceState leaves it visible until the JS
+    # runs — long enough for a screenshot to leak it. Hand the code to a
+    # short cookie the page reads once and redirect to a clean URL instead,
+    # so the address bar never shows the secret.
+    code = (request.query_params.get("code") or "").strip()
+    if code:
+        response = RedirectResponse(url=request.url.path, status_code=303)
+        response.set_cookie(
+            key="lj_access_code",
+            value=code,
+            max_age=120,
+            path="/",
+            secure=request.url.scheme == "https",
+            httponly=False,
+            samesite="lax",
+        )
+        return response
     return templates.TemplateResponse(
         request,
         "index.html",
