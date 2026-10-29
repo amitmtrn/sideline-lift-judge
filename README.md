@@ -11,9 +11,11 @@ Built for the Nebius × NVIDIA Global AI Hackathon. The judge is an **NVIDIA Nem
 
 **Demo:** <https://sideline-lift-judge-99d464f34df0.herokuapp.com/> — open it on a phone.
 **No code needed**: the sample result is one tap away, your own clip two. The live judge is
-Nemotron 3 Super (no Ultra fallback) so the bill stays bounded; the demo has a daily limit and
-its counters reset when the dyno restarts (see [Limitations](#limitations)).\
-**Video:** PASTE-YOUTUBE-URL-HERE — the submission video, under three minutes.
+`nvidia/nemotron-3-super-120b-a12b` (no Ultra fallback) so the bill stays bounded; a local
+checkout defaults to **Ultra (`nvidia/Nemotron-3-Ultra-550b-a55b`)** with a Super fallback.
+The demo has a daily limit and its counters reset when the dyno restarts (see
+[Limitations](#limitations)).\
+**Video:** TODO — paste the submission YouTube URL here (under three minutes).
 
 - Mobile-first web app, installable as a PWA — film or upload, trim, score, share
 - Two kinds of evidence, one judge: a local plate tracker **measures** the bar path and a vision
