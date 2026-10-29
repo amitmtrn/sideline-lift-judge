@@ -234,6 +234,52 @@ def _rise(track: List[Optional[Tuple[float, float]]]) -> float:
     return best
 
 
+# A plate cannot physically translate more than ~2 radii between consecutive
+# processed frames (we're at <= 60 fps). A gap larger than that is the track
+# hopping to another object — usually a static plate on a stand next to the
+# bar — so we treat it as a segment break and discard everything up to and
+# including the last jump. `BarPath.reference_x` is the median of the first
+# sixth of the surviving points, so a trail that was briefly on another
+# object before snapping onto the bar no longer anchors the dashed reference
+# line at the wrong x. The surviving segment usually begins with the bar on
+# the floor (if the hop happened in the setup) or right at lift-off, so the
+# reference line lands where a coach would eyeball it either way.
+MAX_JUMP_RADII = 2.0
+
+
+def _trim_pre_liftoff(
+    track: List[Optional[Tuple[float, float]]],
+    radius: float,
+) -> List[Optional[Tuple[float, float]]]:
+    """
+    Return the track with any leading points before the last big
+    consecutive-frame jump masked to None. See the MAX_JUMP_RADII comment
+    above for why. A clean trail with no jumps is returned unchanged.
+    """
+    valid = [(index, point) for index, point in enumerate(track) if point is not None]
+    if len(valid) < 4 or radius <= 0:
+        return track
+
+    max_jump_sq = (MAX_JUMP_RADII * radius) ** 2
+    start_pos = 0
+    for pos in range(1, len(valid)):
+        _, prev = valid[pos - 1]
+        _, curr = valid[pos]
+        dx = curr[0] - prev[0]
+        dy = curr[1] - prev[1]
+        if dx * dx + dy * dy > max_jump_sq:
+            start_pos = pos
+    if start_pos == 0:
+        return track
+
+    liftoff_index = valid[start_pos][0]
+    cleaned: List[Optional[Tuple[float, float]]] = [None] * len(track)
+    for index, point in valid:
+        if index >= liftoff_index:
+            cleaned[index] = point
+    return cleaned
+
+
 def follow_bar_path(
     video_path: str,
     start_sec: float,
@@ -274,6 +320,11 @@ def follow_bar_path(
             sampled=len(frames), frame_width=width, frame_height=height,
             reason="nothing followed through the window rose like a bar and stayed round like a plate",
         )
+    # Drop the pre-lift-off tail: a hop from a static plate onto the bar
+    # leaves a leading segment at the stand's x which is where the dashed
+    # reference line would anchor. The lift-off trim pins it at the bar's
+    # actual starting line instead.
+    best.track = _trim_pre_liftoff(best.track, best.radius)
     keep_every = max(1, int(round((len(frames) / max(1e-6, frames[-1][0] - frames[0][0])) / OUTPUT_FPS)))
     points = [
         BarPoint(t=frames[i][0], x=p[0] / width, y=p[1] / height)
@@ -281,10 +332,17 @@ def follow_bar_path(
         if p is not None and i % keep_every == 0
     ]
     followed = sum(1 for p in best.track if p is not None)
+    # Coverage over the lift window the trail covers, not the whole analysis
+    # span — a trail trimmed to post-lift-off must not be penalised for the
+    # setup frames it deliberately left out.
+    if points:
+        span_frames = sum(1 for ft, _ in frames if points[0].t <= ft <= points[-1].t)
+    else:
+        span_frames = len(frames)
     return BarPath(
         points=_smooth(points),
         plate_radius=best.radius / width,
-        coverage=followed / len(frames),
+        coverage=followed / max(1, span_frames),
         sampled=len(frames),
         frame_width=width,
         frame_height=height,

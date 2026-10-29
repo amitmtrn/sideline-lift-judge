@@ -91,6 +91,99 @@ def test_the_follower_is_seeded_by_a_hint_it_does_not_have_to_trust(tmp_path):
     assert path.tracked and path.vertical_travel > 0.5
 
 
+def test_trail_that_hops_from_a_static_plate_is_trimmed_at_the_jump(tmp_path):
+    """
+    When the pre-lift tracker was briefly on a static plate (a loaded plate on
+    a stand next to the bar), the hop onto the bar leaves a single-frame leap
+    bigger than two plate radii. The jump is detected and everything before
+    it is dropped, so the dashed reference line anchors at the bar's actual
+    x on the floor — not the stand's x in the foreground.
+    """
+    from server.utils.plate_follow import _trim_pre_liftoff
+
+    radius = 20.0
+    static_x = 300.0
+    bar_floor_x = 150.0
+    # 20 frames on the static plate, one big jump to the bar at the floor,
+    # then the bar rises for 30 frames.
+    track = [(static_x, 300.0) for _ in range(20)]
+    track.append((bar_floor_x, 300.0))  # the jump — ~150 px away from the stand
+    track += [(bar_floor_x + 2 * i, 300.0 - 5 * i) for i in range(1, 30)]
+
+    cleaned = _trim_pre_liftoff(track, radius)
+    kept = [(i, p) for i, p in enumerate(cleaned) if p is not None]
+    # Everything up to and including the hop onto the bar is gone.
+    assert kept[0][0] == 20, "the first kept frame must be the one just after the jump"
+    # Reference x anchors on the bar's floor x, not the stand's.
+    assert abs(kept[0][1][0] - bar_floor_x) < 1e-6
+
+
+def test_a_clean_trail_without_jumps_is_passed_through_unchanged(tmp_path):
+    """
+    A trail that stayed on the same plate the whole time must not lose any
+    frames — reference_x needs the first-sixth median across the setup, which
+    is where the bar's resting x lives.
+    """
+    from server.utils.plate_follow import _trim_pre_liftoff
+
+    radius = 20.0
+    # Still at floor for a bit, then a smooth rise.
+    track = [(150.0, 300.0) for _ in range(10)]
+    track += [(150.0 + i * 0.5, 300.0 - i * 4) for i in range(1, 40)]
+    cleaned = _trim_pre_liftoff(track, radius)
+    assert cleaned == track
+
+
+def test_full_pipeline_follows_the_rising_plate_not_the_static_one(tmp_path):
+    """
+    A synthetic clip with one static plate on a stand and one plate that
+    rises: the trace must follow the rising plate, and `reference_x` must
+    land on the bar's lift-off x — not the stand's x.
+    """
+    import cv2  # type: ignore
+    from server.utils.plate_follow import follow_bar_path
+
+    clip = str(tmp_path / "stand_plus_rise.mp4")
+    writer = cv2.VideoWriter(clip, cv2.VideoWriter_fourcc(*"mp4v"), FPS, (WIDTH, HEIGHT))
+    assert writer.isOpened()
+    rng = np.random.default_rng(5)
+    backdrop = np.clip(rng.normal(80, 6, (HEIGHT, WIDTH, 3)), 0, 255).astype(np.uint8)
+    stand_x = 280
+    bar_rest_x = 150
+    bar_rest_y = HEIGHT - 90
+    try:
+        duration = 2.5
+        total = int(duration * FPS)
+        for index in range(total):
+            fraction = index / (total - 1)
+            frame = backdrop.copy()
+            # The static plate on the stand, unmoving — just like the loaded
+            # plate parked beside the lifter.
+            _plate(frame, stand_x, HEIGHT - 70, PLATE_R + 4, (150, 90, 30))
+            # The bar: still until fraction 0.2, then rises straight up.
+            rise = min(1.0, max(0.0, (fraction - 0.2) / 0.6))
+            bar_y = bar_rest_y - rise * (HEIGHT - 320)
+            _plate(frame, bar_rest_x, bar_y, PLATE_R, (60, 60, 200))
+            writer.write(frame)
+    finally:
+        writer.release()
+
+    path = follow_bar_path(clip, 0.0, duration)
+    assert path.tracked, path.reason
+    # The chosen trail is the bar's: every point should be near x=bar_rest_x,
+    # nowhere near the stand's x.
+    median_x_px = np.median([p.x * WIDTH for p in path.points])
+    assert abs(median_x_px - bar_rest_x) < 10, (
+        f"trail should follow the bar at x={bar_rest_x}, got median {median_x_px:.1f}"
+    )
+    assert abs(median_x_px - stand_x) > 50
+    # Reference line pinned at the bar's lift-off column, within a few pixels.
+    reference_px = path.reference_x * WIDTH
+    assert abs(reference_px - bar_rest_x) < 6, (
+        f"reference_x should pin on the bar, got {reference_px:.1f}"
+    )
+
+
 def test_nothing_rising_is_not_called_a_bar(tmp_path):
     import cv2  # type: ignore
     from server.utils.plate_follow import follow_bar_path
