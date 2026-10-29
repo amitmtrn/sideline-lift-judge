@@ -28,9 +28,10 @@ CAP_BAR_NOT_VISIBLE = 0.4
 CAP_OFF_AXIS = 0.5
 CAP_VERDICT_DISAGREES = 0.5
 CAP_OCCLUSION = 0.55
-CAP_PORTRAIT = 0.6
 CAP_UNCLEAR_PHASES = 0.6
 CAP_SHORT_CLIP = 0.6
+CAP_FRAME_EDGE = 0.6
+CAP_SMALL_PLATE = 0.65
 CAP_NO_TRACE = 0.65
 CAP_FEW_FRAMES = 0.7
 CAP_SPARSE_TRACE = 0.7
@@ -180,12 +181,25 @@ def assess_clip_quality(
                 "sampled frames alone.",
                 CAP_NO_TRACE,
             )
-        elif measurement.coverage < MIN_TRACE_COVERAGE:
-            quality.add(
-                f"The bar was followed in only {measurement.coverage:.0%} of the sampled frames, "
-                "so the measured drift is rough.",
-                CAP_SPARSE_TRACE,
-            )
+        else:
+            if measurement.coverage < MIN_TRACE_COVERAGE:
+                quality.add(
+                    f"The bar was followed in only {measurement.coverage:.0%} of the sampled frames, "
+                    "so the measured drift is rough.",
+                    CAP_SPARSE_TRACE,
+                )
+            if measurement.near_frame_edge:
+                quality.add(
+                    "Keep the whole bar and plate in frame for the full lift — the bar left "
+                    "the frame here, so the drift is measured from an incomplete trail.",
+                    CAP_FRAME_EDGE,
+                )
+            if measurement.plate_too_small:
+                quality.add(
+                    "The plate is small on screen — stand closer or zoom in a little so the "
+                    "plate is bigger than a thumbnail in frame, and the drift reads cleanly.",
+                    CAP_SMALL_PLATE,
+                )
 
     if lifts_in_window > 1 and not was_split:
         quality.add(
@@ -216,11 +230,11 @@ def assess_clip_quality(
     if _mentions(text, UNCLEAR_PHRASES):
         quality.add("The phases of the lift were not clearly separable in these frames.", CAP_UNCLEAR_PHASES)
 
-    if info is not None and info.probed and info.is_portrait:
-        quality.add(
-            "Filmed in portrait. Landscape keeps the whole bar in frame and scores more reliably.",
-            CAP_PORTRAIT,
-        )
+    # Portrait itself is not a quality problem — most lifters film this way,
+    # and a well-framed portrait clip can track the plate at 100%. We only
+    # cap confidence when a *measured* quality signal fires: tracker coverage
+    # too low, plate wandering out of frame, or the plate too small to fit
+    # reliably. Those live on `measurement` above.
 
     effective_duration = duration_sec or (info.duration_sec if info else 0.0)
     if 0 < effective_duration < MIN_SENSIBLE_DURATION:

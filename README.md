@@ -24,8 +24,11 @@ when the dyno restarts (see [Limitations](#limitations)).\
 - Two kinds of evidence, one judge: a local plate tracker **measures** the bar path and a vision
   model **describes** it; NVIDIA Nemotron weighs both against the rubric
 - Clean & jerk is detected and scored as **two separate lifts**
-- Confidence drops, with a visible warning, on portrait, off-axis or mixed-lift clips — and
-  when the judge's verdict contradicts the measured path
+- Confidence drops, with a visible warning, when the clip's own measurements are poor: the
+  bar leaves the frame, the plate is too small to track accurately, the camera is off-axis, the
+  tracker lost the plate, the window held more than one lift, or the judge's verdict contradicts
+  the measured path. Portrait by itself is not a problem — most phones film this way and a
+  well-framed portrait clip scores at full confidence
 - Every verdict card says **which model did what** — the local tracker measured, MiniCPM-V
   described, which Nemotron judged (and whether the fallback answered) — and its drift line is
   written from the measurement, so the words cannot contradict the number
@@ -54,8 +57,10 @@ when the dyno restarts (see [Limitations](#limitations)).\
              direction, bar–body contact, angle              → validated JSON: score, band, drift,
                                                                cues, confidence
                                                                         │
-                   confidence caps (local): portrait, off-axis, mixed   │
-                   lifts, no trace, verdict vs. measurement  ◄──────────┘
+                   confidence caps (local): plate out of frame, plate   │
+                   too small, off-axis, mixed lifts, no trace,           │
+                   verdict vs. measurement  ◄──────────────────────────┐ │
+                                                                       │ │
                                                                         │
                                                                         ▼
                    annotated replay (ffmpeg): verdict strip + the same tracked path drawn on it
@@ -284,8 +289,9 @@ worth repeating here:
 
 - Film **square to the side** — not in front, not at an angle. Drift is measured sideways.
 - **3–5 m away**, camera at **hip height**.
-- **Landscape** preferred. Portrait works but lowers the confidence value.
-- Keep the **whole bar and both plates in frame** for the entire lift.
+- **Portrait is fine.** Framing is what matters, not aspect ratio.
+- Keep the **whole bar and both plates in frame** for the entire lift. The bar leaving the frame
+  is what caps confidence, not the orientation.
 - **One lift per clip.** Trim it on the trim screen; a clean & jerk is scored as two lifts.
 
 ### CLI (no UI)
@@ -384,9 +390,10 @@ cap comes with a warning shown next to the score:
 | Camera not square to the side | 0.50 |
 | The verdict contradicts the tracked path (see below) | 0.50 |
 | Occlusion, darkness or motion blur | 0.55 |
-| Filmed in portrait | 0.60 |
 | Phases not clearly separable | 0.60 |
 | Clip too short to hold a lift | 0.60 |
+| The bar left the frame during the lift | 0.60 |
+| The plate is small on screen (hard to track to a few pixels) | 0.65 |
 | The tracker could not follow the bar, so the drift rests on the frames alone | 0.65 |
 | Only a few frames readable | 0.70 |
 | The tracker saw the plate in under 75% of the sampled frames | 0.70 |
@@ -712,14 +719,17 @@ given: these are things that happened on the 39 clips, not hypotheticals.
   the only answer. The counter is per-process and resets with the dyno; `heroku ps:restart`
   resets it on purpose. (Measured: a single untrimmed clean upload took the counter from 150
   to 147.)
-- **Portrait clips are capped at 60% confidence,** with a visible warning. Side-on from a tripod
-  (landscape) is what the rubric and the tracker expect; a vertical phone frame costs you both
-  the drift arc that reads at distance and the camera's own line of sight, so the judge is told
-  to doubt itself.
+- **The tracked point can sit a few centimetres off the plate's sleeve.** The plate centre is
+  taken from a Hough circle plus an ellipse fit on the rim pixels, which is accurate to a few
+  pixels on side-on footage and to a bit more on oblique clips. The drift arrow stays
+  reliable for coaching cues; absolute centimetres on an off-axis clip are indicative.
 - **Oblique camera angles overstate forward drift.** The tracker reports the plate's apparent
   horizontal position; if the camera is not square to the side, an athlete stepping toward or
   away from the lens reads as sideways travel and the confidence cap says so — but the
   centimetre number is still the one the judge saw and can be visibly wrong on an off-axis clip.
+- **Framing is the quality signal.** Portrait or landscape is not what the confidence cap
+  checks — the bar leaving the frame or the plate being too small on screen is. Portrait with
+  the whole lift in frame scores at full confidence.
 - **The centimetres assume a 450 mm competition bumper.** Training plates are smaller, so on
   them the figure overstates the drift by the same ratio. The plate-width figure is the one that
   does not depend on the assumption.

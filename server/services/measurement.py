@@ -34,6 +34,14 @@ class BarPathMeasurement:
     drift_at_rise_fraction: Optional[float] = None  # 0 = where the bar started, 1 = the top
     sideways_range_diameters: Optional[float] = None
     rise_diameters: Optional[float] = None
+    # Signals the confidence module reads to decide quality — ground truth,
+    # not opinions. `near_frame_edge` fires when any tracked point was within
+    # about a plate radius of a frame edge during the lift (the bar left view,
+    # so the measurement is not trustworthy there). `plate_too_small` fires
+    # when the plate is too small on screen for the tracker's rim-finding to
+    # stay inside a few pixels.
+    near_frame_edge: bool = False
+    plate_too_small: bool = False
     reason: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
@@ -81,6 +89,23 @@ def measure(path: Optional[BarPath]) -> BarPathMeasurement:
     if worst is not None and lowest > highest:
         fraction = (lowest - worst.y) / (lowest - highest)
     drift_diameters = drift_norm * path.frame_width / plate_px
+    # Plate near frame edges: any point within ~1 plate radius of any edge
+    # of the frame during the lift. Expressed in the normalised coordinates
+    # the tracker uses (x and y both in 0..1).
+    plate_margin_x = path.plate_radius
+    plate_margin_y = (path.plate_radius * path.frame_width) / max(1, path.frame_height)
+    near_edge = any(
+        p.x <= plate_margin_x
+        or p.x >= 1.0 - plate_margin_x
+        or p.y <= plate_margin_y
+        or p.y >= 1.0 - plate_margin_y
+        for p in path.points
+    )
+    # Plate too small: diameter under ~4% of the shorter frame dimension —
+    # a plate so small that the ellipse / Hough fit is loose by several pixels
+    # on every frame, which the drift measurement compounds.
+    shorter_px = min(path.frame_width, path.frame_height) or path.frame_width
+    plate_too_small = plate_px < 0.04 * shorter_px
     return BarPathMeasurement(
         tracked=True,
         coverage=path.coverage,
@@ -90,6 +115,8 @@ def measure(path: Optional[BarPath]) -> BarPathMeasurement:
         drift_at_rise_fraction=fraction,
         sideways_range_diameters=(max(xs) - min(xs)) * path.frame_width / plate_px,
         rise_diameters=(lowest - highest) * path.frame_height / plate_px,
+        near_frame_edge=near_edge,
+        plate_too_small=plate_too_small,
     )
 
 

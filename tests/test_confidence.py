@@ -3,9 +3,10 @@ import pytest
 
 from server.schemas.judgment import LiftJudgment
 from server.services.confidence import (
+    CAP_FRAME_EDGE,
     CAP_MULTIPLE_LIFTS,
     CAP_OFF_AXIS,
-    CAP_PORTRAIT,
+    CAP_SMALL_PLATE,
     ClipQuality,
     apply_quality,
     assess_clip_quality,
@@ -46,6 +47,23 @@ def test_landscape_side_view_clip_is_not_penalised():
     assert apply_quality(judgment(0.8), quality).confidence == 0.8
 
 
+def test_portrait_video_with_good_tracking_is_not_penalised():
+    """
+    Portrait itself is not a problem — most phones film this way. The cap
+    only fires when a measured quality signal (edge-clipping, small plate,
+    sparse tracking) says so.
+    """
+    quality = assess_clip_quality(
+        observations="Bar close through the pull; catch over mid-foot.",
+        info=portrait(),
+        frame_count=10,
+        duration_sec=6.0,
+    )
+    assert quality.confidence_cap is None
+    assert all("portrait" not in warning.lower() for warning in quality.warnings)
+    assert apply_quality(judgment(0.85), quality).confidence == 0.85
+
+
 def test_mixed_clean_and_jerk_caps_hard():
     # The spec's §10 regression: 0.85 on a clip that held both lifts.
     quality = assess_clip_quality(
@@ -64,12 +82,32 @@ def test_mixed_clean_and_jerk_caps_hard():
     assert "more than one lift" in (result.notes or "")
 
 
-def test_portrait_video_lowers_confidence_and_warns():
-    quality = assess_clip_quality(observations="Bar close.", info=portrait(), frame_count=10, duration_sec=6.0)
-    assert quality.confidence_cap == CAP_PORTRAIT
+def test_bar_leaving_the_frame_lowers_confidence_and_warns():
+    quality = assess_clip_quality(
+        observations="Bar close.",
+        info=portrait(),
+        frame_count=10,
+        duration_sec=6.0,
+        measurement=_measurement(near_frame_edge=True),
+    )
+    assert quality.confidence_cap == CAP_FRAME_EDGE
     result = apply_quality(judgment(0.9), quality)
-    assert result.confidence == CAP_PORTRAIT
-    assert any("portrait" in warning.lower() for warning in result.warnings)
+    assert result.confidence == CAP_FRAME_EDGE
+    assert any("whole bar and plate" in warning for warning in result.warnings)
+
+
+def test_small_plate_lowers_confidence_and_warns():
+    quality = assess_clip_quality(
+        observations="Bar close.",
+        info=portrait(),
+        frame_count=10,
+        duration_sec=6.0,
+        measurement=_measurement(plate_too_small=True),
+    )
+    assert quality.confidence_cap == CAP_SMALL_PLATE
+    result = apply_quality(judgment(0.9), quality)
+    assert result.confidence == CAP_SMALL_PLATE
+    assert any("plate is small on screen" in warning for warning in result.warnings)
 
 
 def test_oblique_camera_angle_lowers_confidence():
@@ -109,13 +147,19 @@ def test_split_lift_is_noted_but_not_penalised():
 
 
 def test_cap_never_raises_an_already_low_confidence():
-    quality = assess_clip_quality(observations="", info=portrait(), frame_count=10, duration_sec=6.0)
+    quality = assess_clip_quality(
+        observations="", info=portrait(), frame_count=10, duration_sec=6.0,
+        measurement=_measurement(near_frame_edge=True),
+    )
     assert apply_quality(judgment(0.2), quality).confidence == 0.2
 
 
 def test_cap_applies_when_the_judge_gave_no_confidence():
-    quality = assess_clip_quality(observations="", info=portrait(), frame_count=10, duration_sec=6.0)
-    assert apply_quality(judgment(None), quality).confidence == CAP_PORTRAIT
+    quality = assess_clip_quality(
+        observations="", info=portrait(), frame_count=10, duration_sec=6.0,
+        measurement=_measurement(near_frame_edge=True),
+    )
+    assert apply_quality(judgment(None), quality).confidence == CAP_FRAME_EDGE
 
 
 @pytest.mark.parametrize(
@@ -139,8 +183,8 @@ def test_short_clip_and_few_frames_are_flagged():
 
 
 def test_merge_notes_does_not_repeat_what_the_judge_said():
-    notes = "Filmed in portrait."
-    assert merge_notes(notes, ["Filmed in portrait."]) == notes
+    notes = "Camera is oblique."
+    assert merge_notes(notes, ["Camera is oblique."]) == notes
     merged = merge_notes("Bar drifts.", ["Camera is oblique"])
     assert merged == "Bar drifts. Camera is oblique."
 
