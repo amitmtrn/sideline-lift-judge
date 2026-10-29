@@ -43,52 +43,91 @@ class VideoInfo:
 
 def probe_video(video_path: str) -> VideoInfo:
     """
-    Read size, rotation, duration and fps with ffprobe. Returns an unpopulated
-    VideoInfo (probed=False) when ffprobe is missing or the file is unreadable,
-    so callers degrade instead of failing.
+    Read size, rotation, duration and fps with ffprobe. Falls back to OpenCV
+    for size/duration/fps when ffprobe is absent (Heroku without the apt
+    buildpack) or returns nothing useful, so the pipeline still has a real
+    window to score. Rotation metadata is only read from ffprobe; the OpenCV
+    fallback already hands back display-oriented frames, so leaving rotation
+    at 0 is the right thing. Returns an unpopulated VideoInfo (probed=False)
+    only when the file itself is unreadable.
     """
-    if not shutil.which("ffprobe"):
-        return VideoInfo()
+    if shutil.which("ffprobe"):
+        try:
+            # -show_streams rather than a -show_entries selector: asking for
+            # `side_data_list` by name returns the section with its fields
+            # stripped ([{}]), which is how the display-matrix rotation went
+            # missing.
+            out = subprocess.check_output(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-show_streams",
+                    "-show_format",
+                    "-of",
+                    "json",
+                    video_path,
+                ],
+                stderr=subprocess.STDOUT,
+                timeout=30,
+            )
+            data = json.loads(out.decode("utf-8", errors="ignore"))
+        except Exception:
+            data = None
+        if data is not None:
+            info = VideoInfo(probed=True)
+            for stream in data.get("streams", []) or []:
+                kind = (stream.get("codec_type") or "").lower()
+                if kind == "audio":
+                    info.has_audio = True
+                    continue
+                if kind != "video" or info.width:
+                    continue
+                info.width = int(stream.get("width") or 0)
+                info.height = int(stream.get("height") or 0)
+                info.rotation = _rotation_from_stream(stream)
+                info.fps = _parse_frame_rate(stream.get("avg_frame_rate"))
+            try:
+                info.duration_sec = max(0.0, float((data.get("format") or {}).get("duration") or 0.0))
+            except (TypeError, ValueError):
+                info.duration_sec = 0.0
+            if info.duration_sec > 0 or info.width:
+                return info
+    return _probe_with_opencv(video_path)
+
+
+def _probe_with_opencv(video_path: str) -> VideoInfo:
+    """
+    Fallback probe used when ffprobe is not on the PATH. OpenCV's decoder
+    applies the display matrix itself on the builds we ship, so width/height
+    are what a viewer sees and rotation stays 0.
+    """
     try:
-        # -show_streams rather than a -show_entries selector: asking for
-        # `side_data_list` by name returns the section with its fields stripped
-        # ([{}]), which is how the display-matrix rotation went missing.
-        out = subprocess.check_output(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_streams",
-                "-show_format",
-                "-of",
-                "json",
-                video_path,
-            ],
-            stderr=subprocess.STDOUT,
-            timeout=30,
-        )
-        data = json.loads(out.decode("utf-8", errors="ignore"))
+        import cv2  # type: ignore
     except Exception:
         return VideoInfo()
-
-    info = VideoInfo(probed=True)
-    for stream in data.get("streams", []) or []:
-        kind = (stream.get("codec_type") or "").lower()
-        if kind == "audio":
-            info.has_audio = True
-            continue
-        if kind != "video" or info.width:
-            continue
-        info.width = int(stream.get("width") or 0)
-        info.height = int(stream.get("height") or 0)
-        info.rotation = _rotation_from_stream(stream)
-        info.fps = _parse_frame_rate(stream.get("avg_frame_rate"))
-
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        cap.release()
+        return VideoInfo()
     try:
-        info.duration_sec = max(0.0, float((data.get("format") or {}).get("duration") or 0.0))
-    except (TypeError, ValueError):
-        info.duration_sec = 0.0
-    return info
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        frame_count = float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0)
+    finally:
+        cap.release()
+    if not (width and height):
+        return VideoInfo()
+    duration = frame_count / fps if fps > 0 and frame_count > 0 else 0.0
+    return VideoInfo(
+        width=width,
+        height=height,
+        rotation=0,
+        duration_sec=max(0.0, duration),
+        fps=max(0.0, fps),
+        probed=True,
+    )
 
 
 def _is_display_matrix(side_data_type: object) -> bool:
