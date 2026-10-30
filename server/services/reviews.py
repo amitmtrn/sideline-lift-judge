@@ -47,6 +47,7 @@ from server.services.db import (
     utcnow,
 )
 from server.services.paypal_client import PayPalError, first_authorization, get_paypal
+from server.services.snapshots import lift_key, lift_label
 
 logger = logging.getLogger(__name__)
 
@@ -149,7 +150,7 @@ def start_checkout(
         order = _paypal().create_order(
             amount_cents=review.price_cents,
             custom_id=review.id,
-            description=f"Coach review – {snapshot.lift_type}",
+            description=f"Coach review – {lift_label(snapshot.lift_type)}",
             request_id=request_id,
         )
     except PayPalError as exc:
@@ -590,7 +591,8 @@ def snapshot_payload(snapshot: LiftSnapshot, *, image_url) -> Dict[str, Any]:
     evidenced = lift.get("evidenced_cues") or []
     return {
         "id": snapshot.id,
-        "lift": snapshot.lift_type,
+        "lift": lift_key(snapshot.lift_type),
+        "lift_label": lift_label(snapshot.lift_type),
         "score": lift.get("score"),
         "band": lift.get("band"),
         "confidence": lift.get("confidence"),
@@ -665,8 +667,12 @@ def review_payload(review: ReviewOrder, *, role: str, image_url) -> Dict[str, An
 
 
 def list_for_coach(session: Session, *, include_final: bool = True) -> List[ReviewOrder]:
-    """The queue: held reviews first, nearest deadline first, then the rest newest first."""
-    rows = session.scalars(select(ReviewOrder).where(ReviewOrder.status != CHECKOUT_CREATED)).all()
+    """
+    The queue: held reviews first, nearest deadline first, then the rest
+    newest first. Checkouts nobody approved (CHECKOUT_CREATED, and ABANDONED
+    once the sweeper gave up on them) are not the coach's business.
+    """
+    rows = session.scalars(select(ReviewOrder).where(ReviewOrder.status.not_in((CHECKOUT_CREATED, ABANDONED)))).all()
     held = sorted([r for r in rows if r.status in HELD or r.status in TRANSIENT], key=lambda r: (r.sla_due_at or utcnow()))
     if not include_final:
         return held
@@ -685,7 +691,7 @@ def find_reviews(
     """The agent's lookup: by athlete name (case-insensitive substring), status and lift."""
     rows = list_for_coach(session)
     wanted_status = (status or "").strip().upper()
-    wanted_lift = (lift or "").strip().lower()
+    wanted_lift = lift_key(lift) if (lift or "").strip() else ""
     wanted_name = (athlete or "").strip().lower()
     out: List[ReviewOrder] = []
     for review in rows:
@@ -694,7 +700,7 @@ def find_reviews(
                 continue
             if wanted_status != "HELD" and review.status != wanted_status:
                 continue
-        if wanted_lift and review.snapshot and review.snapshot.lift_type != wanted_lift:
+        if wanted_lift and review.snapshot and lift_key(review.snapshot.lift_type) != wanted_lift:
             continue
         if wanted_name:
             name = (review.athlete.display_name if review.athlete else "").lower()

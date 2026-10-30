@@ -1170,6 +1170,46 @@ footer a {
  * queue and editor, the ops agent's chat and confirm cards.
  * ====================================================================== */
 
+/* The result screen carries the coach offer and the PayPal button under
+ * the verdict. A sticky "Score my lift" would sit over them while the
+ * athlete reads, so on this screen the dock stays in the flow. */
+.screen[data-screen="result"] .dock {
+  position: static;
+  background: none;
+}
+
+/* The coach/ops sign-in. */
+.login-form {
+  margin-top: 16px;
+}
+
+.login-form .actions {
+  margin-top: 16px;
+}
+
+input[type="password"] {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 12px 14px;
+  font-family: var(--font-body);
+  font-size: 17px;
+  color: var(--chalk);
+  background: var(--steel-850);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.staff-actions {
+  margin-top: 22px;
+}
+
+.staff-actions button {
+  justify-self: start;
+  width: auto;
+}
+
 /* The sandbox banner: on every screen while Pro is on. */
 .sandbox-banner {
   display: flex;
@@ -1313,6 +1353,9 @@ select:focus-visible {
   margin-top: 14px;
 }
 
+/* A row is a div (role=button when it opens something), never a <button>:
+ * the ops list puts its own button beside it, and a button inside a button
+ * is invalid HTML. */
 .review-row {
   display: block;
   width: 100%;
@@ -1322,13 +1365,29 @@ select:focus-visible {
   background: var(--steel-850);
   border: 1px solid var(--line);
   border-radius: var(--radius);
+}
+
+.review-row[role="button"] {
   cursor: pointer;
 }
 
-.review-row:hover {
+.review-row[role="button"]:hover {
   border-color: var(--line-bright);
   background: var(--steel-800);
-  filter: none;
+}
+
+.review-row[role="button"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.review-item {
+  display: grid;
+  gap: 8px;
+}
+
+.review-item .row-actions {
+  margin-top: 0;
 }
 
 .row-top,
@@ -1617,11 +1676,61 @@ button.small {
   border: 1px dashed var(--line);
 }
 
+/* The agent's reply, rendered from a small safe subset of markdown
+ * (paragraphs, dash lists, bold, italic, code) into real nodes. */
+.bubble .md p {
+  margin: 0 0 8px;
+  white-space: normal;
+}
+
+.bubble .md p:last-child,
+.bubble .md ul:last-child,
+.bubble .md ol:last-child {
+  margin-bottom: 0;
+}
+
+.bubble .md ul,
+.bubble .md ol {
+  margin: 0 0 8px;
+  padding-left: 20px;
+}
+
+.bubble .md li {
+  margin-bottom: 4px;
+}
+
+.bubble .md code {
+  padding: 1px 4px;
+  font-size: 13px;
+  background: var(--steel-900);
+  border-radius: 3px;
+}
+
+.bubble .md .md-heading {
+  font-weight: 600;
+}
+
+/* "Tools used", once, as chips under the reply. */
 .tools-line {
-  margin-top: 8px !important;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 10px !important;
   font-size: 12px;
   letter-spacing: 0.04em;
   color: var(--chalk-faint);
+}
+
+.tools-line .tool-chip {
+  padding: 2px 7px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  letter-spacing: 0;
+  color: var(--chalk-dim);
+  background: var(--steel-900);
+  border: 1px solid var(--line);
+  border-radius: 10px;
 }
 
 .chat-form {

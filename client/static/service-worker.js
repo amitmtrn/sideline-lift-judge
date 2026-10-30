@@ -5,7 +5,7 @@
  */
 // Bump this with every change to the shell files below: they are served
 // cache-first, so an installed app keeps the old script until the name changes.
-const CACHE = "lift-judge-v7";
+const CACHE = "lift-judge-v8";
 const SHELL = [
   "/",
   "/static/styles.css",

@@ -41,6 +41,35 @@ class SnapshotError(Exception):
         self.status = status
 
 
+# The lift as a key ("snatch") and as words ("Snatch"). A live job's payload
+# carries the LiftType enum, whose str() is "LiftType.snatch"; the sample's
+# JSON carries the plain value. Both land here as the key, and the key is
+# the only thing ever stored or compared.
+LIFT_LABELS = {
+    "snatch": "Snatch",
+    "clean": "Clean",
+    "jerk": "Jerk",
+    "clean_jerk": "Clean & Jerk",
+    "clean_and_jerk": "Clean & Jerk",
+}
+
+
+def lift_key(value: Any) -> str:
+    raw = getattr(value, "value", value)
+    text = str(raw or "").strip().lower()
+    if text.startswith("lifttype."):
+        text = text[len("lifttype.") :]
+    text = text.replace("&", "and").replace("-", "_").replace(" ", "_")
+    while "__" in text:
+        text = text.replace("__", "_")
+    return text or "snatch"
+
+
+def lift_label(value: Any) -> str:
+    key = lift_key(value)
+    return LIFT_LABELS.get(key, key.replace("_", " ").title())
+
+
 def shrink_jpeg(data: bytes, *, max_long_side: int = MAX_LONG_SIDE, quality: int = JPEG_QUALITY) -> Optional[bytes]:
     """Re-encode an image small enough for a database row; None if it does not decode."""
     array = np.frombuffer(data, dtype=np.uint8)
@@ -135,7 +164,7 @@ def create_snapshot(
         source_kind=source_kind,
         source_job_id=source_job_id,
         lift_index=int(lift.get("index") or 1),
-        lift_type=str(lift.get("lift") or "snatch"),
+        lift_type=lift_key(lift.get("lift")),
         judgment_json=dumps(body),
         measurement_json=dumps(lift.get("bar_path")) if lift.get("bar_path") is not None else None,
         angle_warning=angle_warning_of(lift),

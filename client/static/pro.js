@@ -29,8 +29,14 @@
   const $ = (selector) => document.querySelector(selector);
   const screens = Array.from(document.querySelectorAll(".screen"));
 
+  const LIFT_LABELS = { snatch: "Snatch", clean: "Clean", jerk: "Jerk", clean_jerk: "Clean & Jerk", clean_and_jerk: "Clean & Jerk" };
+
   const state = {
     role: "athlete",
+    // null = not asked yet; the coach and ops screens ask /api/auth/me first.
+    staff: null,
+    // Where to go once signed in: {role, reviewId}.
+    afterLogin: null,
     sdk: null,
     pendingReview: null,
     statusTimer: null,
@@ -79,6 +85,18 @@
     return `${minutes} m left`;
   }
 
+  // The lift in words. The server sends lift_label; older rows and the
+  // raw key still read as "Snatch", never as an enum's repr.
+  function liftName(snapshot) {
+    const snap = snapshot || {};
+    if (snap.lift_label) return snap.lift_label;
+    const key = String(snap.lift || "")
+      .replace(/^LiftType\./i, "")
+      .toLowerCase();
+    if (!key) return "lift";
+    return LIFT_LABELS[key] || key.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  }
+
   function athleteToken() {
     try {
       let token = window.localStorage.getItem(TOKEN_KEY);
@@ -118,7 +136,7 @@
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(options.body);
     }
-    const response = await fetch(path, { method: options.method || "GET", headers, body, cache: "no-store" });
+    const response = await fetch(path, { method: options.method || "GET", headers, body, cache: "no-store", credentials: "same-origin" });
     let payload = {};
     try {
       payload = await response.json();
@@ -129,9 +147,84 @@
       const error = new Error(payload.detail || `Request failed (HTTP ${response.status}).`);
       error.status = response.status;
       error.retryAfter = Number(response.headers.get("Retry-After")) || 0;
+      // A coach/ops route without the session (expired, or signed out
+      // elsewhere): back to the sign-in, remembering where we were.
+      if (response.status === 401 && state.role !== "athlete" && !path.startsWith("/api/auth/")) {
+        state.staff = false;
+        showLogin(state.role, null, error.message);
+      }
       throw error;
     }
     return payload;
+  }
+
+  /* ---------- the coach/ops sign-in ---------- */
+
+  async function ensureStaff() {
+    if (state.staff !== null) return state.staff;
+    try {
+      const me = await api("/api/auth/me");
+      state.staff = Boolean(me.staff);
+      state.staffConfigured = me.configured !== false;
+    } catch (error) {
+      state.staff = false;
+    }
+    return state.staff;
+  }
+
+  function showLogin(role, reviewId, message) {
+    state.afterLogin = { role: role || "coach", reviewId: reviewId || null };
+    show("login");
+    const lede = $("#login-lede");
+    if (lede) {
+      lede.textContent =
+        state.staffConfigured === false
+          ? "Coach/ops sign-in is not set up on this server (COACH_PASSWORD is unset)."
+          : role === "ops"
+            ? "The ops agent moves sandbox money, so it is behind the coach's password. Judges: it is in the testing instructions."
+            : "The coach queue and the ops agent are the coach's side. Judges: the password is in the testing instructions.";
+    }
+    notice("#login-error", message || "");
+    const input = $("#staff-password");
+    if (input) {
+      input.value = "";
+      window.setTimeout(() => input.focus(), 50);
+    }
+  }
+
+  async function submitLogin() {
+    const input = $("#staff-password");
+    const button = $("#login-submit");
+    const password = input ? input.value : "";
+    if (!password) {
+      notice("#login-error", "Type the password.");
+      return;
+    }
+    if (button) button.disabled = true;
+    notice("#login-error", "");
+    try {
+      await api("/api/auth/login", { method: "POST", body: { password } });
+      state.staff = true;
+      const next = state.afterLogin || { role: "coach" };
+      state.afterLogin = null;
+      if (input) input.value = "";
+      await setRole(next.role);
+      if (next.reviewId) openCoachReview(next.reviewId);
+    } catch (error) {
+      notice("#login-error", error.message + (error.retryAfter ? ` Try again in ${Math.ceil(error.retryAfter / 60)} min.` : ""));
+    } finally {
+      if (button) button.disabled = false;
+    }
+  }
+
+  async function logout() {
+    try {
+      await api("/api/auth/logout", { method: "POST", body: {} });
+    } catch (error) {
+      /* the cookie is gone either way */
+    }
+    state.staff = false;
+    setRole("athlete");
   }
 
   function notice(target, message, kind) {
@@ -158,7 +251,7 @@
 
   /* ---------- roles and banner ---------- */
 
-  function setRole(role) {
+  async function setRole(role, reviewId) {
     state.role = role;
     document.querySelectorAll("#role-switch [data-role]").forEach((button) => {
       button.setAttribute("aria-pressed", String(button.dataset.role === role));
@@ -171,15 +264,23 @@
     } catch (error) {
       /* older browsers */
     }
+    if (role === "athlete") {
+      show("start");
+      refreshMyReviewsButton();
+      return;
+    }
+    // The coach and ops screens are behind the sign-in; the server checks
+    // the cookie on every route, this only decides which screen to show.
+    if (!(await ensureStaff())) {
+      showLogin(role, reviewId);
+      return;
+    }
     if (role === "coach") {
       show("coach");
       loadQueue();
     } else if (role === "ops") {
       show("ops");
       loadOps();
-    } else {
-      show("start");
-      refreshMyReviewsButton();
     }
   }
 
@@ -219,6 +320,9 @@
         currency: "USD",
         components: "buttons",
         "disable-funding": "paylater,credit",
+        // The button and the popup in English whatever the buyer account's
+        // locale says (the first sandbox buyer was Hebrew).
+        locale: "en_US",
       });
       script.src = `https://www.paypal.com/sdk/js?${params.toString()}`;
       script.async = true;
@@ -433,7 +537,7 @@
     container.textContent = "";
     const card = element("article", "review-card");
     const head = element("div", "review-head");
-    head.appendChild(element("span", "lift-name", (review.snapshot && review.snapshot.lift) || "lift"));
+    head.appendChild(element("span", "lift-name", liftName(review.snapshot)));
     head.appendChild(statusBadge(review));
     card.appendChild(head);
     card.appendChild(element("p", "status-detail", review.status_detail || ""));
@@ -501,12 +605,14 @@
     }
   }
 
+  // A review row: a div that acts as a button when it opens something.
+  // `extra` (the ops list's "Expire now") is a sibling, not a child, so no
+  // button ever sits inside another.
   function reviewRow(review, onOpen, extra) {
-    const row = element("button", "review-row");
-    row.type = "button";
+    const row = element("div", "review-row");
     const top = element("div", "row-top");
     const who = review.athlete_name ? `${review.athlete_name} · ` : "";
-    top.appendChild(element("span", "lift-name", `${who}${(review.snapshot && review.snapshot.lift) || "lift"}`));
+    top.appendChild(element("span", "lift-name", `${who}${liftName(review.snapshot)}`));
     top.appendChild(statusBadge(review));
     row.appendChild(top);
     const bottom = element("div", "row-bottom");
@@ -515,9 +621,22 @@
     if (HELD.has(review.status)) bottom.appendChild(element("span", "deadline", countdown(review.seconds_to_deadline)));
     else bottom.appendChild(element("span", null, when(review.delivered_at || review.updated_at)));
     row.appendChild(bottom);
-    if (extra) row.appendChild(extra);
-    row.addEventListener("click", onOpen);
-    return row;
+    if (onOpen) {
+      row.setAttribute("role", "button");
+      row.tabIndex = 0;
+      row.addEventListener("click", onOpen);
+      row.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onOpen(event);
+        }
+      });
+    }
+    if (!extra) return row;
+    const item = element("div", "review-item");
+    item.appendChild(row);
+    item.appendChild(extra);
+    return item;
   }
 
   /* ---------- the coach ---------- */
@@ -594,7 +713,7 @@
     container.textContent = "";
     const snapshot = review.snapshot || {};
     const head = element("div", "review-head");
-    head.appendChild(element("span", "lift-name", `${review.athlete_name || "Athlete"} · ${snapshot.lift || "lift"}`));
+    head.appendChild(element("span", "lift-name", `${review.athlete_name || "Athlete"} · ${liftName(snapshot)}`));
     head.appendChild(statusBadge(review));
     container.appendChild(head);
     if (HELD.has(review.status)) {
@@ -740,6 +859,7 @@
     notice("#ops-error", "");
     try {
       const overview = await api("/api/ops/overview");
+      state.slaHours = Number(overview.sla_hours) || SLA_HOURS;
       renderHeld(overview.held || []);
       renderLedger(overview.ledger || {});
       const examples = $("#ops-examples");
@@ -757,7 +877,18 @@
       if (demo) demo.hidden = !PRO.demo_mode;
       const hint = $("#ops-chat").querySelector(".chat-hint");
       if (!hint) {
-        const first = element("p", "chat-hint field-hint", `Agent: ${overview.model || ""} on Nebius Token Factory · invoices via the ${overview.tool_source || "PayPal Agent Toolkit"} · ${overview.agent_calls_remaining_today == null ? "" : `${overview.agent_calls_remaining_today} model calls left today`}`);
+        const first = element(
+          "p",
+          "chat-hint field-hint",
+          [
+            `Agent: ${overview.model || ""} on Nebius Token Factory`,
+            "releases and refunds: the app's own PayPal Payments v2 calls",
+            `invoices: ${overview.tool_source || "PayPal Agent Toolkit"}`,
+            overview.agent_calls_remaining_today == null ? "" : `${overview.agent_calls_remaining_today} model calls left today`,
+          ]
+            .filter(Boolean)
+            .join(" · ")
+        );
         $("#ops-chat").appendChild(first);
       }
     } catch (error) {
@@ -780,11 +911,11 @@
         expire.type = "button";
         expire.addEventListener("click", async (event) => {
           event.stopPropagation();
-          if (!window.confirm("Pull this review's deadline to now? The sweeper will release the hold, as it would after 48 h.")) return;
+          if (!window.confirm(`Pull this review's deadline to now? The sweeper will release the hold, as it would after ${state.slaHours || SLA_HOURS} h.`)) return;
           expire.disabled = true;
           try {
             await api(`/api/ops/reviews/${encodeURIComponent(review.id)}/expire`, { method: "POST", body: {} });
-            addSystemLine(`Deadline reached for ${review.athlete_name || "the athlete"}'s ${review.snapshot.lift}: the ${money(review.price_usd)} hold was released (void). Not charged.`);
+            addSystemLine(`Deadline reached for ${review.athlete_name || "the athlete"}'s ${liftName(review.snapshot).toLowerCase()}: the ${money(review.price_usd)} hold was released (void). Not charged.`);
             loadOps();
           } catch (error) {
             notice("#ops-error", error.message);
@@ -793,7 +924,7 @@
         });
         extra.appendChild(expire);
       }
-      container.appendChild(reviewRow(review, () => {}, extra));
+      container.appendChild(reviewRow(review, null, extra));
     });
   }
 
@@ -847,6 +978,95 @@
     bubble.appendChild(element("p", null, text));
     chat.appendChild(bubble);
     bubble.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    return bubble;
+  }
+
+  /* A safe subset of markdown → nodes. Paragraphs, "- " / "1. " lists,
+   * "#" headings as bold lines, **bold**, *italic*, `code`. Everything is
+   * built with createElement/textContent: no HTML from the model ever
+   * reaches innerHTML. */
+  function inlineMarkdown(text, parent) {
+    // No lookbehind: a regex literal that older Safari cannot parse would
+    // take the whole file down with it.
+    const pattern = /(\*\*[^*\n]+\*\*|`[^`\n]+`|\*[^*\n]+\*)/g;
+    let last = 0;
+    let match;
+    while ((match = pattern.exec(text))) {
+      if (match.index > last) parent.appendChild(document.createTextNode(text.slice(last, match.index)));
+      const token = match[0];
+      if (token.startsWith("**")) parent.appendChild(element("strong", null, token.slice(2, -2)));
+      else if (token.startsWith("`")) parent.appendChild(element("code", null, token.slice(1, -1)));
+      else parent.appendChild(element("em", null, token.slice(1, -1)));
+      last = match.index + token.length;
+    }
+    if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+  }
+
+  function renderMarkdown(text) {
+    const root = element("div", "md");
+    const lines = String(text || "").replace(/\r/g, "").split("\n");
+    let paragraph = [];
+    let list = null;
+    const flushParagraph = () => {
+      if (!paragraph.length) return;
+      const node = element("p");
+      inlineMarkdown(paragraph.join(" "), node);
+      root.appendChild(node);
+      paragraph = [];
+    };
+    const flushList = () => {
+      if (list) root.appendChild(list);
+      list = null;
+    };
+    lines.forEach((raw) => {
+      const line = raw.trim();
+      if (!line) {
+        flushParagraph();
+        flushList();
+        return;
+      }
+      const bullet = line.match(/^(?:[-*•]|\d+[.)])\s+(.*)$/);
+      if (bullet) {
+        flushParagraph();
+        const tag = /^\d/.test(line) ? "ol" : "ul";
+        if (!list || list.tagName.toLowerCase() !== tag) {
+          flushList();
+          list = element(tag);
+        }
+        const item = element("li");
+        inlineMarkdown(bullet[1], item);
+        list.appendChild(item);
+        return;
+      }
+      const heading = line.match(/^#{1,6}\s+(.*)$/);
+      if (heading) {
+        flushParagraph();
+        flushList();
+        const node = element("p", "md-heading");
+        inlineMarkdown(heading[1], node);
+        root.appendChild(node);
+        return;
+      }
+      flushList();
+      paragraph.push(line);
+    });
+    flushParagraph();
+    flushList();
+    return root;
+  }
+
+  function addReplyBubble(text, toolsCalled) {
+    const chat = $("#ops-chat");
+    const bubble = element("div", "bubble assistant");
+    bubble.appendChild(renderMarkdown(text));
+    const tools = Array.isArray(toolsCalled) ? toolsCalled.filter((name, index, all) => name && all.indexOf(name) === index) : [];
+    if (tools.length) {
+      const line = element("p", "tools-line");
+      line.appendChild(document.createTextNode("Tools used"));
+      tools.forEach((name) => line.appendChild(element("span", "tool-chip", name)));
+      bubble.appendChild(line);
+    }
+    chat.appendChild(bubble);
     return bubble;
   }
 
@@ -934,10 +1154,7 @@
     try {
       const reply = await api("/api/ops/agent", { method: "POST", body: { prompt: text } });
       thinking.remove();
-      const bubble = addBubble("assistant", reply.reply || "");
-      if (Array.isArray(reply.tools_called) && reply.tools_called.length) {
-        bubble.appendChild(element("p", "tools-line", `Tools: ${reply.tools_called.join(", ")}`));
-      }
+      const bubble = addReplyBubble(reply.reply || "", reply.tools_called);
       (reply.actions || []).forEach((card) => bubble.appendChild(actionCard(card)));
       bubble.scrollIntoView({ behavior: "smooth", block: "nearest" });
       loadAudit();
@@ -990,6 +1207,9 @@
       case "reset-demo":
         resetDemo();
         break;
+      case "logout":
+        logout();
+        break;
       default:
         break;
     }
@@ -1003,14 +1223,23 @@
     });
   }
 
+  const loginForm = $("#login-form");
+  if (loginForm) {
+    loginForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      submitLogin();
+    });
+  }
+
   if (CONFIG.initialReview) {
     openStatusById(CONFIG.initialReview);
   } else if (window.location.hash.startsWith("#coach:")) {
-    // #coach:<review id> opens one review straight in the editor. Read the
-    // id first: setRole rewrites the hash.
+    // #coach:<review id> opens one review straight in the editor (after the
+    // sign-in, if needed). Read the id first: setRole rewrites the hash.
     const reviewId = window.location.hash.slice("#coach:".length);
-    setRole("coach");
-    openCoachReview(reviewId);
+    setRole("coach", reviewId).then(() => {
+      if (state.staff) openCoachReview(reviewId);
+    });
   } else if (window.location.hash === "#coach" || window.location.hash === "#ops") {
     setRole(window.location.hash.slice(1));
   }

@@ -298,6 +298,27 @@
           </div>
         </section>
 
+        <!-- Coach / Ops: the sign-in. One password (COACH_PASSWORD on the
+             server); the cookie it sets is what every coach and ops route
+             checks. Judges get the password from the Devpost testing
+             instructions, never from this page or the repo. -->
+        <section class="screen" data-screen="login" aria-labelledby="login-title">
+          <p class="step-label">Coach · Ops</p>
+          <h2 id="login-title">Sign in</h2>
+          <p class="lede" id="login-lede">The coach queue and the ops agent are the coach's side. Judges: the password is in the testing instructions.</p>
+          <form id="login-form" class="login-form" autocomplete="off">
+            <div class="field">
+              <label for="staff-password">Password</label>
+              <input id="staff-password" type="password" autocomplete="current-password" spellcheck="false" />
+            </div>
+            <p id="login-error" class="notice" hidden></p>
+            <div class="actions">
+              <button type="submit" id="login-submit">Sign in</button>
+              <button type="button" class="ghost" data-go="start">Back to the start</button>
+            </div>
+          </form>
+        </section>
+
         <!-- Coach: the queue, nearest deadline first -->
         <section class="screen" data-screen="coach" aria-labelledby="coach-title">
           <p class="step-label">Coach</p>
@@ -305,6 +326,9 @@
           <p class="lede">Paid reviews, nearest deadline first. Each opens with the AI report written up as a draft.</p>
           <p id="coach-error" class="notice" hidden></p>
           <div id="coach-queue" class="review-list"></div>
+          <div class="actions staff-actions">
+            <button type="button" class="ghost small" data-pro="logout">Sign out</button>
+          </div>
         </section>
 
         <!-- Coach: one review, the AI draft to edit, Deliver or Decline -->
@@ -322,7 +346,8 @@
           <p class="step-label">Ops</p>
           <h2 id="ops-title">Ops agent</h2>
           <p class="lede">
-            Payments and invoices in plain English, on the PayPal Agent Toolkit. Nothing that moves money or
+            Payments and invoices in plain English. Releases and refunds are the app's own PayPal
+            Payments v2 calls; invoices go through the PayPal Agent Toolkit. Nothing that moves money or
             sends anything runs until you tap Confirm.
           </p>
           <div id="ops-chat" class="chat" aria-live="polite"></div>
@@ -349,13 +374,16 @@
           <div class="actions" id="ops-demo-actions" hidden>
             <button type="button" class="ghost" data-pro="reset-demo">Reset demo data</button>
           </div>
+          <div class="actions staff-actions">
+            <button type="button" class="ghost small" data-pro="logout">Sign out</button>
+          </div>
         </section>
       </main>
 
       <footer>
         <span id="install-hint" hidden>Add to Home Screen for a full-screen app. </span>
         {% if demo_disabled %}Live scoring paused · {% elif access_mode == "open" %}Open demo, no code needed · daily limit applies · {% elif access_mode == "link" %}Demo by link · {% elif access_required %}Demo by access code · {% endif %}CV tracker measured → {{ vision_name }} observed → {{ judge_name }} judged, on Nebius Token Factory ·
-        {% if pro.pro_enabled %}PayPal sandbox: Orders v2 (authorize) → Payments v2 (capture / void / refund) · Invoicing via the PayPal Agent Toolkit · {% endif %}
+        {% if pro.pro_enabled %}PayPal sandbox: Orders v2 (authorize) → Payments v2 (capture / void / refund), the app's own server calls · Invoicing v2 via the PayPal Agent Toolkit · {% endif %}
         <a href="https://github.com/amitmtrn/sideline-lift-judge">source (MIT)</a>
       </footer>
     </div>
