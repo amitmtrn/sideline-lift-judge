@@ -7,9 +7,11 @@ can use it from the side of the platform.
 
 ▶ **Demo video:** <https://www.youtube.com/watch?v=3E22yknw8Nk>
 
-**New — Sideline Pro:** a paid human-coach review on top of the judge, with PayPal
-authorize-then-capture as escrow, an AI-drafted coach review and an ops agent on the PayPal Agent
-Toolkit. Sandbox only. See
+**New — Sideline Pro:** a paid human-coach review on top of the judge. **PayPal** (sandbox):
+Orders v2 authorize-then-capture as escrow, Payments v2 capture / void / refund, Invoicing v2
+through the **PayPal Agent Toolkit**. **AI** (Nebius Token Factory, NVIDIA Nemotron): the judge,
+an AI-drafted coach review, and an ops agent with function calling that only ever *proposes* a
+payment action until a human taps Confirm. See
 [What's new for the PayPal AI Hackathon](#sideline-pro--whats-new-for-the-paypal-ai-hackathon-since-oct-30).
 
 Built for the Nebius × NVIDIA Global AI Hackathon. The judge is an **NVIDIA Nemotron 3** model —
@@ -57,9 +59,10 @@ Sideline Pro adds a **paid human-coach review** to the judge above, built for th
 score as before, then buys a coach review through **PayPal Checkout**. The money is **authorized
 at purchase, captured only when the coach delivers, and voided automatically if the coach misses
 the 48 h deadline** — authorize-then-capture as escrow. The coach's queue opens every review with
-the **AI report already written up as a draft**, and a plain-English **ops agent on the PayPal
-Agent Toolkit** handles refunds and invoices, with a human tap between the model and the money.
-Everything runs in the **PayPal sandbox**; this build refuses a live environment. The state of
+the **AI report already written up as a draft**, and a plain-English **ops agent** handles
+releases, refunds and invoices with a human tap between the model and the money: releases and
+refunds are the app's own PayPal Payments v2 calls, invoices go through the **PayPal Agent
+Toolkit**. Everything runs in the **PayPal sandbox**; this build refuses a live environment. The state of
 the repo before any of this is tagged [`v1-nebius`](https://github.com/amitmtrn/sideline-lift-judge/releases/tag/v1-nebius);
 [CHANGELOG.md](CHANGELOG.md) lists every change.
 
@@ -84,6 +87,26 @@ the repo before any of this is tagged [`v1-nebius`](https://github.com/amitmtrn/
                                        Invoicing v2 (Agent Toolkit) ◄── "invoice my 3 athletes $60" → card → Confirm
 ```
 
+**The state machine** (`server/services/reviews.py`), one row per review, every transition a
+compare-and-set on the status column:
+
+```
+CHECKOUT_CREATED ──approve──► AUTHORIZED ──coach opens──► IN_REVIEW ──Deliver (capture)──► CAPTURED ──refund──► REFUNDED
+       │                          │                           │
+       │ 30 min, never approved   └────── SLA sweeper (48 h) · Decline · agent release · capture failed ──► VOIDED
+       ▼
+   ABANDONED
+```
+
+`CAPTURING`, `VOIDING` and `REFUNDING` are the transient claims while PayPal is on the line; a
+claim older than five minutes (a crashed worker) is reconciled against `GET /v2/checkout/orders`.
+
+**Who may do what.** Athletes need no account: a review is reached by its unguessable id
+(`/review/<128 random bits>`) plus the anonymous token the page keeps. The **Coach** and **Ops**
+tabs — queue, deliver, decline, the agent, Expire now, Reset — are behind one password
+(`COACH_PASSWORD`, a signed HttpOnly session cookie, checked on every route server side, not just
+hidden in the UI). Judges get that password in the Devpost testing instructions only.
+
 ### What changed since `v1-nebius`
 
 - **Checkout on every verdict card**, the cached sample included (so judges can run the whole
@@ -107,7 +130,8 @@ the repo before any of this is tagged [`v1-nebius`](https://github.com/amitmtrn/
   PayPal Agent Toolkit tools plus app tools, **confirm-before-write cards**, an audit log, and
   limits enforced in code.
 - **Role switcher** (Athlete / Coach / Ops, no reload), a **SANDBOX · no real money** banner on
-  every screen, and demo-only **Expire now** and **Reset demo data** buttons.
+  every screen, the **coach/ops sign-in** (`COACH_PASSWORD`) in front of every coach and ops
+  route, and demo-only **Expire now** and **Reset demo data** buttons for signed-in staff.
 - A PayPal **webhook** endpoint (P1), a **secret scan** that runs in the tests, a dev runner with
   PayPal faked in memory, and ~70 new tests with no network anywhere.
 
@@ -183,16 +207,17 @@ client; the Ops tab and `/api/ops/overview` say which one is in use.
    buyer, or create one under Sandbox → Accounts. Optional: put the sandbox personal emails of
    three test accounts in `DEMO_ATHLETE_EMAILS` so the agent's invoices land in the sandbox.
 2. **Config vars** (names in `.env.example`; values never in the repo):
-   `PAYPAL_ENV=sandbox`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, and on Heroku
-   `DATABASE_URL` from the Postgres add-on. Optional: `PAYPAL_WEBHOOK_ID`, `SLA_HOURS`,
-   `REVIEW_PRICE_USD`, `COACH_NAME`, `COACH_EMAIL`, `DEMO_ATHLETE_EMAILS`, `AGENT_MODEL`,
-   `DRAFT_DAILY_LIMIT`, `AGENT_DAILY_LIMIT`, `AGENT_HOURLY_LIMIT`, `PRO_DEMO_MODE`,
-   `ADMIN_DEMO_KEY`. Pro is on when the client id and secret are both set; without them the judge
-   runs exactly as before and the paid flow stays hidden.
+   `PAYPAL_ENV=sandbox`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, **`COACH_PASSWORD`** (the
+   Coach and Ops tabs stay locked without it), and on Heroku `DATABASE_URL` from the Postgres
+   add-on. Optional: `SESSION_SECRET`, `STAFF_LOGIN_HOURLY_LIMIT`, `PAYPAL_WEBHOOK_ID`,
+   `SLA_HOURS` (48; never above 72), `REVIEW_PRICE_USD`, `COACH_NAME`, `COACH_EMAIL`,
+   `DEMO_ATHLETE_EMAILS`, `AGENT_MODEL`, `DRAFT_DAILY_LIMIT`, `AGENT_DAILY_LIMIT`,
+   `AGENT_HOURLY_LIMIT`, `PRO_DEMO_MODE`. Pro is on when the client id and secret are both set;
+   without them the judge runs exactly as before and the paid flow stays hidden.
 3. **Heroku** (buildpack path, what the live app runs):
    ```bash
    heroku addons:create heroku-postgresql:essential-0 -a <app>
-   heroku config:set PAYPAL_ENV=sandbox PAYPAL_CLIENT_ID=… PAYPAL_CLIENT_SECRET=… -a <app>
+   heroku config:set PAYPAL_ENV=sandbox PAYPAL_CLIENT_ID=… PAYPAL_CLIENT_SECRET=… COACH_PASSWORD=… -a <app>
    git push heroku paypal:main          # or Deploy Branch in the dashboard
    heroku run python -c "from server.services.paypal_client import get_paypal; print(get_paypal().access_token()[:8], 'ok')" -a <app>
    ```
@@ -204,22 +229,32 @@ client; the Ops tab and `/api/ops/overview` say which one is in use.
    The store is `.data/sideline-pro.sqlite`. **Without keys**, work on the screens with PayPal
    faked in memory: `python tools/dev_server_fake_paypal.py` (port 8010; its docstring shows how
    to approve a review from the command line, since a fake order cannot pass PayPal's popup).
-5. **Check**: `/api/config` → `pro.pro_enabled: true`; buy the sample; the Coach tab shows the
-   review held with a countdown; Deliver → `CAPTURED` and the athlete's page says charged;
-   Ops → "Expire now" on a held review → `VOIDED`, "You were not charged".
+5. **Sandbox walkthrough** (the smoke test after every deploy): `/api/config` →
+   `pro.pro_enabled: true` and `pro.staff_login_configured: true`. Open the sample result → *Get a
+   coach's eyes* → pay with a **US, English** sandbox buyer (the PayPal popup is in English; the
+   SDK is loaded with `locale=en_US` as a fallback) → the athlete page shows **Held** with the
+   order and authorization ids. **Coach** tab → sign in → open the review → edit the AI draft →
+   *Deliver* → the capture id shows and the athlete page says **Delivered · charged**. Buy a
+   second review → **Ops** → *Expire now* → that athlete sees **Released · not charged**. Ops
+   agent: "Refund <name>'s review, she disputed it" → card → *Confirm* → the refund id is in the
+   audit log and the reply renders as clean text. "Invoice my 3 athletes $60 each" → *Confirm* →
+   three invoices reach **SENT** with their ids in the card and the audit log; a PayPal refusal
+   reads as its error name, the issue and the `debug_id`, never as a bare 500. Signed out,
+   `curl` each coach/ops route → **401**. `python tools/secret_scan.py` → clean.
 
 ### For the judges (testing instructions)
 
 The hosted demo stays free and unrestricted through **Dec 15, 2026 (PT)**. The sandbox buyer
-login goes **only** into the Devpost testing-instructions field — never this README, the video
-or the repo:
+login and the coach/ops password go **only** into the Devpost testing-instructions field — never
+this README, the video or the repo:
 
-> Sandbox only — no real money. Pay with the PayPal sandbox buyer: email
+> Sandbox only — no real money. Pay with the PayPal sandbox buyer (US, English): email
 > `<SANDBOX_BUYER_EMAIL — in Devpost only>` / password `<in Devpost only>`.
+> The **Coach** and **Ops** tabs ask for a password: `<COACH_PASSWORD — in Devpost only>`.
 > Steps: open the sample result → *Get a coach's eyes* → pay with the sandbox buyer → switch to
 > the **Coach** tab → edit the AI draft → *Deliver* (captured) → **Ops** tab: "refund the review
 > for <athlete>" → *Confirm*. To see the 48 h auto-release: **Ops** → *Expire now* on any held
-> review.
+> review. **Ops** → *Reset demo data* puts everything back (holds released, athletes re-seeded).
 
 The whole payment loop runs on the cached sample, so the judge's model budget is never a
 blocker; the ops agent works on the seeded demo athletes (Dan, Noa, Lior).
@@ -228,9 +263,13 @@ blocker; the ops agent works on the seeded demo athletes (Dan, Noa, Lior).
 
 `tests/test_pro_api.py` (checkout → hold → queue → draft → deliver/capture; decline; the SLA
 sweep refusing a late capture; retry then release on capture failure; a review surviving a
-restart; what each role may see), `tests/test_ops_agent.py` (writes only propose; confirm
-executes; wrong/expired/second tokens refused; re-validation at confirm time; three invoices as
-one card through the toolkit bridge; every limit; the denied tools; budgets; the loop's step cap),
+restart; what each role may see; every coach and ops route answering 401 without the sign-in,
+the cookie's signature and expiry, wrong passwords rate-limited; the lift stored as a key and
+shown as a word), `tests/test_ops_agent.py` (writes only propose; confirm executes;
+wrong/expired/second tokens refused; re-validation at confirm time; three invoices as one card
+through the toolkit bridge, created → sent → read back; a PayPal refusal on an invoice surfaced
+with its name, issue and `debug_id` as a 502, one bad line not sinking a batch, a crash recorded
+as FAILED; every limit; the denied tools; budgets; the loop's step cap),
 `tests/test_coach_draft.py` (valid JSON kept, prose tolerated, invalid JSON and model errors fall
 back to the template, the draft budget) and `tests/test_secret_scan.py`. PayPal, the toolkit and
 the model are all faked in `tests/pro_helpers.py`; nothing touches the network.

@@ -8,6 +8,37 @@ about scoring, prompts or the rubric changed. See
 [What's new for PayPal](README.md#sideline-pro--whats-new-for-the-paypal-ai-hackathon-since-oct-30)
 in the README for the design.
 
+### Fixed (pre-submission polish, Oct 30)
+- **Invoices no longer 500.** The Agent Toolkit lets `requests.HTTPError` out on a PayPal 4xx/5xx
+  and nothing caught it, so confirming an invoice left the audit row at CONFIRMED and the page
+  with "Something went wrong". The bridge now turns every toolkit failure into a `PayPalError`
+  (name, issues, `debug_id`) or an `AgentError`; `confirm` records *any* failure as FAILED with
+  the reason and answers 502 with a sentence; one bad invoice in a batch no longer sinks the
+  others. Each invoice is created, sent and **read back**, so the status stored (`invoice_ref`,
+  the card, the audit log) is PayPal's own.
+- **Coach and ops routes need a sign-in** (`server/services/staff_auth.py`, `routes/auth.py`):
+  one password from `COACH_PASSWORD`, a signed HttpOnly session cookie, checked on every coach
+  and ops route (queue, open, deliver, decline, agent, confirm, reject, audit, overview, Expire
+  now, Reset) — 401 without it. Wrong passwords are limited per address. The page shows a
+  sign-in screen for the Coach and Ops tabs and the `#coach:<id>` deep link. `ADMIN_DEMO_KEY` is
+  gone: the demo buttons are for signed-in staff in demo mode.
+- **PayPal in English**: the JS SDK is loaded with `locale=en_US` (a US sandbox buyer is still
+  the right account to demo with).
+- **Agent replies render** a safe subset of markdown (bold, lists, code) into real nodes instead
+  of showing asterisks; "Tools used" appears once, as chips, and a "Tools: …" line the model adds
+  anyway is stripped server side.
+- **No more `LiftType.snatch`**: the lift is stored as its key and sent with a `lift_label`
+  ("Snatch"); old rows are normalised on read. Abandoned checkouts no longer appear in the coach
+  queue or the ops held list.
+- **Valid HTML in the held list**: a review row is a `div` (role=button when it opens something)
+  and "Expire now" is a sibling button, not a button inside a button.
+- **The result screen's "Score my lift" is no longer sticky**, so it never covers the coach offer
+  or the PayPal button on a phone.
+- **Honest copy**: the Ops screen, the footer and the README say which PayPal calls are the app's
+  own (Orders v2 / Payments v2) and which go through the Agent Toolkit (Invoicing v2).
+- README: PayPal and AI named in the first lines, the state machine drawn, who-may-do-what, a
+  sandbox walkthrough, the judge instructions with the password placeholder.
+
 ### Added
 - **Checkout on every verdict card** (real results and the cached sample): "Get a coach's eyes —
   $15", a PayPal JS SDK button loaded with `intent=authorize`, the held-not-charged line, and a
@@ -56,7 +87,7 @@ in the README for the design.
   names passed as quoted data; tool output summarised, never followed.
 - **Role switcher** (Athlete / Coach / Ops, no reload; `#coach`, `#ops` and `#coach:<id>` deep
   links) and a **SANDBOX · no real money** banner on every screen.
-- **Demo-only controls** (`PRO_DEMO_MODE`, optional `ADMIN_DEMO_KEY`): "Expire now" on any held
+- **Demo-only controls** (`PRO_DEMO_MODE`, signed-in staff only): "Expire now" on any held
   review (the sweeper then voids it) and "Reset demo data" (releases every hold, re-seeds Coach
   Maya and the athletes Dan, Noa and Lior).
 - **PayPal webhook** (`POST /paypal/webhook`, P1): signature verified with PayPal, idempotent by
