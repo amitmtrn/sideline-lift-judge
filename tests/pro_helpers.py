@@ -163,8 +163,26 @@ class FakePayPal:
         return {}
 
 
+def paypal_http_error(status: int, body: Dict[str, Any]):
+    """
+    What the real toolkit raises on a PayPal 4xx/5xx: a requests.HTTPError
+    carrying the response. The app must turn it into a sentence, never a 500.
+    """
+    import requests
+
+    response = requests.Response()
+    response.status_code = status
+    response._content = json.dumps(body).encode("utf-8")
+    response.headers["Content-Type"] = "application/json"
+    return requests.exceptions.HTTPError(f"{status} Client Error", response=response)
+
+
 class FakeToolkit:
-    """The Agent Toolkit bridge with the toolkit's shape but a fake PayPal behind it."""
+    """
+    The Agent Toolkit bridge with the toolkit's shape but a fake PayPal
+    behind it. `fail(method, params)` may return an exception to raise, the
+    way the real toolkit lets requests/pydantic errors out.
+    """
 
     def __init__(self, paypal: FakePayPal, *, available: bool = True) -> None:
         from server.services.ops_agent import FALLBACK_DESCRIPTIONS, FALLBACK_SCHEMAS
@@ -175,6 +193,7 @@ class FakeToolkit:
         self._schemas = FALLBACK_SCHEMAS
         self._descriptions = FALLBACK_DESCRIPTIONS
         self.runs: List[Dict[str, Any]] = []
+        self.fail = None  # Optional[Callable[[str, dict], Optional[BaseException]]]
 
     def schema(self, method: str) -> Dict[str, Any]:
         return self._schemas.get(method, {"type": "object", "properties": {}})
@@ -184,10 +203,20 @@ class FakeToolkit:
 
     def run(self, method: str, params: Dict[str, Any]) -> Any:
         from server.services.ops_agent import TOOLKIT_ALLOWED, AgentError
+        from server.services.paypal_client import PayPalError
 
         self.runs.append({"method": method, "params": params})
         if method not in TOOLKIT_ALLOWED:
             raise AgentError(f"{method} is not available to this agent.", status=403)
+        if self.fail is not None:
+            exc = self.fail(method, params)
+            if exc is not None:
+                # The same translation the real bridge does for the real toolkit.
+                import requests
+
+                if isinstance(exc, requests.exceptions.RequestException):
+                    raise PayPalError.from_requests_error(exc) from exc
+                raise exc
         if method == "create_invoice":
             payload = {"detail": {"currency_code": params["currency_code"], "note": params.get("note")}, "items": params["items"]}
             return self.paypal.create_invoice(payload)
@@ -246,7 +275,7 @@ def pro_app(tmp_path, monkeypatch, paypal):
     """
     from fastapi.testclient import TestClient
 
-    from server.services import ops_agent
+    from server.services import ops_agent, staff_auth
     from server.services.budgets import reset_budgets_for_tests
     from server.services.db import reset_db_for_tests
     from server.services.demo_guard import reset_guard
@@ -262,7 +291,9 @@ def pro_app(tmp_path, monkeypatch, paypal):
     monkeypatch.delenv("SAMPLE_CLIP_URL", raising=False)
     monkeypatch.delenv("SAMPLE_RESULT_URL", raising=False)
     monkeypatch.delenv("NEBIUS_API_KEY", raising=False)
-    monkeypatch.delenv("ADMIN_DEMO_KEY", raising=False)
+    monkeypatch.setenv("COACH_PASSWORD", STAFF_PASSWORD)
+    monkeypatch.delenv("SESSION_SECRET", raising=False)
+    monkeypatch.delenv("STAFF_LOGIN_HOURLY_LIMIT", raising=False)
     monkeypatch.delenv("PRO_DEMO_MODE", raising=False)
     monkeypatch.delenv("DYNO", raising=False)
     for name in ("DEMO_ACCESS_CODE", "ACCESS_MODE", "DEMO_DISABLED", "DEMO_DAILY_LIMIT", "DEMO_IP_HOURLY_LIMIT", "MAX_CONCURRENT_JOBS", "TRUSTED_PROXIES"):
@@ -271,6 +302,7 @@ def pro_app(tmp_path, monkeypatch, paypal):
     reset_paypal_for_tests(paypal)
     ops_agent.reset_toolkit_for_tests(FakeToolkit(paypal))
     reset_budgets_for_tests()
+    staff_auth.reset_login_attempts_for_tests()
     reset_store(JobStore(root=tmp_path / "jobs"))
     reset_guard()
     from server.main import app
@@ -278,13 +310,31 @@ def pro_app(tmp_path, monkeypatch, paypal):
     for name in ("DEMO_ACCESS_CODE", "ACCESS_MODE", "DEMO_DISABLED"):
         monkeypatch.delenv(name, raising=False)
     with TestClient(app) as client:
+        # The coach and ops routes need the sign-in; the tests start signed
+        # in and sign out explicitly where that is the point.
+        staff_login(client)
         yield client
     reset_paypal_for_tests(None)
     ops_agent.reset_toolkit_for_tests(None)
     reset_budgets_for_tests()
+    staff_auth.reset_login_attempts_for_tests()
     reset_db_for_tests()
     reset_store(JobStore(root=tmp_path / "jobs-after"))
     reset_guard()
+
+
+STAFF_PASSWORD = "test-pass"
+
+
+def staff_login(client, password: str = STAFF_PASSWORD):
+    response = client.post("/api/auth/login", json={"password": password})
+    assert response.status_code == 200, response.text
+    return response
+
+
+def staff_logout(client) -> None:
+    assert client.post("/api/auth/logout").status_code == 200
+    client.cookies.clear()
 
 
 def buy_sample(client, *, name: str = "Dan", token: str = "tok-dan", note: str = "") -> Dict[str, Any]:

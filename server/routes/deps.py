@@ -1,7 +1,7 @@
 """
 What every Pro route needs: the DB session helper, the error mapping, the
-model client, the image URL shape, and the two gates (Pro configured;
-demo-only buttons).
+model client, the image URL shape, and the three gates (Pro configured; the
+coach/ops sign-in; demo-only buttons).
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from typing import Any, Callable, Optional, TypeVar
 
 from fastapi import HTTPException, Request
 
-from server.services import pro_config
+from server.services import pro_config, staff_auth
 from server.services.db import session_scope
 from server.services.demo_guard import client_ip
 from server.services.nebius_client import NebiusChatClient
@@ -39,17 +39,22 @@ def require_pro() -> None:
         raise HTTPException(status_code=503, detail="Coach review is not set up on this server (PayPal sandbox keys are missing).")
 
 
-def require_demo_admin(request: Request) -> None:
-    """The demo-only buttons: on in demo mode, and behind ADMIN_DEMO_KEY when one is set."""
+def require_staff(request: Request) -> str:
+    """
+    Every coach and ops route: 401 without the signed session cookie. The
+    page then shows the sign-in. Server side, not just hidden in the UI.
+    """
+    role = staff_auth.role_of(request)
+    if role is None:
+        detail = "Sign in as the coach to use this." if staff_auth.configured() else "Coach/ops sign-in is not set up on this server (COACH_PASSWORD is unset)."
+        raise HTTPException(status_code=401, detail=detail, headers={"WWW-Authenticate": "Cookie"})
+    return role
+
+
+def require_demo_mode() -> None:
+    """The demo-only buttons (Expire now, Reset): on in demo mode, and only for signed-in staff (checked by the route)."""
     if not pro_config.demo_mode():
         raise HTTPException(status_code=403, detail="Demo controls are off on this server.")
-    key = pro_config.admin_key()
-    if key:
-        given = (request.headers.get("x-admin-key") or "").strip()
-        import hmac
-
-        if not given or not hmac.compare_digest(given.encode("utf-8"), key.encode("utf-8")):
-            raise HTTPException(status_code=403, detail="This demo control needs the admin key.")
 
 
 def http_error(exc: BaseException) -> HTTPException:

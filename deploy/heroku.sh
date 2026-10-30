@@ -73,6 +73,10 @@ if [ -n "${PAYPAL_CLIENT_ID:-}" ] && [ -n "${PAYPAL_CLIENT_SECRET:-}" ]; then
     heroku addons:create heroku-postgresql:essential-0 -a "$APP"
   fi
 fi
+# The coach/ops sign-in (the Coach and Ops tabs are locked without it).
+if [ -n "${COACH_PASSWORD:-}" ]; then
+  heroku config:set -a "$APP" COACH_PASSWORD="$COACH_PASSWORD"
+fi
 
 heroku container:login
 heroku container:push web -a "$APP"

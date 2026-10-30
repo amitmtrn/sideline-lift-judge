@@ -12,6 +12,7 @@
   "env": {
     "PAYPAL_ENV": { "value": "sandbox", "required": false },
     "PAYPAL_CLIENT_ID": { "description": "PayPal sandbox REST app client id (Sideline Pro)", "required": false },
-    "PAYPAL_CLIENT_SECRET": { "description": "PayPal sandbox REST app secret (Sideline Pro)", "required": false }
+    "PAYPAL_CLIENT_SECRET": { "description": "PayPal sandbox REST app secret (Sideline Pro)", "required": false },
+    "COACH_PASSWORD": { "description": "The coach/ops sign-in for the Coach and Ops tabs (Sideline Pro); give it to judges in Devpost only", "required": false }
   }
 }

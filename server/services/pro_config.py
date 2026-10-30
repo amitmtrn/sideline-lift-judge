@@ -18,8 +18,11 @@ flip a value with monkeypatch:
     AGENT_DAILY_LIMIT       ops-agent model calls per day (60 unless set)
     AGENT_HOURLY_LIMIT      ops-agent requests per visitor per hour (10)
     PRO_DEMO_MODE           true (default): the demo-only buttons — Expire now,
-                            Reset demo data — are on
-    ADMIN_DEMO_KEY          optional; when set those buttons need X-Admin-Key
+                            Reset demo data — are on (for signed-in staff)
+    COACH_PASSWORD          the coach/ops sign-in (services/staff_auth.py);
+                            unset, every coach and ops route answers 401
+    SESSION_SECRET          optional; signs the session cookie (else derived
+                            from the password)
     PAYPAL_INVOICE_MAX_USD  200 unless set; AGENT_INVOICE_MAX_COUNT 5
     DEMO_ATHLETE_EMAILS     comma-separated sandbox personal emails for the
                             three seeded athletes (invoices go there)
@@ -188,9 +191,9 @@ def demo_mode() -> bool:
     return _flag("PRO_DEMO_MODE", True)
 
 
-def admin_key() -> str:
-    """ADMIN_DEMO_KEY: when set, the demo-only buttons need it as X-Admin-Key."""
-    return (os.getenv("ADMIN_DEMO_KEY") or "").strip()
+def staff_login_configured() -> bool:
+    """Whether COACH_PASSWORD is set; the page shows the sign-in only then."""
+    return bool((os.getenv("COACH_PASSWORD") or "").strip())
 
 
 def coach_name() -> str:
@@ -221,7 +224,7 @@ def public_config() -> dict:
         "price_usd": price_usd(),
         "sla_hours": sla_hours(),
         "demo_mode": demo_mode(),
-        "demo_controls_locked": bool(admin_key()),
+        "staff_login_configured": staff_login_configured(),
         "coach_name": coach_name(),
     }
 
@@ -243,8 +246,8 @@ def describe() -> str:
     store = "Postgres" if not using_sqlite() else f"SQLite at {sqlite_path()} (set DATABASE_URL for a durable store)"
     return (
         f"Pro (coach review): on, PayPal {paypal_env()}, ${price_usd():.2f} per review, SLA {sla_hours():g} h, "
-        f"store {store}, demo buttons {'on' if demo_mode() else 'off'}"
-        f"{' (X-Admin-Key required)' if admin_key() else ''}"
+        f"store {store}, demo buttons {'on' if demo_mode() else 'off'}, "
+        f"coach/ops sign-in {'set' if staff_login_configured() else 'NOT SET (COACH_PASSWORD) — coach and ops routes are locked'}"
     )
 
 

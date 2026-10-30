@@ -35,7 +35,7 @@ PATTERNS: List[Tuple[str, re.Pattern]] = [
     ("private key", re.compile(r"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
     ("Heroku API key", re.compile(r"\bHRKU-[A-Za-z0-9_-]{20,}\b")),
     ("Postgres URL with password", re.compile(r"\bpostgres(?:ql)?://[^:\s/]+:[^@\s/]{8,}@[^\s]+")),
-    ("assigned secret", re.compile(r"(?i)\b(?:PAYPAL_CLIENT_SECRET|NEBIUS_API_KEY|DEMO_ACCESS_CODE|ADMIN_DEMO_KEY)\s*=\s*['\"]?(?!your_|change-me|the-code|sb-|<|\$|test|\s|$)[A-Za-z0-9_\-]{24,}")),
+    ("assigned secret", re.compile(r"(?i)\b(?:PAYPAL_CLIENT_SECRET|NEBIUS_API_KEY|DEMO_ACCESS_CODE|COACH_PASSWORD|SESSION_SECRET)\s*=\s*['\"]?(?!your_|change-me|the-code|sb-|<|\$|test|\s|$)[A-Za-z0-9_\-]{16,}")),
 ]
 SKIP_SUFFIXES = (".png", ".jpg", ".jpeg", ".mp4", ".mov", ".svg", ".ico", ".woff", ".woff2", ".pyc", ".sqlite")
 SKIP_PARTS = (".git/", ".venv/", "node_modules/", "__pycache__/", "samples/", "out/")

@@ -37,6 +37,8 @@ os.environ["PAYPAL_CLIENT_ID"] = "sb"  # PayPal's generic sandbox id: the button
 os.environ["PAYPAL_CLIENT_SECRET"] = "fake-local-secret"
 os.environ.setdefault("PRO_DB_PATH", str(ROOT / ".data" / "dev-fake" / "pro.sqlite"))
 os.environ.setdefault("DEMO_SAMPLE_DIR", str(ROOT / "demo_sample"))
+# The coach/ops sign-in for this runner only. Never the deploy's password.
+os.environ.setdefault("COACH_PASSWORD", "dev")
 os.environ.pop("DATABASE_URL", None)
 
 from server.services import ops_agent  # noqa: E402
@@ -52,4 +54,5 @@ if __name__ == "__main__":
 
     port = int(os.getenv("DEV_PORT") or "8010")
     print(f"Sideline Pro dev server with a FAKE PayPal on http://127.0.0.1:{port}  (Ctrl-C to stop)")
+    print(f"Coach/ops sign-in password: {os.environ['COACH_PASSWORD']}  (COACH_PASSWORD)")
     uvicorn.run("server.main:app", host="127.0.0.1", port=port, reload=False, log_level="info")

@@ -1,6 +1,7 @@
 """
 The coach's side: the queue sorted by deadline, one review with its AI
-draft, Deliver (capture) and Decline (void).
+draft, Deliver (capture) and Decline (void). Every route needs the staff
+sign-in (routes/auth.py); the queue never lists checkouts nobody paid for.
 
     GET  /api/coach/queue                 held first, nearest deadline first
     GET  /api/coach/reviews/{id}          opens it (AUTHORIZED → IN_REVIEW); draft included
@@ -14,7 +15,7 @@ from typing import Any, Dict, List
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from server.routes.deps import image_url, in_thread, require_pro
+from server.routes.deps import image_url, in_thread, require_pro, require_staff
 from server.services import reviews
 from server.services.db import session_scope
 
@@ -26,6 +27,7 @@ def _queue_row(review) -> Dict[str, Any]:
     snapshot = body.get("snapshot") or {}
     body["snapshot"] = {
         "lift": snapshot.get("lift"),
+        "lift_label": snapshot.get("lift_label"),
         "score": snapshot.get("score"),
         "band": snapshot.get("band"),
         "keyframes": (snapshot.get("keyframes") or [])[:1],
@@ -38,8 +40,9 @@ def _queue_row(review) -> Dict[str, Any]:
 
 
 @router.get("/api/coach/queue")
-async def coach_queue():
+async def coach_queue(request: Request):
     require_pro()
+    require_staff(request)
 
     def work() -> List[Dict[str, Any]]:
         with session_scope() as session:
@@ -51,8 +54,9 @@ async def coach_queue():
 
 
 @router.get("/api/coach/reviews/{review_id}")
-async def coach_review(review_id: str):
+async def coach_review(review_id: str, request: Request):
     require_pro()
+    require_staff(request)
 
     def work() -> Dict[str, Any]:
         with session_scope() as session:
@@ -73,6 +77,7 @@ async def coach_review(review_id: str):
 @router.post("/api/coach/reviews/{review_id}/deliver")
 async def deliver_review(review_id: str, request: Request):
     require_pro()
+    require_staff(request)
     try:
         body = await request.json()
     except Exception:
@@ -89,8 +94,9 @@ async def deliver_review(review_id: str, request: Request):
 
 
 @router.post("/api/coach/reviews/{review_id}/decline")
-async def decline_review(review_id: str):
+async def decline_review(review_id: str, request: Request):
     require_pro()
+    require_staff(request)
 
     def work() -> Dict[str, Any]:
         with session_scope() as session:

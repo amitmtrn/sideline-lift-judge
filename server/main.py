@@ -280,13 +280,14 @@ app.add_middleware(DemoGateMiddleware)
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
 
-# Sideline Pro: the paid coach review (checkout, coach queue, ops agent, webhook).
+# Sideline Pro: the paid coach review (checkout, the coach/ops sign-in, coach queue, ops agent, webhook).
+from server.routes import auth as _auth_routes  # noqa: E402
 from server.routes import checkout as _checkout_routes  # noqa: E402
 from server.routes import coach as _coach_routes  # noqa: E402
 from server.routes import ops as _ops_routes  # noqa: E402
 from server.routes import webhook as _webhook_routes  # noqa: E402
 
-for _router in (_checkout_routes.router, _coach_routes.router, _ops_routes.router, _webhook_routes.router):
+for _router in (_auth_routes.router, _checkout_routes.router, _coach_routes.router, _ops_routes.router, _webhook_routes.router):
     app.include_router(_router)
 
 LIFT_CHOICES = [lift.value for lift in LiftType]

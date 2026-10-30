@@ -1,6 +1,6 @@
 """
 The Ops tab: the plain-English agent, its confirm cards and audit log, and
-the demo-only controls.
+the demo-only controls. Every route needs the staff sign-in (routes/auth.py).
 
     POST /api/ops/agent                      a request → reply + proposed action cards
     POST /api/ops/actions/{id}/confirm       the tap: re-validate, execute, record
@@ -24,8 +24,9 @@ from server.routes.deps import (
     image_url,
     in_thread,
     model_client,
-    require_demo_admin,
+    require_demo_mode,
     require_pro,
+    require_staff,
     visitor_key,
 )
 from server.services import ops_agent, pro_config, reviews
@@ -39,6 +40,7 @@ router = APIRouter()
 @router.post("/api/ops/agent")
 async def ops_agent_request(request: Request):
     require_pro()
+    require_staff(request)
     try:
         body = await request.json()
     except Exception:
@@ -75,6 +77,7 @@ async def ops_agent_request(request: Request):
 @router.post("/api/ops/actions/{action_id}/confirm")
 async def confirm_action(action_id: str, request: Request):
     require_pro()
+    require_staff(request)
     try:
         body = await request.json()
     except Exception:
@@ -90,8 +93,9 @@ async def confirm_action(action_id: str, request: Request):
 
 
 @router.post("/api/ops/actions/{action_id}/reject")
-async def reject_action(action_id: str):
+async def reject_action(action_id: str, request: Request):
     require_pro()
+    require_staff(request)
 
     def work() -> Dict[str, Any]:
         with session_scope() as session:
@@ -101,8 +105,9 @@ async def reject_action(action_id: str):
 
 
 @router.get("/api/ops/actions")
-async def list_actions():
+async def list_actions(request: Request):
     require_pro()
+    require_staff(request)
 
     def work() -> List[Dict[str, Any]]:
         with session_scope() as session:
@@ -112,8 +117,9 @@ async def list_actions():
 
 
 @router.get("/api/ops/overview")
-async def overview():
+async def overview(request: Request):
     require_pro()
+    require_staff(request)
 
     def work() -> Dict[str, Any]:
         with session_scope() as session:
@@ -126,7 +132,12 @@ async def overview():
                 row.pop("ai_draft", None)
                 row.pop("coach_review", None)
                 snapshot = row.get("snapshot") or {}
-                row["snapshot"] = {"lift": snapshot.get("lift"), "score": snapshot.get("score"), "band": snapshot.get("band")}
+                row["snapshot"] = {
+                    "lift": snapshot.get("lift"),
+                    "lift_label": snapshot.get("lift_label"),
+                    "score": snapshot.get("score"),
+                    "band": snapshot.get("band"),
+                }
             return {
                 "held": held,
                 "ledger": reviews.ledger_summary(session, days=7),
@@ -136,6 +147,7 @@ async def overview():
                 "agent_calls_remaining_today": agent_budget().remaining_today(),
                 "tool_source": ops_agent.toolkit().label,
                 "model": ops_agent.agent_model(),
+                "sla_hours": pro_config.sla_hours(),
                 "examples": [
                     "Refund Dan's review, I can't make it this week.",
                     "Invoice my 3 athletes $60 each for November programming.",
@@ -149,9 +161,10 @@ async def overview():
 
 @router.post("/api/ops/reviews/{review_id}/expire")
 async def expire_review(review_id: str, request: Request):
-    """Demo: what 48 hours would do, now."""
+    """Demo: what the deadline would do, now."""
     require_pro()
-    require_demo_admin(request)
+    require_staff(request)
+    require_demo_mode()
 
     def work() -> Dict[str, Any]:
         with session_scope() as session:
@@ -163,9 +176,10 @@ async def expire_review(review_id: str, request: Request):
 
 @router.post("/api/ops/reset")
 async def reset_demo(request: Request):
-    """Demo: release every sandbox hold this app placed, forget the rows, re-seed."""
+    """Demo: release every sandbox hold this app placed, forget the rows, re-seed the athletes and the coach."""
     require_pro()
-    require_demo_admin(request)
+    require_staff(request)
+    require_demo_mode()
 
     def work() -> Dict[str, Any]:
         released = 0

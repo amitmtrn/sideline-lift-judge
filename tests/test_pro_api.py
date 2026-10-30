@@ -12,8 +12,8 @@ from datetime import timedelta
 import pytest
 
 from server.services import reviews
-from server.services.db import ReviewOrder, session_scope, utcnow
-from tests.pro_helpers import FakePayPal, buy_sample, paypal, pro_app  # noqa: F401  (fixtures)
+from server.services.db import LiftSnapshot, ReviewOrder, session_scope, utcnow
+from tests.pro_helpers import FakePayPal, buy_sample, paypal, pro_app, staff_login, staff_logout  # noqa: F401  (fixtures)
 
 
 def _wait_drafts(client) -> None:
@@ -56,7 +56,90 @@ def test_config_exposes_the_public_bits_only(pro_app):
     assert pro["paypal_client_id"] == "sb-client-id"
     assert pro["paypal_env"] == "sandbox"
     assert pro["price_usd"] == 15.0 and pro["sla_hours"] == 48.0
-    assert "secret" not in str(pro).lower()
+    assert pro["staff_login_configured"] is True
+    assert "secret" not in str(pro).lower() and "test-pass" not in str(pro)
+
+
+# ---------- the coach/ops sign-in ----------
+
+
+STAFF_ROUTES = [
+    ("GET", "/api/coach/queue"),
+    ("GET", "/api/coach/reviews/{id}"),
+    ("POST", "/api/coach/reviews/{id}/deliver"),
+    ("POST", "/api/coach/reviews/{id}/decline"),
+    ("POST", "/api/ops/agent"),
+    ("POST", "/api/ops/actions/x/confirm"),
+    ("POST", "/api/ops/actions/x/reject"),
+    ("GET", "/api/ops/actions"),
+    ("GET", "/api/ops/overview"),
+    ("POST", "/api/ops/reviews/{id}/expire"),
+    ("POST", "/api/ops/reset"),
+]
+
+
+def test_every_coach_and_ops_route_is_locked_without_the_sign_in(pro_app, paypal):
+    """P0-2: server side, not just hidden in the UI; the athlete's own routes stay open."""
+    review = buy_sample(pro_app, name="Dan")
+    staff_logout(pro_app)
+    for method, path in STAFF_ROUTES:
+        response = pro_app.request(method, path.format(id=review["id"]), json={} if method == "POST" else None)
+        assert response.status_code == 401, f"{method} {path}: {response.status_code} {response.text}"
+        assert "sign in" in response.json()["detail"].lower()
+    # Nothing moved while locked out.
+    assert not any(call["method"] in ("capture_authorization", "void_authorization") for call in paypal.calls)
+    # The athlete still reads their own review by its unguessable id, and can still buy.
+    assert pro_app.get(f"/api/reviews/{review['id']}").status_code == 200
+    assert pro_app.get("/api/reviews/mine", headers={"X-Athlete-Token": "tok-dan"}).json()["reviews"][0]["id"] == review["id"]
+    assert pro_app.post("/api/checkout/reviews", json={"source": "sample", "athlete_token": "t2"}).status_code == 201
+    # Signed in, the same routes answer.
+    staff_login(pro_app)
+    assert pro_app.get("/api/coach/queue").status_code == 200
+    assert pro_app.get("/api/ops/overview").status_code == 200
+
+
+def test_sign_in_is_a_signed_httponly_cookie(pro_app, monkeypatch):
+    staff_logout(pro_app)
+    me = pro_app.get("/api/auth/me").json()
+    assert me == {"staff": False, "role": None, "configured": True}
+    wrong = pro_app.post("/api/auth/login", json={"password": "nope"})
+    assert wrong.status_code == 401 and "sp_staff" not in wrong.headers.get("set-cookie", "")
+    assert pro_app.get("/api/coach/queue").status_code == 401
+
+    ok = staff_login(pro_app)
+    cookie = ok.headers["set-cookie"]
+    assert "sp_staff=" in cookie and "HttpOnly" in cookie and "SameSite=lax" in cookie.replace("Lax", "lax")
+    assert pro_app.get("/api/auth/me").json()["staff"] is True
+    assert pro_app.get("/api/coach/queue").status_code == 200
+
+    # A forged or tampered cookie is worthless.
+    token = pro_app.cookies.get("sp_staff")
+    role, expires, nonce, signature = token.split(".")
+    pro_app.cookies.set("sp_staff", f"{role}.{int(expires) + 10}.{nonce}.{signature}")
+    assert pro_app.get("/api/coach/queue").status_code == 401
+    pro_app.cookies.set("sp_staff", "staff.9999999999.abcd.notasignature")
+    assert pro_app.get("/api/coach/queue").status_code == 401
+
+    # Changing the password signs everyone out; no password locks the routes with a reason.
+    pro_app.cookies.set("sp_staff", token)
+    monkeypatch.setenv("COACH_PASSWORD", "another-one")
+    assert pro_app.get("/api/coach/queue").status_code == 401
+    monkeypatch.setenv("COACH_PASSWORD", "")
+    locked = pro_app.get("/api/ops/overview")
+    assert locked.status_code == 401 and "COACH_PASSWORD" in locked.json()["detail"]
+    assert pro_app.post("/api/auth/login", json={"password": "x"}).status_code == 503
+    assert pro_app.get("/api/auth/me").json()["configured"] is False
+
+
+def test_wrong_passwords_are_rate_limited_per_address(pro_app, monkeypatch):
+    staff_logout(pro_app)
+    monkeypatch.setenv("STAFF_LOGIN_HOURLY_LIMIT", "3")
+    for _ in range(3):
+        assert pro_app.post("/api/auth/login", json={"password": "nope"}).status_code == 401
+    blocked = pro_app.post("/api/auth/login", json={"password": "nope"})
+    assert blocked.status_code == 429 and "Retry-After" in blocked.headers
+    # The right password is blocked too, until the hour turns: the limit is on attempts.
+    assert pro_app.post("/api/auth/login", json={"password": "test-pass"}).status_code == 429
 
 
 def test_buying_the_sample_holds_the_money_and_snapshots_the_lift(pro_app, paypal):
@@ -166,13 +249,18 @@ def test_expire_now_is_the_demo_shortcut(pro_app, paypal):
     assert expired.json()["status"] == "VOIDED" and expired.json()["void_reason"] == "sla_expired"
 
 
-def test_expire_now_needs_the_admin_key_when_one_is_set(pro_app, monkeypatch):
+def test_expire_now_is_for_signed_in_staff_in_demo_mode_only(pro_app, monkeypatch, paypal):
     review = buy_sample(pro_app)
-    monkeypatch.setenv("ADMIN_DEMO_KEY", "k1")
-    assert pro_app.post(f"/api/ops/reviews/{review['id']}/expire").status_code == 403
-    assert pro_app.post(f"/api/ops/reviews/{review['id']}/expire", headers={"X-Admin-Key": "k1"}).status_code == 200
+    staff_logout(pro_app)
+    assert pro_app.post(f"/api/ops/reviews/{review['id']}/expire").status_code == 401
+    assert pro_app.post("/api/ops/reset").status_code == 401
+    staff_login(pro_app)
     monkeypatch.setenv("PRO_DEMO_MODE", "false")
-    assert pro_app.post(f"/api/ops/reviews/{review['id']}/expire", headers={"X-Admin-Key": "k1"}).status_code == 403
+    assert pro_app.post(f"/api/ops/reviews/{review['id']}/expire").status_code == 403
+    assert pro_app.post("/api/ops/reset").status_code == 403
+    assert not any(call["method"] == "void_authorization" for call in paypal.calls)
+    monkeypatch.setenv("PRO_DEMO_MODE", "true")
+    assert pro_app.post(f"/api/ops/reviews/{review['id']}/expire").status_code == 200
 
 
 def test_a_transient_capture_error_is_retried_once(pro_app, paypal):
@@ -206,6 +294,7 @@ def test_a_review_survives_a_restart(pro_app, tmp_path, monkeypatch, paypal):
     _wait_drafts(pro_app)
     reset_db_for_tests()  # drop the engine, as a restart would
     with TestClient(app) as restarted:
+        staff_login(restarted)
         queue = restarted.get("/api/coach/queue").json()
         assert [row["id"] for row in queue["reviews"]] == [review["id"]]
         detail = restarted.get(f"/api/coach/reviews/{review['id']}").json()
@@ -232,9 +321,13 @@ def test_abandoned_checkouts_are_swept(pro_app):
     with session_scope() as session:
         row = session.get(ReviewOrder, created["review_id"])
         row.created_at = utcnow() - timedelta(minutes=31)
-    pro_app.get("/api/coach/queue")
+    queue = pro_app.get("/api/coach/queue").json()
     mine = pro_app.get(f"/api/reviews/{created['review_id']}").json()
     assert mine["status"] == "ABANDONED"
+    # Neither the unpaid checkout nor its abandoned remains clutter the coach's queue.
+    assert queue["reviews"] == []
+    assert pro_app.get("/api/coach/queue").json()["reviews"] == []
+    assert pro_app.get("/api/ops/overview").json()["held"] == []
 
 
 def test_a_job_result_can_be_bought_too(pro_app, tmp_path, monkeypatch):
@@ -256,6 +349,35 @@ def test_a_job_result_can_be_bought_too(pro_app, tmp_path, monkeypatch):
     assert review["snapshot"]["measurement"]["max_drift_cm_estimate"] == 9
     gone = pro_app.post("/api/checkout/reviews", json={"source": "job", "job_id": "nope", "athlete_token": "t"})
     assert gone.status_code == 404 and "expired" in gone.json()["detail"]
+
+
+def test_the_lift_is_stored_as_a_key_and_shown_as_a_word(pro_app):
+    """P1-2: a live job carries the LiftType enum; "LiftType.snatch" must never reach a screen."""
+    from server.schemas.judgment import LiftType
+    from server.services.jobs import get_store
+
+    store = get_store()
+    job = store.create()
+    job.status = "done"
+    job.payload = {"lifts": [{"index": 1, "lift": LiftType.snatch, "score": 6, "band": "mixed", "cues": ["x"], "confidence": 0.7, "warnings": [], "evidenced_cues": []}]}
+    created = pro_app.post("/api/checkout/reviews", json={"source": "job", "job_id": job.id, "lift_index": 1, "athlete_token": "t", "athlete_name": "Amit"})
+    review = pro_app.post(f"/api/checkout/reviews/{created.json()['review_id']}/approve").json()
+    assert review["snapshot"]["lift"] == "snatch" and review["snapshot"]["lift_label"] == "Snatch"
+    row = pro_app.get("/api/coach/queue").json()["reviews"][0]
+    assert row["snapshot"]["lift"] == "snatch" and row["snapshot"]["lift_label"] == "Snatch"
+    assert "LiftType" not in pro_app.get("/api/coach/queue").text
+    assert "LiftType" not in pro_app.get(f"/api/coach/reviews/{review['id']}").text
+
+    # A row written before the fix reads the same way, and the agent's lookup still matches it.
+    with session_scope() as session:
+        snapshot = session.get(LiftSnapshot, review["snapshot"]["id"])
+        snapshot.lift_type = "LiftType.snatch"
+    overview = pro_app.get("/api/ops/overview").json()
+    assert overview["held"][0]["snapshot"] == {"lift": "snatch", "lift_label": "Snatch", "score": 6, "band": "mixed"}
+    with session_scope() as session:
+        assert [r.id for r in reviews.find_reviews(session, lift="snatch")] == [review["id"]]
+        assert reviews.find_reviews(session, lift="clean") == []
+    assert "LiftType." not in pro_app.get("/").text
 
 
 def test_live_mode_is_refused(monkeypatch):
