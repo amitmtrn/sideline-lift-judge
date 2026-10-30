@@ -58,6 +58,7 @@ from server.services.pipeline import (
 )
 from server.services.results import lift_payload, outcome_payload
 from server.services.sample import load_sample, sample_dir
+from server.services import pro_config, sweeper
 from server.utils.uploads import (
     UnsupportedUpload,
     UploadTooLarge,
@@ -183,11 +184,35 @@ def _refuse_to_start_uncapped() -> None:
     raise RuntimeError(message)
 
 
+def _start_pro() -> None:
+    """
+    The paid coach review: refuse anything but the PayPal sandbox, open the
+    store, seed the coach and the demo athletes, and start the sweeper that
+    releases expired holds. Without PayPal keys none of this runs and the
+    judge works exactly as before.
+    """
+    pro_config.assert_sandbox()
+    logger.info(pro_config.describe())
+    if not pro_config.pro_enabled():
+        return
+    from server.services.db import init_db
+
+    init_db()
+    if pro_config.using_sqlite() and os.getenv("DYNO"):
+        logger.warning(
+            "Pro is using a SQLite file on a Heroku dyno: paid reviews will not survive a restart. "
+            "Add Heroku Postgres (DATABASE_URL)."
+        )
+    sweeper.start()
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     _refuse_to_start_uncapped()
     _log_configuration()
+    _start_pro()
     yield
+    await sweeper.stop()
     # Never leave uploaded clips or replays behind (spec §12).
     get_store().shutdown()
 
@@ -254,6 +279,15 @@ app.add_middleware(DemoGateMiddleware)
 # Mount static and templates
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Jinja2Templates(directory=TEMPLATES_DIR)
+
+# Sideline Pro: the paid coach review (checkout, coach queue, ops agent, webhook).
+from server.routes import checkout as _checkout_routes  # noqa: E402
+from server.routes import coach as _coach_routes  # noqa: E402
+from server.routes import ops as _ops_routes  # noqa: E402
+from server.routes import webhook as _webhook_routes  # noqa: E402
+
+for _router in (_checkout_routes.router, _coach_routes.router, _ops_routes.router, _webhook_routes.router):
+    app.include_router(_router)
 
 LIFT_CHOICES = [lift.value for lift in LiftType]
 
@@ -336,7 +370,40 @@ def _public_config() -> Dict[str, Any]:
         "daily_calls_remaining": guard.remaining_today() if limit else None,
         "vision": model_display_name(vision_model()),
         "judge": judge_display_name(),
+        "pro": pro_config.public_config(),
     }
+
+
+def _render_index(request: Request, *, initial_review: Optional[str] = None) -> HTMLResponse:
+    return templates.TemplateResponse(
+        request,
+        "index.html",
+        {
+            "default_lift": "snatch",
+            "lifts": LIFT_CHOICES,
+            "min_frames": MIN_FRAMES,
+            "max_frames": max_frames(),
+            "default_frames": DEFAULT_FRAMES,
+            "max_upload_mb": max_upload_bytes() // (1024 * 1024),
+            "max_clip_seconds": max_clip_seconds(),
+            "max_lifts_per_clip": max_lifts_per_clip(),
+            "access_mode": access_mode(),
+            "access_required": access_required(),
+            "demo_disabled": demo_disabled(),
+            "sample_available": load_sample() is not None,
+            "judge_name": judge_display_name(),
+            "vision_name": model_display_name(vision_model()),
+            "pro": pro_config.public_config(),
+            "initial_review": initial_review or "",
+        },
+    )
+
+
+@app.get("/review/{review_id}", response_class=HTMLResponse)
+async def review_page(request: Request, review_id: str):
+    """The athlete's status page: the same app, opened on that review."""
+    safe = "".join(ch for ch in review_id if ch.isalnum())[:64]
+    return _render_index(request, initial_review=safe)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -359,26 +426,7 @@ async def index(request: Request):
             samesite="lax",
         )
         return response
-    return templates.TemplateResponse(
-        request,
-        "index.html",
-        {
-            "default_lift": "snatch",
-            "lifts": LIFT_CHOICES,
-            "min_frames": MIN_FRAMES,
-            "max_frames": max_frames(),
-            "default_frames": DEFAULT_FRAMES,
-            "max_upload_mb": max_upload_bytes() // (1024 * 1024),
-            "max_clip_seconds": max_clip_seconds(),
-            "max_lifts_per_clip": max_lifts_per_clip(),
-            "access_mode": access_mode(),
-            "access_required": access_required(),
-            "demo_disabled": demo_disabled(),
-            "sample_available": load_sample() is not None,
-            "judge_name": judge_display_name(),
-            "vision_name": model_display_name(vision_model()),
-        },
-    )
+    return _render_index(request)
 
 
 @app.get("/manifest.webmanifest", include_in_schema=False)
