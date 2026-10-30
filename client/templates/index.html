@@ -29,10 +29,22 @@
       <header>
         <div class="masthead">
           <img class="mark" src="/static/img/mark.svg" alt="" width="26" height="26" />
-          <h1>Lift Judge</h1>
-          <span class="tagline">Bar path</span>
+          <h1>{% if pro.pro_enabled %}Sideline Pro{% else %}Lift Judge{% endif %}</h1>
+          <span class="tagline">{% if pro.pro_enabled %}AI judge · human coach{% else %}Bar path{% endif %}</span>
         </div>
         <div class="knurl" aria-hidden="true"></div>
+        <!-- Sideline Pro: the sandbox banner is on every screen while the paid
+             flow is on, and the role switcher is how the demo moves between
+             the athlete, the coach and the ops agent without a reload. Both
+             ship hidden and the JS shows them when PayPal is configured. -->
+        <p class="sandbox-banner" id="sandbox-banner" hidden>
+          <span class="dot" aria-hidden="true"></span>SANDBOX · no real money · PayPal test accounts only
+        </p>
+        <nav class="roles" id="role-switch" aria-label="Role" hidden>
+          <button type="button" data-role="athlete" aria-pressed="true">Athlete</button>
+          <button type="button" data-role="coach" aria-pressed="false">Coach <span class="count" id="coach-count" hidden></span></button>
+          <button type="button" data-role="ops" aria-pressed="false">Ops</button>
+        </nav>
       </header>
 
       <main>
@@ -64,6 +76,15 @@
             {% if max_clip_seconds and max_upload_mb %}Clips need to be under {{ max_clip_seconds|int }} seconds and {{ max_upload_mb }} MB.{% elif max_upload_mb %}Clips need to be under {{ max_upload_mb }} MB.{% endif %}
             Nothing is kept: the clip is deleted as soon as it is scored.
           </p>
+          {% if pro.pro_enabled %}
+          <p class="field-hint hero-hint">
+            After the score, a human coach can review the lift for ${{ pro.price_usd|int }}: PayPal holds the
+            money and it is charged only when the review arrives within {{ pro.sla_hours|int }} h.
+          </p>
+          <div class="actions" id="my-reviews-actions" hidden>
+            <button type="button" class="ghost" data-pro="my-reviews">📋 My coach reviews</button>
+          </div>
+          {% endif %}
         </section>
 
         <!-- 1. Choose lift -->
@@ -253,11 +274,88 @@
             {% endif %}
           </div>
         </section>
+
+        <!-- ===== Sideline Pro: the paid coach review (PayPal sandbox) ===== -->
+
+        <!-- Athlete: one review's status page (also /review/{id}) -->
+        <section class="screen" data-screen="review-status" aria-labelledby="status-title">
+          <p class="step-label">Coach review</p>
+          <h2 id="status-title">Your review</h2>
+          <div id="review-status"></div>
+          <div class="actions">
+            <button type="button" class="ghost" data-pro="my-reviews">📋 All my reviews</button>
+            <button type="button" class="ghost" data-go="start">Back to the start</button>
+          </div>
+        </section>
+
+        <!-- Athlete: every review this device bought -->
+        <section class="screen" data-screen="my-reviews" aria-labelledby="my-reviews-title">
+          <p class="step-label">Coach reviews</p>
+          <h2 id="my-reviews-title">My reviews</h2>
+          <div id="my-reviews" class="review-list"></div>
+          <div class="actions">
+            <button type="button" class="ghost" data-go="start">Back to the start</button>
+          </div>
+        </section>
+
+        <!-- Coach: the queue, nearest deadline first -->
+        <section class="screen" data-screen="coach" aria-labelledby="coach-title">
+          <p class="step-label">Coach</p>
+          <h2 id="coach-title">Review queue</h2>
+          <p class="lede">Paid reviews, nearest deadline first. Each opens with the AI report written up as a draft.</p>
+          <p id="coach-error" class="notice" hidden></p>
+          <div id="coach-queue" class="review-list"></div>
+        </section>
+
+        <!-- Coach: one review, the AI draft to edit, Deliver or Decline -->
+        <section class="screen" data-screen="coach-review" aria-labelledby="coach-review-title">
+          <p class="step-label">Coach</p>
+          <h2 id="coach-review-title">Review</h2>
+          <div id="coach-review"></div>
+          <div class="actions">
+            <button type="button" class="ghost" data-pro="coach-queue">← Back to the queue</button>
+          </div>
+        </section>
+
+        <!-- Ops: the agent, its confirm cards, the audit log, the demo controls -->
+        <section class="screen" data-screen="ops" aria-labelledby="ops-title">
+          <p class="step-label">Ops</p>
+          <h2 id="ops-title">Ops agent</h2>
+          <p class="lede">
+            Payments and invoices in plain English, on the PayPal Agent Toolkit. Nothing that moves money or
+            sends anything runs until you tap Confirm.
+          </p>
+          <div id="ops-chat" class="chat" aria-live="polite"></div>
+          <form id="ops-form" class="chat-form" autocomplete="off">
+            <label for="ops-prompt" class="sr-only">Ask the ops agent</label>
+            <input id="ops-prompt" type="text" maxlength="600" placeholder="e.g. Refund Dan's review, I can't make it" />
+            <button type="submit" id="ops-send">Ask</button>
+          </form>
+          <div id="ops-examples" class="chips"></div>
+          <p id="ops-error" class="notice" hidden></p>
+
+          <details class="ops-panel" open>
+            <summary>Held reviews</summary>
+            <div id="ops-held" class="review-list"></div>
+          </details>
+          <details class="ops-panel">
+            <summary>This week</summary>
+            <div id="ops-ledger"></div>
+          </details>
+          <details class="ops-panel">
+            <summary>Audit log</summary>
+            <div id="ops-audit" class="audit"></div>
+          </details>
+          <div class="actions" id="ops-demo-actions" hidden>
+            <button type="button" class="ghost" data-pro="reset-demo">Reset demo data</button>
+          </div>
+        </section>
       </main>
 
       <footer>
         <span id="install-hint" hidden>Add to Home Screen for a full-screen app. </span>
         {% if demo_disabled %}Live scoring paused · {% elif access_mode == "open" %}Open demo, no code needed · daily limit applies · {% elif access_mode == "link" %}Demo by link · {% elif access_required %}Demo by access code · {% endif %}CV tracker measured → {{ vision_name }} observed → {{ judge_name }} judged, on Nebius Token Factory ·
+        {% if pro.pro_enabled %}PayPal sandbox: Orders v2 (authorize) → Payments v2 (capture / void / refund) · Invoicing via the PayPal Agent Toolkit · {% endif %}
         <a href="https://github.com/amitmtrn/sideline-lift-judge">source (MIT)</a>
       </footer>
     </div>
@@ -273,9 +371,12 @@
         accessMode: "{{ access_mode }}",
         accessRequired: {{ "true" if access_required else "false" }},
         demoDisabled: {{ "true" if demo_disabled else "false" }},
-        sampleAvailable: {{ "true" if sample_available else "false" }}
+        sampleAvailable: {{ "true" if sample_available else "false" }},
+        pro: {{ pro|tojson }},
+        initialReview: "{{ initial_review }}"
       };
     </script>
     <script src="/static/app.js"></script>
+    <script src="/static/pro.js"></script>
   </body>
 </html>

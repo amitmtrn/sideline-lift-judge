@@ -909,7 +909,16 @@
     }
 
     scored.forEach((item, position) => {
-      container.appendChild(verdictCard(item, position));
+      const card = verdictCard(item, position);
+      container.appendChild(card);
+      // Sideline Pro (pro.js): the "Get a coach's eyes" call to action under
+      // the verdict, when PayPal is configured. The sample can be bought too.
+      if (window.SidelinePro && typeof window.SidelinePro.decorateCard === "function") {
+        window.SidelinePro.decorateCard(card, item, {
+          source: payload.sample ? "sample" : "job",
+          jobId: payload.sample ? null : state.jobId,
+        });
+      }
     });
     // A lift that failed after others scored — the demo budget ran out
     // part-way, say — is shown, not silently dropped.

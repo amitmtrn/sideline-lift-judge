@@ -1163,3 +1163,623 @@ footer a {
     transition-duration: 0.001s !important;
   }
 }
+
+/* ======================================================================
+ * Sideline Pro — the paid coach review (PayPal sandbox).
+ * Three roles on one page: the athlete's checkout and status, the coach's
+ * queue and editor, the ops agent's chat and confirm cards.
+ * ====================================================================== */
+
+/* The sandbox banner: on every screen while Pro is on. */
+.sandbox-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 7px 10px;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--plate-yellow);
+  background: rgba(242, 194, 48, 0.1);
+  border: 1px solid rgba(242, 194, 48, 0.35);
+  border-radius: var(--radius);
+}
+
+.sandbox-banner .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--plate-yellow);
+  box-shadow: 0 0 0 3px rgba(242, 194, 48, 0.2);
+}
+
+/* The role switcher: Athlete / Coach / Ops. */
+.roles {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.roles button {
+  min-height: 40px;
+  padding: 6px 8px;
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--chalk-dim);
+  background: var(--steel-850);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.roles button[aria-pressed="true"] {
+  color: var(--steel-950);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.roles .count {
+  display: inline-block;
+  min-width: 20px;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 12px;
+  color: var(--chalk);
+  background: var(--plate-red);
+  border-radius: 10px;
+}
+
+.roles button[aria-pressed="true"] .count {
+  color: var(--chalk);
+}
+
+/* The call to action under a verdict. */
+.pro-cta {
+  margin-top: 18px;
+  padding: 14px;
+  background: var(--steel-850);
+  border: 1px solid var(--line-bright);
+  border-left: 3px solid var(--plate-blue);
+  border-radius: var(--radius);
+}
+
+.pro-cta h3 {
+  margin: 0 0 6px;
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.pro-cta-line {
+  margin: 0 0 12px;
+  font-size: 14px;
+  color: var(--chalk-dim);
+}
+
+.pro-cta > button {
+  width: 100%;
+}
+
+.checkout {
+  margin-top: 6px;
+}
+
+.checkout .field {
+  margin-top: 12px;
+}
+
+.paypal-buttons {
+  margin-top: 12px;
+  min-height: 48px;
+}
+
+input[type="text"],
+textarea,
+select {
+  width: 100%;
+  min-height: var(--tap);
+  padding: 12px 14px;
+  font-family: var(--font-body);
+  font-size: 17px;
+  color: var(--chalk);
+  background: var(--steel-850);
+  border: 1px solid var(--line-bright);
+  border-radius: var(--radius);
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+textarea {
+  resize: vertical;
+  line-height: 1.4;
+}
+
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* Review rows and cards (athlete list, coach queue, ops held list). */
+.review-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.review-row {
+  display: block;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  color: var(--chalk);
+  background: var(--steel-850);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.review-row:hover {
+  border-color: var(--line-bright);
+  background: var(--steel-800);
+  filter: none;
+}
+
+.row-top,
+.review-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.row-bottom {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--chalk-dim);
+}
+
+.row-actions {
+  margin-top: 10px;
+}
+
+button.small {
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 14px;
+}
+
+.status-badge {
+  flex: none;
+  padding: 3px 8px;
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--chalk);
+  background: var(--steel-700);
+  border-radius: 3px;
+}
+
+.status-badge[data-state="held"] {
+  color: var(--steel-950);
+  background: var(--plate-yellow);
+}
+
+.status-badge[data-state="captured"] {
+  color: var(--steel-950);
+  background: var(--plate-green);
+}
+
+.status-badge[data-state="refunded"] {
+  background: var(--plate-blue);
+}
+
+.status-badge[data-state="released"] {
+  background: var(--plate-red);
+}
+
+.review-card {
+  margin-top: 8px;
+  padding: 16px 14px;
+  background: var(--steel-850);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.status-detail {
+  margin: 12px 0 0;
+  font-size: 17px;
+}
+
+.deadline {
+  margin: 8px 0 0;
+  font-size: 14px;
+  color: var(--plate-yellow);
+}
+
+.paypal-ids {
+  margin: 14px 0 0;
+  font-size: 12px;
+  color: var(--chalk-faint);
+  word-break: break-all;
+}
+
+.review-card a {
+  color: var(--plate-blue);
+  word-break: break-all;
+}
+
+.paypal-ids .k {
+  display: block;
+  margin-bottom: 2px;
+  font-family: var(--font-display);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.keyframes {
+  display: flex;
+  gap: 8px;
+  margin: 12px 0 0;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.keyframes figure {
+  flex: none;
+  width: 78%;
+  max-width: 360px;
+  margin: 0;
+}
+
+.keyframes img {
+  display: block;
+  width: 100%;
+  border-radius: 3px;
+  border: 1px solid var(--line);
+}
+
+.keyframes figcaption {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--chalk-faint);
+}
+
+.ai-report {
+  margin-top: 10px;
+}
+
+.ai-report .score-row {
+  margin-top: 4px;
+}
+
+.ai-report .drift {
+  margin-top: 8px;
+}
+
+.cue-list {
+  margin: 10px 0 0;
+  padding-left: 20px;
+  font-size: 15px;
+}
+
+.cue-list li {
+  margin-bottom: 6px;
+}
+
+.coach-words {
+  margin-top: 16px;
+  padding: 14px;
+  background: var(--steel-800);
+  border-left: 3px solid var(--plate-green);
+  border-radius: 2px;
+}
+
+.coach-words h3 {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-size: 16px;
+  font-weight: 400;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--plate-green);
+}
+
+.coach-words .override {
+  margin: 0 0 8px;
+  font-family: var(--font-display);
+  font-size: 18px;
+  letter-spacing: 0.04em;
+}
+
+.coach-words .summary {
+  margin: 0;
+  font-size: 17px;
+}
+
+.coach-words .drill {
+  margin: 10px 0 0;
+  font-size: 15px;
+  color: var(--chalk-dim);
+}
+
+.athlete-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  font-size: 15px;
+  background: var(--steel-800);
+  border-radius: var(--radius);
+}
+
+.athlete-note .k {
+  display: block;
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--chalk-faint);
+}
+
+.ai-panel {
+  margin-top: 12px;
+}
+
+/* The coach's editor. */
+.draft-editor {
+  margin-top: 16px;
+}
+
+.draft-label {
+  margin: 0 0 4px;
+  font-size: 14px;
+  color: var(--chalk-dim);
+}
+
+.draft-label .tag {
+  display: inline-block;
+  padding: 2px 7px;
+  margin-right: 4px;
+  font-family: var(--font-display);
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--steel-950);
+  background: var(--plate-blue);
+  border-radius: 3px;
+}
+
+.draft-editor .field {
+  margin-top: 12px;
+}
+
+.pair-fields {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.pair-fields .field {
+  min-width: 0;
+}
+
+/* Ops: chat, cards, chips, panels. */
+.chat {
+  display: grid;
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.bubble {
+  max-width: 94%;
+  padding: 10px 12px;
+  font-size: 15px;
+  line-height: 1.4;
+  border-radius: 8px;
+}
+
+.bubble p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.bubble.user {
+  justify-self: end;
+  color: var(--steel-950);
+  background: var(--accent);
+}
+
+.bubble.assistant {
+  justify-self: start;
+  background: var(--steel-800);
+  border: 1px solid var(--line);
+}
+
+.bubble.thinking {
+  color: var(--chalk-dim);
+  font-style: italic;
+}
+
+.bubble.system {
+  justify-self: stretch;
+  max-width: none;
+  color: var(--chalk-dim);
+  background: transparent;
+  border: 1px dashed var(--line);
+}
+
+.tools-line {
+  margin-top: 8px !important;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  color: var(--chalk-faint);
+}
+
+.chat-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.chat-form button {
+  min-width: 80px;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.chip {
+  padding: 6px 10px;
+  font-family: var(--font-body);
+  font-size: 13px;
+  color: var(--chalk-dim);
+  background: var(--steel-850);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  cursor: pointer;
+}
+
+.action-card {
+  margin-top: 10px;
+  padding: 12px;
+  background: var(--steel-850);
+  border: 1px solid var(--plate-yellow);
+  border-radius: var(--radius);
+}
+
+.action-card[data-state="EXECUTED"] {
+  border-color: var(--plate-green);
+}
+
+.action-card[data-state="FAILED"],
+.action-card[data-state="REJECTED"] {
+  border-color: var(--plate-red);
+}
+
+.action-title {
+  margin: 0 0 4px !important;
+  font-family: var(--font-display);
+  font-size: 14px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--plate-yellow);
+}
+
+.action-summary {
+  margin: 0 !important;
+  font-size: 15px;
+}
+
+.action-card .actions {
+  margin-top: 10px;
+}
+
+.action-card .actions button {
+  min-height: 44px;
+}
+
+.action-result {
+  margin: 8px 0 0 !important;
+  font-size: 14px;
+  color: var(--chalk);
+}
+
+.invoice-link {
+  display: block;
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--plate-blue);
+}
+
+.ops-panel {
+  margin-top: 16px;
+  padding: 10px 12px;
+  background: var(--steel-850);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.ops-panel summary {
+  font-family: var(--font-display);
+  font-size: 15px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--chalk-dim);
+  cursor: pointer;
+}
+
+.ledger {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 14px;
+  margin: 10px 0 0;
+  font-size: 15px;
+}
+
+.ledger dt {
+  color: var(--chalk-dim);
+}
+
+.ledger dd {
+  margin: 0;
+  text-align: right;
+  font-family: var(--font-display);
+  letter-spacing: 0.04em;
+}
+
+.audit {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.audit-row {
+  padding: 8px 10px;
+  background: var(--steel-800);
+  border-left: 3px solid var(--line-bright);
+  border-radius: 2px;
+}
+
+.audit-row[data-state="EXECUTED"] {
+  border-left-color: var(--plate-green);
+}
+
+.audit-row[data-state="FAILED"],
+.audit-row[data-state="REJECTED"],
+.audit-row[data-state="EXPIRED"] {
+  border-left-color: var(--plate-red);
+}
+
+.audit-row[data-state="PROPOSED"] {
+  border-left-color: var(--plate-yellow);
+}
+
+.audit-row .tool {
+  font-family: var(--font-display);
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.audit-row .summary {
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+
+.audit-row .status-badge {
+  font-size: 11px;
+}

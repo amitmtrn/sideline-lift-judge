@@ -5,11 +5,12 @@
  */
 // Bump this with every change to the shell files below: they are served
 // cache-first, so an installed app keeps the old script until the name changes.
-const CACHE = "lift-judge-v6";
+const CACHE = "lift-judge-v7";
 const SHELL = [
   "/",
   "/static/styles.css",
   "/static/app.js",
+  "/static/pro.js",
   "/manifest.webmanifest",
   "/static/img/mark.svg",
   "/static/img/filming-guide.svg",
