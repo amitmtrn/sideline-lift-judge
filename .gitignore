@@ -37,3 +37,6 @@ out/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Sideline Pro: the local SQLite store (tools/dev_server_fake_paypal.py, a local run)
+.data/

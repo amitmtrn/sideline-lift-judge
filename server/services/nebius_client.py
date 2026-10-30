@@ -202,6 +202,65 @@ class NebiusChatClient:
         except Exception:
             raise RuntimeError(f"Unexpected response format: {json.dumps(data)[:500]}")
 
+    async def create_tool_completion(
+        self,
+        messages: List[ChatMessage],
+        *,
+        tools: List[Dict[str, Any]],
+        model: Optional[str] = None,
+        max_tokens: int = 800,
+        tool_choice: str = "auto",
+    ) -> Dict[str, Any]:
+        """
+        One turn of OpenAI-style function calling: the whole assistant
+        message comes back (`content` and any `tool_calls`), not just the
+        text, so the caller can run the tools and continue. Same metering,
+        timeouts and single retry as create_chat_completion; thinking off.
+        """
+        url = f"{self.base_url}/chat/completions"
+        payload: Dict[str, Any] = {
+            "model": model or self.default_model,
+            "messages": messages,
+            "temperature": 0.0,
+            "max_tokens": max_tokens,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        }
+        payload.update(NO_THINKING_EXTRA_BODY)
+        timeout = (CONNECT_TIMEOUT_SECONDS, read_timeout_seconds())
+
+        def post(body: Dict[str, Any]):
+            return requests.post(url, headers=self._headers(), json=body, timeout=timeout)
+
+        async def attempt(body: Dict[str, Any]):
+            if self.meter is not None:
+                self.meter()
+            try:
+                return await asyncio.to_thread(post, body), None
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as exc:
+                return None, exc
+
+        response, timeout_exc = await attempt(payload)
+        if response is not None and response.status_code in UNKNOWN_PARAMETER_STATUS:
+            # The provider may not know the no-thinking hint: ask again without it.
+            payload = {key: value for key, value in payload.items() if key != "chat_template_kwargs"}
+            response, timeout_exc = await attempt(payload)
+        if timeout_exc is not None or (response is not None and response.status_code in RETRYABLE_STATUS):
+            await asyncio.sleep(RETRY_BACKOFF_SECONDS)
+            response, timeout_exc = await attempt(payload)
+        if timeout_exc is not None:
+            raise timeout_exc
+        if response.status_code != 200:
+            raise NebiusAPIError(response.status_code, str(response.text)[:500])
+        data = response.json()
+        try:
+            message = dict(data["choices"][0]["message"])
+        except Exception:
+            raise RuntimeError(f"Unexpected response format: {json.dumps(data)[:500]}")
+        if isinstance(message.get("content"), str):
+            message["content"] = strip_think_blocks(message["content"])
+        return message
+
 
 def _load_prompt(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:

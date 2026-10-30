@@ -63,6 +63,16 @@ fi
 if [ -n "$ACCESS_MODE" ]; then
   heroku config:set -a "$APP" ACCESS_MODE="$ACCESS_MODE"
 fi
+# Sideline Pro (the paid coach review): sandbox PayPal keys from the
+# environment, and Heroku Postgres so paid reviews outlive a dyno restart.
+# Without the keys the judge deploys exactly as before and the flow stays off.
+if [ -n "${PAYPAL_CLIENT_ID:-}" ] && [ -n "${PAYPAL_CLIENT_SECRET:-}" ]; then
+  heroku config:set -a "$APP" PAYPAL_ENV=sandbox \
+    PAYPAL_CLIENT_ID="$PAYPAL_CLIENT_ID" PAYPAL_CLIENT_SECRET="$PAYPAL_CLIENT_SECRET"
+  if ! heroku addons -a "$APP" 2>/dev/null | grep -q heroku-postgresql; then
+    heroku addons:create heroku-postgresql:essential-0 -a "$APP"
+  fi
+fi
 
 heroku container:login
 heroku container:push web -a "$APP"

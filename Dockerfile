@@ -41,7 +41,8 @@ ENV NEBIUS_JUDGE_MODEL=nvidia/nemotron-3-super-120b-a12b \
     MAX_FRAMES=10 \
     MAX_UPLOAD_MB=60 \
     JOB_TIMEOUT_SECONDS=120 \
-    DEMO_SAMPLE_DIR=/app/demo_sample
+    DEMO_SAMPLE_DIR=/app/demo_sample \
+    PAYPAL_ENV=sandbox
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ffmpeg fonts-dejavu-core libglib2.0-0 \
@@ -50,7 +51,10 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+RUN pip install -r requirements.txt \
+    # The PayPal Agent Toolkit's pins do not resolve on Python 3.13; its
+    # framework-free layer is all the ops agent needs (see requirements.txt).
+    && pip install --no-deps paypal-agent-toolkit==1.11.0
 
 COPY server server
 COPY client client

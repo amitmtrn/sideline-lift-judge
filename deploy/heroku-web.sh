@@ -36,5 +36,7 @@ export MAX_UPLOAD_MB="${MAX_UPLOAD_MB:-60}"
 export JOB_TIMEOUT_SECONDS="${JOB_TIMEOUT_SECONDS:-120}"
 export TRUSTED_PROXIES="${TRUSTED_PROXIES:-*}"
 export DEMO_SAMPLE_DIR="${DEMO_SAMPLE_DIR:-demo_sample}"
+# Sideline Pro is sandbox-only; the keys themselves are config vars.
+export PAYPAL_ENV="${PAYPAL_ENV:-sandbox}"
 
 exec uvicorn server.main:app --host 0.0.0.0 --port "${PORT:-8000}" --workers 1 --timeout-keep-alive 75

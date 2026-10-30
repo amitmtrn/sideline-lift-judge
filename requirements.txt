@@ -11,6 +11,16 @@ opencv-python-headless==4.10.0.84  # frame sampling and the motion scan
 numpy==2.5.4                      # imported directly, not just via OpenCV
 imageio-ffmpeg==0.6.0              # bundled ffmpeg binary used when none is on PATH (Heroku without the apt buildpack)
 
+# Sideline Pro: the paid coach review (PayPal sandbox)
+sqlalchemy==2.0.36                 # reviews, snapshots, payment events, agent actions
+psycopg[binary]==3.2.3             # Heroku Postgres driver (DATABASE_URL); SQLite needs nothing
+# The PayPal Agent Toolkit (Python) is installed separately with --no-deps:
+# its pins (openai-agents==0.0.2, crewai-tools, langchain) do not resolve on
+# Python 3.13. The Dockerfile and bin/post_compile both run
+#   pip install --no-deps paypal-agent-toolkit==1.11.0
+# and the app uses its framework-free `shared` layer. Without the package the
+# ops agent's invoice tools fall back to the built-in Invoicing v2 client.
+
 # Tests
 pytest==8.3.3
 httpx==0.28.1                     # required by starlette's TestClient

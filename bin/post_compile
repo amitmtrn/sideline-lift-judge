@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# Heroku Python buildpack hook: runs after `pip install -r requirements.txt`.
+# The PayPal Agent Toolkit's own pins (openai-agents==0.0.2, crewai-tools,
+# langchain) do not resolve on Python 3.13, so it cannot sit in
+# requirements.txt; installed without dependencies, its framework-free
+# `shared` layer imports fine and is all the ops agent uses. The Dockerfile
+# does the same for the container path.
+set -euo pipefail
+echo "-----> Installing paypal-agent-toolkit (no deps) for the ops agent"
+pip install --no-deps paypal-agent-toolkit==1.11.0
+python -c "import paypal_agent_toolkit.shared.tools as t; print('       toolkit tools:', len(t.tools))"
