@@ -7,6 +7,11 @@ can use it from the side of the platform.
 
 ▶ **Demo video:** <https://www.youtube.com/watch?v=3E22yknw8Nk>
 
+**New — Sideline Pro:** a paid human-coach review on top of the judge, with PayPal
+authorize-then-capture as escrow, an AI-drafted coach review and an ops agent on the PayPal Agent
+Toolkit. Sandbox only. See
+[What's new for the PayPal AI Hackathon](#sideline-pro--whats-new-for-the-paypal-ai-hackathon-since-oct-30).
+
 Built for the Nebius × NVIDIA Global AI Hackathon. The judge is an **NVIDIA Nemotron 3** model —
 **Super** in the public demo, Ultra by default in a checkout — and both stages run on
 **Nebius Token Factory**.
@@ -41,6 +46,194 @@ when the dyno restarts (see [Limitations](#limitations)).\
   first call, a run deadline, a cheaper judge with no fallback, a kill switch, and a free cached
   sample so a judge never meets a dead end — all on by default in the deploys, and the access
   mode (`open` / `link` / `code`) is one config variable
+
+## Sideline Pro — what's new for the PayPal AI Hackathon (since Oct 30)
+
+> **An AI judge that scores your lift in a minute. A human coach confirms it in 48 hours, or you
+> never pay.**
+
+Sideline Pro adds a **paid human-coach review** to the judge above, built for the
+[PayPal AI Hackathon](https://paypalaihackathon.devpost.com/). The athlete gets the AI bar-path
+score as before, then buys a coach review through **PayPal Checkout**. The money is **authorized
+at purchase, captured only when the coach delivers, and voided automatically if the coach misses
+the 48 h deadline** — authorize-then-capture as escrow. The coach's queue opens every review with
+the **AI report already written up as a draft**, and a plain-English **ops agent on the PayPal
+Agent Toolkit** handles refunds and invoices, with a human tap between the model and the money.
+Everything runs in the **PayPal sandbox**; this build refuses a live environment. The state of
+the repo before any of this is tagged [`v1-nebius`](https://github.com/amitmtrn/sideline-lift-judge/releases/tag/v1-nebius);
+[CHANGELOG.md](CHANGELOG.md) lists every change.
+
+### The loop
+
+```
+ athlete                      PayPal (sandbox)                     coach                       ops agent
+ ───────                      ────────────────                     ─────                       ─────────
+ score a lift (or the sample)
+ tap "Get a coach's eyes — $15"
+   ├─ POST /api/checkout/reviews ──► Orders v2: create (AUTHORIZE,
+   │   lift snapshotted into Postgres    custom_id = review id)
+   ├─ PayPal button (JS SDK,
+   │   intent=authorize) ─ approve ─► Orders v2: authorize ──► AUTHORIZED: $15 HELD, sla_due_at = +48 h
+   │                                                            AI draft written (1 Nemotron call)
+   │                                                          queue, nearest deadline first
+   │                                                          open → IN_REVIEW, edit the draft
+   │                                   Payments v2: capture ◄── Deliver ──► CAPTURED: charged $15
+   │                                   Payments v2: void    ◄── Decline / SLA sweeper ──► VOIDED: not charged
+   └─ /review/{id}: "Held" → "Delivered · charged" or "Released · not charged"
+                                       Payments v2: refund  ◄── "refund Dan" → card → Confirm ──┘
+                                       Invoicing v2 (Agent Toolkit) ◄── "invoice my 3 athletes $60" → card → Confirm
+```
+
+### What changed since `v1-nebius`
+
+- **Checkout on every verdict card**, the cached sample included (so judges can run the whole
+  payment loop at zero model cost): a PayPal JS SDK button loaded with `intent=authorize`, the
+  line "Held, not charged, until Coach Maya delivers (48 h)", and a status page per review.
+- **PaymentService** (`server/services/paypal_client.py`): the only place a PayPal URL is
+  spelled. OAuth client-credentials token (cached), Orders v2 create + authorize, Payments v2
+  capture / void / refund, order lookup, webhook verification, Invoicing v2 helpers. Every write
+  carries a `PayPal-Request-Id`, so a retry cannot double-charge or double-void.
+- **A durable store** (`server/services/db.py`): Heroku Postgres (`DATABASE_URL`), SQLite in a
+  checkout. The lift — judgment JSON, measurement, warnings and up to four evidence stills — is
+  **snapshotted at purchase**, because a job lives thirty minutes and a dyno disk is wiped on
+  restart.
+- **A review state machine with an SLA sweeper** (`server/services/reviews.py`,
+  `server/services/sweeper.py`), compare-and-set on every transition, no capture after the
+  deadline, one retry on a transient capture error then the hold is released.
+- **Coach queue + editor** with the **AI draft** (`server/services/coach_draft.py`): one
+  Nemotron call per paid review, schema-validated, a template when the model or the budget
+  fails. Deliver captures; Decline voids; a coach may override the score and band.
+- **The ops agent** (`server/services/ops_agent.py`): function calling on Nebius Token Factory,
+  PayPal Agent Toolkit tools plus app tools, **confirm-before-write cards**, an audit log, and
+  limits enforced in code.
+- **Role switcher** (Athlete / Coach / Ops, no reload), a **SANDBOX · no real money** banner on
+  every screen, and demo-only **Expire now** and **Reset demo data** buttons.
+- A PayPal **webhook** endpoint (P1), a **secret scan** that runs in the tests, a dev runner with
+  PayPal faked in memory, and ~70 new tests with no network anywhere.
+
+### PayPal integration
+
+| Step | API | Endpoint | Notes |
+| --- | --- | --- | --- |
+| Button | JavaScript SDK | `/sdk/js?client-id=…&intent=authorize` | `intent=authorize`, or the SDK defaults to capture |
+| Create | Orders v2 | `POST /v2/checkout/orders` | `intent: AUTHORIZE`, `custom_id` = review id, $15 USD |
+| Hold | Orders v2 | `POST /v2/checkout/orders/{id}/authorize` | in `onApprove`, server side; stores the authorization id and expiry |
+| Deliver | Payments v2 | `POST /v2/payments/authorizations/{id}/capture` | `final_capture: true`; stores the capture id |
+| Release | Payments v2 | `POST /v2/payments/authorizations/{id}/void` | SLA miss, Decline, agent cancel, capture failure |
+| Refund | Payments v2 | `POST /v2/payments/captures/{id}/refund` | full amount only |
+| Reconcile | Orders v2 | `GET /v2/checkout/orders/{id}` | after a crash mid-transition, and on `ORDER_ALREADY_AUTHORIZED` |
+| Invoices | Invoicing v2 via the **Agent Toolkit** | `create_invoice`, `send_invoice`, `list_invoices`, `get_invoice`, `send_invoice_reminder`, `cancel_sent_invoice` | to the seeded athletes' sandbox personal accounts |
+| Webhook (P1) | Notifications | `POST /v1/notifications/verify-webhook-signature` | `/paypal/webhook`; simulator events cannot verify, use real sandbox payments |
+
+**Timing that shaped the design.** An authorization holds funds for 29 days but capture is only
+guaranteed inside the **3-day honor period**; the 48 h SLA fits inside it, so there is no
+reauthorize logic and `SLA_HOURS` is capped at 72 in code. `PAYMENT.AUTHORIZATION.VOIDED` also
+fires when an authorization expires; the webhook handles it idempotently.
+
+**The PayPal Agent Toolkit (Python), honestly.** `paypal-agent-toolkit` 1.11.0 does not install on
+Python 3.13 as published — its pins (`openai-agents==0.0.2`, `crewai-tools`, `langchain`) do not
+resolve — so the Dockerfile and `bin/post_compile` (the Heroku buildpack hook) run
+`pip install --no-deps paypal-agent-toolkit==1.11.0` and the app uses the framework-free
+`paypal_agent_toolkit.shared` layer: its tool schemas become OpenAI-format tool definitions and
+`PayPalAPI.run(method, params)` executes them. The Python toolkit has **no refund tool and no
+authorization capture/void tools** (only the TypeScript one has `create_refund`), so release and
+refund are **app tools** that wrap the PaymentService and keep the state machine authoritative;
+the toolkit does invoices and order lookup. `get_merchant_insights` is not exposed (it fails in
+sandbox) and earnings come from the local ledger rather than Transaction Search, which lags up to
+three hours. If the package is missing the invoice tools fall back to the built-in Invoicing v2
+client; the Ops tab and `/api/ops/overview` say which one is in use.
+
+### AI, in three places
+
+1. **The judge**, unchanged: OpenCV plate tracker → MiniCPM-V 4.5 observations → NVIDIA
+   Nemotron 3 Super verdict with evidence-backed cues (everything above this section).
+2. **The coach draft** (`prompts/coach_draft.txt`): the judgment JSON, the measurement, the
+   warnings and the athlete's note (quoted data) go to Nemotron once, when the hold is placed.
+   The reply must validate as `{summary, cues[1–3]{text, evidence_ref}, drill, confidence_note,
+   suggested_score, suggested_band}`; otherwise, or when `DRAFT_DAILY_LIMIT` is spent, a
+   deterministic template built from the judge's cues takes its place. The editor labels it
+   "AI draft — edit before delivering"; the athlete sees only what the coach delivered, marked
+   "Reviewed by Coach Maya (AI-assisted)". The delivered review records how long it took and how
+   much of the draft's text survived.
+3. **The ops agent** (`prompts/ops_agent.txt`): system prompt + the request (quoted) → model with
+   tools → at most 6 tool rounds → an answer that lists the tools it called. `AGENT_MODEL`
+   defaults to the judge model; set another Token Factory model with solid function calling if
+   Nemotron's tool calls prove unreliable.
+
+**Guardrails, in code rather than the prompt:**
+- Write tools never execute inside the model loop. The call becomes an `agent_action` row in
+  status `PROPOSED` and a card with the exact effect, amount and recipient. Only a tap on
+  Confirm — a single-use token, valid ten minutes — executes it, and the server re-validates the
+  review's state and the limits at that moment.
+- Allowlist: `create_order`, `pay_order`, subscriptions, products, disputes, shipments and
+  `get_merchant_insights` are not on the menu, in the schema list or at execution.
+- One release/refund per review, for exactly its amount. Invoices at most
+  `PAYPAL_INVOICE_MAX_USD` (200) each and `AGENT_INVOICE_MAX_COUNT` (5) per request, USD, to
+  athletes `list_athletes` knows. Sandbox-only assertion before every call. Idempotency keys.
+- Budgets of their own: `AGENT_DAILY_LIMIT` model calls per day, `AGENT_HOURLY_LIMIT` requests
+  per visitor per hour, `DRAFT_DAILY_LIMIT` drafts per day — separate from the judge's
+  `DEMO_DAILY_LIMIT`, so the payment loop on the sample never competes with clip scoring.
+- Names, notes and invoice text are quoted data; tool output is summarised, never followed.
+
+### Running it (sandbox)
+
+1. **PayPal**: developer.paypal.com → Apps & Credentials (**Sandbox**) → create a REST app
+   linked to the default sandbox *business* account (that account is "Coach Maya", the
+   merchant). Note the client id and secret. Use the default sandbox *personal* account as the
+   buyer, or create one under Sandbox → Accounts. Optional: put the sandbox personal emails of
+   three test accounts in `DEMO_ATHLETE_EMAILS` so the agent's invoices land in the sandbox.
+2. **Config vars** (names in `.env.example`; values never in the repo):
+   `PAYPAL_ENV=sandbox`, `PAYPAL_CLIENT_ID`, `PAYPAL_CLIENT_SECRET`, and on Heroku
+   `DATABASE_URL` from the Postgres add-on. Optional: `PAYPAL_WEBHOOK_ID`, `SLA_HOURS`,
+   `REVIEW_PRICE_USD`, `COACH_NAME`, `COACH_EMAIL`, `DEMO_ATHLETE_EMAILS`, `AGENT_MODEL`,
+   `DRAFT_DAILY_LIMIT`, `AGENT_DAILY_LIMIT`, `AGENT_HOURLY_LIMIT`, `PRO_DEMO_MODE`,
+   `ADMIN_DEMO_KEY`. Pro is on when the client id and secret are both set; without them the judge
+   runs exactly as before and the paid flow stays hidden.
+3. **Heroku** (buildpack path, what the live app runs):
+   ```bash
+   heroku addons:create heroku-postgresql:essential-0 -a <app>
+   heroku config:set PAYPAL_ENV=sandbox PAYPAL_CLIENT_ID=… PAYPAL_CLIENT_SECRET=… -a <app>
+   git push heroku paypal:main          # or Deploy Branch in the dashboard
+   heroku run python -c "from server.services.paypal_client import get_paypal; print(get_paypal().access_token()[:8], 'ok')" -a <app>
+   ```
+   `bin/post_compile` installs the Agent Toolkit during the build (its log line says
+   `toolkit tools: 42`). The startup log prints one `Pro (coach review): on …` line naming the
+   store; a SQLite store on a dyno is warned about, since it would not survive a restart.
+   `deploy/heroku.sh` (container path) passes the same variables through and creates the add-on.
+4. **Locally, with real sandbox keys**: put them in `.env` and `uvicorn server.main:app --reload`.
+   The store is `.data/sideline-pro.sqlite`. **Without keys**, work on the screens with PayPal
+   faked in memory: `python tools/dev_server_fake_paypal.py` (port 8010; its docstring shows how
+   to approve a review from the command line, since a fake order cannot pass PayPal's popup).
+5. **Check**: `/api/config` → `pro.pro_enabled: true`; buy the sample; the Coach tab shows the
+   review held with a countdown; Deliver → `CAPTURED` and the athlete's page says charged;
+   Ops → "Expire now" on a held review → `VOIDED`, "You were not charged".
+
+### For the judges (testing instructions)
+
+The hosted demo stays free and unrestricted through **Dec 15, 2026 (PT)**. The sandbox buyer
+login goes **only** into the Devpost testing-instructions field — never this README, the video
+or the repo:
+
+> Sandbox only — no real money. Pay with the PayPal sandbox buyer: email
+> `<SANDBOX_BUYER_EMAIL — in Devpost only>` / password `<in Devpost only>`.
+> Steps: open the sample result → *Get a coach's eyes* → pay with the sandbox buyer → switch to
+> the **Coach** tab → edit the AI draft → *Deliver* (captured) → **Ops** tab: "refund the review
+> for <athlete>" → *Confirm*. To see the 48 h auto-release: **Ops** → *Expire now* on any held
+> review.
+
+The whole payment loop runs on the cached sample, so the judge's model budget is never a
+blocker; the ops agent works on the seeded demo athletes (Dan, Noa, Lior).
+
+### Tests for the Pro loop
+
+`tests/test_pro_api.py` (checkout → hold → queue → draft → deliver/capture; decline; the SLA
+sweep refusing a late capture; retry then release on capture failure; a review surviving a
+restart; what each role may see), `tests/test_ops_agent.py` (writes only propose; confirm
+executes; wrong/expired/second tokens refused; re-validation at confirm time; three invoices as
+one card through the toolkit bridge; every limit; the denied tools; budgets; the loop's step cap),
+`tests/test_coach_draft.py` (valid JSON kept, prose tolerated, invalid JSON and model errors fall
+back to the template, the draft budget) and `tests/test_secret_scan.py`. PayPal, the toolkit and
+the model are all faked in `tests/pro_helpers.py`; nothing touches the network.
 
 ### How a clip becomes a verdict
 
