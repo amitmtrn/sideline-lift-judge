@@ -9,13 +9,14 @@ from datetime import timedelta
 import pytest
 
 from server.services import ops_agent
-from server.services.db import AgentAction, session_scope, utcnow
+from server.services.db import AgentAction, InvoiceRef, session_scope, utcnow
 from tests.pro_helpers import (  # noqa: F401  (fixtures)
     FakeToolkit,
     ScriptedModel,
     buy_sample,
     final,
     paypal,
+    paypal_http_error,
     pro_app,
     tool_call,
 )
@@ -45,6 +46,8 @@ def test_a_refund_request_proposes_and_nothing_runs_until_confirm(pro_app, paypa
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["tools_called"] == ["find_reviews", "cancel_or_refund_review"]
+    # The page shows the tools as chips; the model's own "Tools: …" line is not shown a second time.
+    assert body["reply"] == "I found Dan's snatch review, held at $15. I proposed releasing the hold; tap Confirm."
     assert len(body["actions"]) == 1
     card = body["actions"][0]
     assert card["status"] == "PROPOSED" and card["tool"] == "cancel_or_refund_review"
@@ -153,11 +156,107 @@ def test_three_invoices_are_one_card_and_go_through_the_toolkit(pro_app, paypal)
     assert len(sent) == 3 and all(i["status"] == "SENT" and i["invoice_id"].startswith("INV2-") for i in sent)
     assert all(i["link"].startswith("https://www.sandbox.paypal.com/invoice/p/#") for i in sent)
     assert confirmed["result"]["tool_source"] == "PayPal Agent Toolkit (fake)"
+    assert confirmed["result"]["errors"] == []
     bridge = ops_agent.toolkit()
-    assert [run["method"] for run in bridge.runs] == ["create_invoice", "send_invoice"] * 3
+    # Create the draft, send it, read it back (the status stored is PayPal's).
+    assert [run["method"] for run in bridge.runs] == ["create_invoice", "send_invoice", "get_invoice"] * 3
     assert bridge.runs[0]["params"]["currency_code"] == "USD"
     assert bridge.runs[0]["params"]["items"][0]["unit_amount"]["value"] == "60.00"
+    assert bridge.runs[1]["params"] == {"invoice_id": sent[0]["invoice_id"], "send_to_recipient": True}
     assert all(invoice["status"] == "SENT" for invoice in paypal.invoices.values())
+    # The ids are in the app and the audit log.
+    assert confirmed["paypal_id"] == ",".join(i["invoice_id"] for i in sent)
+    log = pro_app.get("/api/ops/actions").json()["actions"][0]
+    assert log["status"] == "EXECUTED" and log["paypal_id"] == confirmed["paypal_id"]
+    with session_scope() as session:
+        refs = session.query(InvoiceRef).all()
+        assert sorted(r.paypal_invoice_id for r in refs) == sorted(i["invoice_id"] for i in sent)
+        assert {r.status for r in refs} == {"SENT"} and {r.amount_cents for r in refs} == {6000}
+
+
+def _propose_invoice(pro_app, names=("Dan",)):
+    response, _ = _run(
+        pro_app,
+        "invoice",
+        [tool_call("invoice_athletes", {"invoices": [{"athlete_name": n, "amount_usd": 60, "description": "November programming"} for n in names]}), final("ok")],
+    )
+    return response.json()["actions"][0]
+
+
+def test_a_paypal_refusal_on_an_invoice_is_a_readable_502_never_a_500(pro_app, paypal):
+    """P0-1: the toolkit raises requests.HTTPError on a PayPal 4xx; the page gets the reason and the debug_id."""
+    bridge = ops_agent.toolkit()
+    refusal = {
+        "name": "INVALID_REQUEST",
+        "message": "Request is not well-formed, syntactically incorrect, or violates schema.",
+        "debug_id": "8f2b7c1d9e3a4",
+        "details": [{"field": "/primary_recipients/0/billing_info/email_address", "issue": "INVALID_PARAMETER_SYNTAX", "description": "The value of a field does not conform to the expected format."}],
+    }
+    bridge.fail = lambda method, params: paypal_http_error(400, refusal) if method == "create_invoice" else None
+    card = _propose_invoice(pro_app, ("Lior",))
+    confirmed = pro_app.post(f"/api/ops/actions/{card['id']}/confirm", json={"token": card["confirm_token"]})
+    assert confirmed.status_code == 502, confirmed.text
+    detail = confirmed.json()["detail"]
+    assert "Lior" in detail and "INVALID_REQUEST (400)" in detail and "INVALID_PARAMETER_SYNTAX" in detail and "debug_id 8f2b7c1d9e3a4" in detail
+    assert "Something went wrong" not in detail
+    log = pro_app.get("/api/ops/actions").json()["actions"][0]
+    assert log["id"] == card["id"] and log["status"] == "FAILED" and "debug_id 8f2b7c1d9e3a4" in log["result"]["error"]
+    with session_scope() as session:
+        assert session.query(InvoiceRef).count() == 0
+    assert not paypal.invoices
+
+
+def test_one_bad_invoice_in_a_batch_does_not_sink_the_others(pro_app, paypal):
+    bridge = ops_agent.toolkit()
+
+    def fail(method, params):
+        if method == "create_invoice" and params["primary_recipients"][0]["billing_info"]["name"]["given_name"] == "Noa":
+            return paypal_http_error(422, {"name": "UNPROCESSABLE_ENTITY", "debug_id": "d1", "details": [{"issue": "INVOICE_RECIPIENT_NOT_FOUND", "description": "No such recipient."}]})
+        return None
+
+    bridge.fail = fail
+    card = _propose_invoice(pro_app, ("Dan", "Noa", "Lior"))
+    confirmed = pro_app.post(f"/api/ops/actions/{card['id']}/confirm", json={"token": card["confirm_token"]}).json()
+    assert confirmed["status"] == "EXECUTED"
+    assert [i["athlete"] for i in confirmed["result"]["invoices"]] == ["Dan", "Lior"]
+    assert len(confirmed["result"]["errors"]) == 1
+    assert confirmed["result"]["errors"][0].startswith("Noa: PayPal refused (at create): UNPROCESSABLE_ENTITY (422): INVOICE_RECIPIENT_NOT_FOUND")
+    assert confirmed["paypal_id"].count(",") == 1
+
+
+def test_a_crash_while_executing_is_recorded_not_a_500(pro_app, paypal, monkeypatch):
+    bridge = ops_agent.toolkit()
+    bridge.fail = lambda method, params: TypeError("boom") if method == "send_invoice" else None
+    card = _propose_invoice(pro_app)
+    confirmed = pro_app.post(f"/api/ops/actions/{card['id']}/confirm", json={"token": card["confirm_token"]})
+    assert confirmed.status_code == 502 and "boom" in confirmed.json()["detail"]
+    assert pro_app.get("/api/ops/actions").json()["actions"][0]["status"] == "FAILED"
+
+    # The same for a release: a bug past the state machine is a FAILED row with the reason.
+    review = buy_sample(pro_app, name="Dan")
+    response, _ = _run(pro_app, "release Dan", [tool_call("cancel_or_refund_review", {"review_id": review["id"]}), final("ok")])
+    card = response.json()["actions"][0]
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("wire fell out")
+
+    monkeypatch.setattr(ops_agent.reviews, "cancel_or_refund", explode)
+    confirmed = pro_app.post(f"/api/ops/actions/{card['id']}/confirm", json={"token": card["confirm_token"]})
+    assert confirmed.status_code == 502 and "wire fell out" in confirmed.json()["detail"]
+    log = pro_app.get("/api/ops/actions").json()["actions"][0]
+    assert log["id"] == card["id"] and log["status"] == "FAILED" and "wire fell out" in log["result"]["error"]
+    again = pro_app.post(f"/api/ops/actions/{card['id']}/confirm", json={"token": card["confirm_token"]})
+    assert again.status_code == 409
+
+
+def test_the_models_own_tools_line_is_stripped_once():
+    strip = ops_agent.strip_tools_line
+    assert strip("Done. Tools: find_reviews, cancel_or_refund_review.") == "Done."
+    assert strip("Proposed a refund of $15 to Dan.\n\n**Tools used:** find_reviews, cancel_or_refund_review") == "Proposed a refund of $15 to Dan."
+    assert strip("Here is what I found.\nTools called: list_athletes") == "Here is what I found."
+    assert strip("I used the tools: nothing yet. More text follows here.") == "I used the tools: nothing yet. More text follows here."
+    assert strip("Tools: find_reviews") == "Tools: find_reviews", "a reply that is only a tools line is left alone"
+    assert strip("") == ""
 
 
 def test_invoice_guardrails_are_code_not_prompt(pro_app):
@@ -254,6 +353,7 @@ def test_without_the_toolkit_invoices_use_the_builtin_client(pro_app, paypal):
     card = response.json()["actions"][0]
     confirmed = pro_app.post(f"/api/ops/actions/{card['id']}/confirm", json={"token": card["confirm_token"]}).json()
     assert confirmed["status"] == "EXECUTED" and confirmed["result"]["tool_source"] == "built-in Invoicing v2 client"
+    assert confirmed["result"]["invoices"][0]["status"] == "SENT"
     created = [call for call in paypal.calls if call["method"] == "create_invoice"]
     assert created[0]["payload"]["detail"]["currency_code"] == "USD"
     assert created[0]["payload"]["items"][0]["unit_amount"]["value"] == "20.00"

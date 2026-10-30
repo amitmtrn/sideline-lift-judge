@@ -35,17 +35,67 @@ TOKEN_SAFETY_SECONDS = 60.0
 
 
 class PayPalError(RuntimeError):
-    """A non-2xx reply (or no reply) from PayPal, with what the state machine needs to decide."""
+    """
+    A non-2xx reply (or no reply) from PayPal, with what the state machine
+    needs to decide and what a person needs to read: the error name, the
+    issue list and the debug_id PayPal support asks for.
+    """
 
     def __init__(self, status: Optional[int], body: str, *, name: str = "") -> None:
         super().__init__(f"PayPal error {status}: {body[:300]}")
         self.status = status
         self.body = body
-        self.name = name
+        parsed = _parse_error_body(body)
+        self.name = name or str(parsed.get("name") or "")
+        self.message = str(parsed.get("message") or "")
+        self.debug_id = str(parsed.get("debug_id") or "")
+        self.issues = [
+            f"{detail.get('issue') or ''}{' at ' + str(detail['field']) if detail.get('field') else ''}"
+            + (f": {detail['description']}" if detail.get("description") else "")
+            for detail in parsed.get("details") or []
+            if isinstance(detail, dict)
+        ]
 
     @property
     def retryable(self) -> bool:
         return self.status is None or self.status in (429, 500, 502, 503, 504)
+
+    def readable(self) -> str:
+        """One sentence for a page: `INVALID_REQUEST (400): issue … [debug_id …]`."""
+        head = self.name or ("no reply" if self.status is None else f"HTTP {self.status}")
+        if self.status is not None and self.name:
+            head = f"{self.name} ({self.status})"
+        parts = [head]
+        if self.issues:
+            parts.append("; ".join(self.issues[:3]))
+        elif self.message:
+            parts.append(self.message)
+        elif not self.name and self.body:
+            parts.append(self.body[:160])
+        text = ": ".join(parts) if len(parts) > 1 else parts[0]
+        if self.debug_id:
+            text += f" [debug_id {self.debug_id}]"
+        return text[:400]
+
+    @classmethod
+    def from_requests_error(cls, exc: BaseException) -> "PayPalError":
+        """The toolkit raises `requests` errors as they are; this is the same failure in our shape."""
+        response = getattr(exc, "response", None)
+        if response is not None:
+            return cls(getattr(response, "status_code", None), _excerpt(getattr(response, "text", "") or ""))
+        return cls(None, f"request failed: {exc}"[:300])
+
+
+def _parse_error_body(body: str) -> Dict[str, Any]:
+    if not body or not body.lstrip().startswith("{"):
+        return {}
+    try:
+        import json as _json
+
+        parsed = _json.loads(body)
+    except ValueError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _excerpt(payload: Any) -> str:

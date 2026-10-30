@@ -44,6 +44,7 @@ from datetime import date, timedelta
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+import requests
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -61,6 +62,7 @@ from server.services.db import (
 )
 from server.services.nebius_client import NebiusChatClient, judge_model
 from server.services.paypal_client import PayPalError, get_paypal
+from server.services.snapshots import lift_key, lift_label
 
 logger = logging.getLogger(__name__)
 
@@ -185,11 +187,28 @@ class ToolkitBridge:
         return FALLBACK_DESCRIPTIONS.get(method, method)
 
     def run(self, method: str, params: Dict[str, Any]) -> Any:
-        """The tool's reply as parsed JSON (a dict, usually)."""
+        """
+        The tool's reply as parsed JSON (a dict, usually). The toolkit lets
+        `requests` errors and pydantic errors out as they are; here every
+        failure becomes a PayPalError (with PayPal's name, issues and
+        debug_id) or an AgentError, so a route can show a sentence and the
+        audit row can record it.
+        """
         if method not in TOOLKIT_ALLOWED or method in TOOLKIT_DENIED:
             raise AgentError(f"{method} is not available to this agent.", status=403)
         if self.available and self._api_factory is not None and method in self._tools:
-            raw = self._api_factory().run(method, params)
+            try:
+                raw = self._api_factory().run(method, params)
+            except requests.exceptions.RequestException as exc:
+                error = PayPalError.from_requests_error(exc)
+                logger.warning("Toolkit %s failed: %s", method, error.readable())
+                raise error from exc
+            except PayPalError:
+                raise
+            except ValueError as exc:  # pydantic validation, or the toolkit's own refusals
+                raise AgentError(f"{method}: {_one_line(str(exc))}", status=400) from exc
+            except RuntimeError as exc:  # the toolkit's token fetch
+                raise PayPalError(None, _one_line(str(exc)), name="TOKEN") from exc
             if isinstance(raw, (dict, list)):
                 return raw
             try:
@@ -216,6 +235,10 @@ class ToolkitBridge:
         if method == "send_invoice":
             return client.send_invoice(str(params["invoice_id"]), note=str(params.get("note") or ""))
         raise AgentError(f"{method} is not available to this agent.", status=403)
+
+
+def _one_line(text: str, limit: int = 300) -> str:
+    return " ".join(str(text).split())[:limit]
 
 
 _bridge: Optional[ToolkitBridge] = None
@@ -323,7 +346,8 @@ def _review_row(review) -> Dict[str, Any]:
     return {
         "review_id": review.id,
         "athlete": review.athlete.display_name if review.athlete else None,
-        "lift": review.snapshot.lift_type if review.snapshot else None,
+        "lift": lift_key(review.snapshot.lift_type) if review.snapshot else None,
+        "lift_label": lift_label(review.snapshot.lift_type) if review.snapshot else None,
         "status": review.status,
         "held": review.status in reviews.HELD,
         "amount_usd": review.price_cents / 100,
@@ -415,7 +439,7 @@ def validate_proposal(session: Session, tool: str, args: Dict[str, Any]) -> Tupl
             raise AgentError(exc.detail, status=exc.status)
         price = reviews.price_text(review)
         who = review.athlete.display_name if review.athlete else "the athlete"
-        lift = review.snapshot.lift_type if review.snapshot else "lift"
+        lift = lift_label(review.snapshot.lift_type).lower() if review.snapshot else "lift"
         if review.status in reviews.HELD:
             outcome = "void"
             summary = f"Release the {price} hold on {who}'s {lift} review (void PayPal authorization {review.authorization_id})."
@@ -614,12 +638,23 @@ def confirm(session: Session, action_id: str, token: str) -> AgentAction:
     session.commit()
     try:
         result, paypal_id = execute(session, action, details)
-    except (AgentError, reviews.ReviewError, PayPalError) as exc:
-        detail = getattr(exc, "detail", None) or str(exc)
+    except Exception as exc:
+        # Whatever went wrong — PayPal, the toolkit, a bug — the row says
+        # FAILED with the reason, and the page gets a sentence, never a 500.
+        if isinstance(exc, PayPalError):
+            detail = f"PayPal refused: {exc.readable()}"
+            logger.warning("Action %s (%s) failed at PayPal: %s", action.id, action.tool, exc.readable())
+        elif isinstance(exc, (AgentError, reviews.ReviewError)):
+            detail = str(exc.detail)
+        else:
+            detail = f"Unexpected error while running {action.tool}: {_one_line(str(exc)) or exc.__class__.__name__}"
+            logger.exception("Action %s (%s) crashed", action.id, action.tool)
+        session.rollback()
+        action = session.get(AgentAction, action_id) or action
         action.status = FAILED
-        action.result_json = dumps({"error": str(detail)[:500]})
+        action.result_json = dumps({"error": detail[:500]})
         session.commit()
-        raise AgentError(str(detail)[:500], status=502)
+        raise AgentError(detail[:500], status=502)
     action.status = EXECUTED
     action.result_json = dumps(result)
     action.paypal_id = paypal_id
@@ -628,13 +663,31 @@ def confirm(session: Session, action_id: str, token: str) -> AgentAction:
 
 
 def _invoice_id_from(reply: Any) -> str:
+    """PayPal answers a create with a link object (`href` ending in the id) unless asked for the representation."""
     if isinstance(reply, dict):
         if reply.get("id"):
             return str(reply["id"])
         href = str(reply.get("href") or "")
         if href:
-            return href.rstrip("/").rsplit("/", 1)[-1].split("#")[-1]
+            return href.rstrip("/").rsplit("/", 1)[-1].split("#")[-1].split("?")[0]
     return ""
+
+
+def _invoice_link(sent_reply: Any, invoice: Any) -> Optional[str]:
+    """The payer's link: from the send reply when PayPal gives one, else from the invoice's metadata."""
+    if isinstance(sent_reply, dict) and sent_reply.get("href"):
+        return str(sent_reply["href"])
+    if isinstance(invoice, dict):
+        metadata = (invoice.get("detail") or {}).get("metadata") or {}
+        for key in ("recipient_view_url", "invoicer_view_url"):
+            if metadata.get(key):
+                return str(metadata[key])
+    return None
+
+
+def _invoice_status(invoice: Any, default: str = "SENT") -> str:
+    status = str(invoice.get("status") or "").upper() if isinstance(invoice, dict) else ""
+    return status or default
 
 
 def _invoice_params(line: Dict[str, Any], *, due_date: str, note: str, coach_name: str, coach_email: Optional[str]) -> Dict[str, Any]:
@@ -643,7 +696,7 @@ def _invoice_params(line: Dict[str, Any], *, due_date: str, note: str, coach_nam
         "currency_code": "USD",
         "invoice_date": date.today().isoformat(),
         "note": (f"{note} " if note else "") + f"Due {due_date}. Sent by {coach_name} via Sideline Pro (sandbox).",
-        "invoicer_business_name": f"{coach_name} – Sideline Pro",
+        "invoicer_business_name": f"{coach_name} (Sideline Pro)",
         "primary_recipients": [
             {
                 "billing_info": {
@@ -699,6 +752,10 @@ def execute(session: Session, action: AgentAction, details: Dict[str, Any]) -> T
         }, paypal_id
 
     if tool == "invoice_athletes":
+        # Invoicing v2, one invoice per athlete: create the draft, send it,
+        # then read it back so the status stored is PayPal's, not ours. A
+        # failure on one line is recorded and the others still go out; a
+        # PayPal refusal reads as its error name, issues and debug_id.
         bridge = toolkit()
         coach_name = pro_config.coach_name()
         coach_email = pro_config.coach_email() or None
@@ -706,6 +763,8 @@ def execute(session: Session, action: AgentAction, details: Dict[str, Any]) -> T
         errors: List[str] = []
         for line in details.get("invoices") or []:
             flat = _invoice_params(line, due_date=details.get("due_date") or "", note=details.get("note") or "", coach_name=coach_name, coach_email=coach_email)
+            step = "create"
+            invoice_id = ""
             try:
                 if bridge.available:
                     created = bridge.run("create_invoice", flat)
@@ -713,29 +772,43 @@ def execute(session: Session, action: AgentAction, details: Dict[str, Any]) -> T
                     created = get_paypal().create_invoice(_nested_invoice_payload(flat), request_id=f"inv-{action.id}-{line['athlete_id']}")
                 invoice_id = _invoice_id_from(created)
                 if not invoice_id:
-                    raise AgentError("PayPal created the invoice but returned no id.")
+                    raise AgentError(f"PayPal created the invoice but returned no id ({_one_line(dumps(created), 120)}).")
+                step = "send"
                 if bridge.available:
                     sent_reply = bridge.run("send_invoice", {"invoice_id": invoice_id, "send_to_recipient": True})
                 else:
                     sent_reply = get_paypal().send_invoice(invoice_id, request_id=f"send-{action.id}-{line['athlete_id']}")
-                link = sent_reply.get("href") if isinstance(sent_reply, dict) else None
+                step = "read back"
+                try:
+                    invoice = bridge.run("get_invoice", {"invoice_id": invoice_id})
+                except (PayPalError, AgentError) as exc:  # sent, but the lookup failed: keep going
+                    logger.warning("Invoice %s sent but could not be read back: %s", invoice_id, exc)
+                    invoice = {}
+                status = _invoice_status(invoice)
+                link = _invoice_link(sent_reply, invoice)
                 session.add(
                     InvoiceRef(
                         paypal_invoice_id=invoice_id,
                         athlete_id=line.get("athlete_id"),
                         amount_cents=int(round(float(line["amount_usd"]) * 100)),
-                        status="SENT",
+                        status=status,
                         agent_action_id=action.id,
                     )
                 )
                 session.commit()
-                sent.append({"athlete": line["athlete"], "amount_usd": line["amount_usd"], "invoice_id": invoice_id, "status": "SENT", "link": link})
-            except (PayPalError, AgentError, ValueError, RuntimeError) as exc:
-                detail = getattr(exc, "detail", None) or getattr(exc, "body", None) or str(exc)
-                errors.append(f"{line.get('athlete')}: {str(detail)[:200]}")
-                logger.warning("Invoice for %s failed: %s", line.get("athlete"), detail)
+                sent.append({"athlete": line["athlete"], "amount_usd": line["amount_usd"], "invoice_id": invoice_id, "status": status, "link": link})
+            except PayPalError as exc:
+                where = f" (at {step}{', invoice ' + invoice_id if invoice_id else ''})"
+                errors.append(f"{line.get('athlete')}: PayPal refused{where}: {exc.readable()}")
+                logger.warning("Invoice for %s failed at %s: %s", line.get("athlete"), step, exc.readable())
+            except (AgentError, reviews.ReviewError) as exc:
+                errors.append(f"{line.get('athlete')}: {exc.detail[:200]}")
+                logger.warning("Invoice for %s failed at %s: %s", line.get("athlete"), step, exc.detail)
+            except Exception as exc:
+                errors.append(f"{line.get('athlete')}: {_one_line(str(exc), 200) or exc.__class__.__name__}")
+                logger.exception("Invoice for %s crashed at %s", line.get("athlete"), step)
         if not sent:
-            raise AgentError("No invoice could be sent: " + "; ".join(errors)[:400])
+            raise AgentError("No invoice could be sent. " + " ".join(errors)[:450])
         return {"invoices": sent, "errors": errors, "tool_source": bridge.label}, ",".join(i["invoice_id"] for i in sent)
 
     if tool in ("send_invoice_reminder", "cancel_sent_invoice"):
@@ -756,6 +829,22 @@ def _system_prompt(prompts_dir: str) -> str:
         return (Path(prompts_dir) / PROMPT_FILE).read_text(encoding="utf-8").strip()
     except OSError:
         return "You are the operations assistant for Sideline Pro. Write tools only propose; the user confirms."
+
+
+_TOOLS_LINE_RE = re.compile(
+    r"(?:^|\n|(?<=[.!?])[ \t]+)[*_ \t]*(?:tools?(?:[ \t]+(?:used|called|i[ \t]+called|invoked))?)[ \t]*[:：][*_ \t]*[A-Za-z0-9_,\-` \t]*\.?[*_ \t]*$",
+    re.IGNORECASE,
+)
+
+
+def strip_tools_line(text: str) -> str:
+    """
+    The page shows the tools it called as chips, so a trailing "Tools:
+    find_reviews, …" sentence the model adds anyway is dropped rather than
+    shown twice.
+    """
+    cleaned = _TOOLS_LINE_RE.sub("", text or "", count=1).rstrip()
+    return cleaned.strip() if cleaned.strip() else (text or "").strip()
 
 
 def _parse_arguments(raw: Any) -> Dict[str, Any]:
@@ -853,6 +942,7 @@ async def run_agent(
             else:
                 result = {"error": f"{name} is not a tool here"}
             messages.append({"role": "tool", "tool_call_id": call_id, "content": dumps(result)})
+    final_text = strip_tools_line(final_text)
     if not final_text:
         if reply.actions:
             final_text = "Proposed: " + " ".join(card["summary"] for card in reply.actions) + " Tap Confirm to run it."
