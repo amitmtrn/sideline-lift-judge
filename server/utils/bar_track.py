@@ -90,6 +90,8 @@ class BarPath:
     # perfect circle (side-on); the smaller the number, the more the camera
     # looks down the lift from an angle. None when no fit was measurable.
     plate_axis_ratio: Optional[float] = None
+    # True when the plate followed is the one the athlete tapped.
+    tapped: bool = False
     reason: str = ""
 
     @property

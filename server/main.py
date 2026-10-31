@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -488,19 +489,29 @@ def _parse_optional_float(value: Optional[str], label: str) -> Optional[float]:
         raise HTTPException(status_code=400, detail=f"{label} must be a number of seconds.")
 
 
-def _parse_plate_hint(plate_x: Optional[str], plate_y: Optional[str]) -> Optional[Tuple[float, float]]:
+def _parse_plate_tap(value: Optional[str]) -> Optional[Tuple[float, float, float]]:
     """
-    The athlete's tap on the near plate as (x, y) in 0..1 of the frame, or
-    None when the step was skipped. Half a tap, or one off the frame, is a
-    client bug and is refused rather than guessed at.
+    The athlete's tap on the near plate, "t,x,y": t in seconds of the uploaded
+    file, x and y in 0..1 of the frame. None when the step was skipped — and
+    None, with a log line, for anything malformed or off the frame: the tap
+    is a hint for the tracker, and a bad one means the automatic search,
+    never a refused upload.
     """
-    x = _parse_optional_float(plate_x, "Plate tap x")
-    y = _parse_optional_float(plate_y, "Plate tap y")
-    if x is None and y is None:
+    if value is None or not str(value).strip():
         return None
-    if x is None or y is None or not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
-        raise HTTPException(status_code=400, detail="The plate tap must be an x and a y between 0 and 1.")
-    return (x, y)
+    parts = [part.strip() for part in str(value).split(",")]
+    try:
+        if len(parts) != 3:
+            raise ValueError("expected t,x,y")
+        t, x, y = (float(part) for part in parts)
+        if not all(math.isfinite(v) for v in (t, x, y)):
+            raise ValueError("not finite")
+        if t < 0 or not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+            raise ValueError("out of range")
+    except ValueError as exc:
+        logger.info("Ignoring a malformed plate_tap %r (%s): automatic search", value, exc)
+        return None
+    return (t, x, y)
 
 
 def _parse_lift(value: Optional[str]) -> Optional[LiftType]:
@@ -555,14 +566,14 @@ async def create_job(
     frames: Optional[int] = Form(default=None),
     num_frames: Optional[int] = Form(default=None),
     debug: bool = Form(default=False),
-    plate_x: Optional[str] = Form(default=None),
-    plate_y: Optional[str] = Form(default=None),
+    plate_tap: Optional[str] = Form(default=None),
 ):
     """
     Accept a clip and start scoring in the background (spec §13). Returns the job
     id to poll, so a slow or dropped mobile connection cannot lose the result.
-    `plate_x`/`plate_y` (0..1 of the frame) is where the athlete tapped the
-    plate nearest the camera — a hint for the tracker on an angled clip.
+    `plate_tap` ("t,x,y": seconds into the file, then 0..1 of the frame) is
+    where the athlete tapped the plate nearest the camera — a hint for the
+    tracker on an angled clip; absent or malformed means the automatic search.
     """
     # Already checked before the body was read (DemoGateMiddleware); kept so
     # the handler is safe on its own.
@@ -572,7 +583,7 @@ async def create_job(
     selected_lift = _parse_lift(lift)
     start = _parse_optional_float(trim_start, "Trim start")
     end = _parse_optional_float(trim_end, "Trim end")
-    plate_hint = _parse_plate_hint(plate_x, plate_y)
+    tap = _parse_plate_tap(plate_tap)
     mode = "auto" if str(mode).strip().lower() == "auto" else "single"
 
     # Fail before touching the disk if the service is not configured.
@@ -616,7 +627,7 @@ async def create_job(
         replay_dir=str(job.workdir),
         keep_observations=bool(debug),
         max_lifts=max_lifts_per_clip(),
-        plate_hint=plate_hint,
+        plate_tap=tap,
     )
 
     async def runner(current: Job) -> None:
@@ -774,8 +785,7 @@ async def score_endpoint(
     frames: Optional[int] = Form(default=None),
     num_frames: Optional[int] = Form(default=None),
     debug: bool = Form(default=False),
-    plate_x: Optional[str] = Form(default=None),
-    plate_y: Optional[str] = Form(default=None),
+    plate_tap: Optional[str] = Form(default=None),
 ):
     """
     Synchronous scoring: one request, one verdict. Kept for scripts and for
@@ -787,7 +797,7 @@ async def score_endpoint(
     selected_lift = _parse_lift(lift)
     start = _parse_optional_float(trim_start, "Trim start")
     end = _parse_optional_float(trim_end, "Trim end")
-    plate_hint = _parse_plate_hint(plate_x, plate_y)
+    tap = _parse_plate_tap(plate_tap)
 
     source = await _store_upload(upload)
     guard = get_guard()
@@ -811,7 +821,7 @@ async def score_endpoint(
                     render_replay=False,
                     keep_observations=bool(debug),
                     max_lifts=max_lifts_per_clip(),
-                    plate_hint=plate_hint,
+                    plate_tap=tap,
                 ),
                 client=client,
                 prompts_dir=str(PROMPTS_DIR),

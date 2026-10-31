@@ -388,23 +388,46 @@ def _walk(detections: _Detections, start_index: int, start: Plate, step: int) ->
     return found
 
 
-def _floor_seeds(detections: _Detections, tap: Optional[Tuple[float, float]]) -> List[Tuple[int, Plate, bool]]:
+def tap_frame(frames, t: float) -> int:
+    """
+    The frame the athlete's tap was made on: the one nearest `t` when `t`
+    falls inside the window (half a second of slack for the trim's own
+    rounding), else the first frame — the tap was on the first trimmed frame
+    and the window begins there or later.
+    """
+    if not frames:
+        return 0
+    if frames[0][0] - 0.5 <= t <= frames[-1][0] + 0.5:
+        return min(range(len(frames)), key=lambda i: abs(frames[i][0] - t))
+    return 0
+
+
+def _floor_seeds(detections: _Detections, tap: Optional[Tuple[float, float, float]]) -> List[Tuple[int, Plate, bool]]:
     """
     Plates on the floor at the start of the window: (frame, plate, tapped).
-    One per object across the opening frames; `tapped` marks the one nearest
-    the athlete's tap, if a plate was found within reach of it.
+    One per object across the opening frames, plus the frame the athlete
+    tapped on when that is later; `tapped` marks the one nearest the tap, if
+    a plate was found within reach of it.
     """
     seeds: List[Tuple[int, Plate, bool]] = []
-    for index in range(min(FLOOR_FRAMES, len(detections.frames))):
+    indices = list(range(min(FLOOR_FRAMES, len(detections.frames))))
+    tapped_index = tap_frame(detections.frames, tap[0]) if tap is not None else 0
+    if tapped_index not in indices:
+        indices.append(tapped_index)
+    for index in indices:
         for plate in detections.full(index):
             if any(plate.distance(s.x, s.y) < 0.5 * s.r and abs(plate.r - s.r) <= RADIUS_TOLERANCE * s.r for _, s, _ in seeds):
                 continue
             seeds.append((index, plate, False))
     if tap is not None and seeds:
         height, width = detections.frames[0][1].shape[:2]
-        tx, ty = tap[0] * width, tap[1] * height
+        tx, ty = tap[1] * width, tap[2] * height
         reach = TAP_REACH * max(width, height)
-        nearest = min(range(len(seeds)), key=lambda k: seeds[k][1].distance(tx, ty))
+        # Prefer a plate seen on the tapped frame itself; any other frame's
+        # plate at the same spot stands in for it (the bar is still there).
+        on_frame = [k for k in range(len(seeds)) if seeds[k][0] == tapped_index]
+        pool = on_frame or list(range(len(seeds)))
+        nearest = min(pool, key=lambda k: seeds[k][1].distance(tx, ty))
         if seeds[nearest][1].distance(tx, ty) <= reach + seeds[nearest][1].r:
             index, plate, _ = seeds[nearest]
             seeds[nearest] = (index, plate, True)
@@ -508,7 +531,7 @@ def _axis_ratio(trail: Dict[int, Plate], frames) -> Optional[float]:
     return float(np.median([trail[i].ratio for i in order]))
 
 
-def _trail_path(trail: Dict[int, Plate], frames, reason: str = "") -> BarPath:
+def _trail_path(trail: Dict[int, Plate], frames, reason: str = "", tapped: bool = False) -> BarPath:
     """A trail as a BarPath in normalised coordinates."""
     import numpy as np  # type: ignore
 
@@ -528,6 +551,7 @@ def _trail_path(trail: Dict[int, Plate], frames, reason: str = "") -> BarPath:
         frame_width=width,
         frame_height=height,
         plate_axis_ratio=_axis_ratio(trail, frames),
+        tapped=tapped,
         reason=reason,
     )
 
@@ -537,16 +561,18 @@ def follow_oblique(
     start_sec: float = 0.0,
     end_sec: float = 0.0,
     *,
-    hint: Optional[Tuple[float, float]] = None,
+    hint: Optional[Tuple[float, float, float]] = None,
     frames=None,
 ) -> BarPath:
     """
     The near plate's path through [start_sec, end_sec] of `video_path`, or
     through `frames` ((t, gray or BGR) already decoded, any rate and size —
     the pipeline decodes a window once and hands it to every follower).
-    `hint` is where the athlete tapped the near plate, normalised to the
-    frame; it decides between plates that both rise, never whether one did.
-    Check `.tracked` before believing the result; `.reason` says why not.
+    `hint` is (t, x, y): when the athlete tapped the near plate, in seconds
+    of the clip, and where, as fractions of the frame. It decides between
+    plates that both rise, never whether one did; `.tapped` on the result
+    says whether the plate followed is the one they meant. Check `.tracked`
+    before believing the result; `.reason` says why not.
     """
     frames = _prepare(frames) if frames is not None else read_frames_for(video_path, start_sec, end_sec)
     if len(frames) < 6:
@@ -603,8 +629,8 @@ def follow_oblique(
             return 0.0
         return rise * (0.5 + 0.5 * share) * (0.5 + 0.5 * _median_radius(trail) / largest) * (1.3 if tapped else 1.0)
 
-    best, _tapped = max(trails, key=score)
-    if score((best, _tapped)) <= 0.0:
+    best, tapped = max(trails, key=score)
+    if score((best, tapped)) <= 0.0:
         rises = sorted((round(_rise_px(t) / height, 2) for t, _ in trails), reverse=True)[:3]
         logger.info("Oblique follower: nothing dark and round rose like a bar (best rises %s)", rises)
         return BarPath(
@@ -613,7 +639,7 @@ def follow_oblique(
             frame_height=height,
             reason="nothing dark and round rose like a bar",
         )
-    path = _trail_path(best, frames)
+    path = _trail_path(best, frames, tapped=tapped)
     if not path.tracked:
         path.reason = "the plate was followed through too little of the window"
     return path

@@ -46,6 +46,8 @@ class BarPathMeasurement:
     near_frame_edge: bool = False
     plate_too_small: bool = False
     plate_axis_ratio: Optional[float] = None
+    # The plate followed is the one the athlete tapped on the first frame.
+    tapped: bool = False
     reason: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
@@ -62,6 +64,7 @@ class BarPathMeasurement:
                     "drift_at_rise_fraction": _rounded(self.drift_at_rise_fraction),
                     "sideways_range_plate_diameters": _rounded(self.sideways_range_diameters),
                     "rise_plate_diameters": _rounded(self.rise_diameters, 1),
+                    "tapped": self.tapped,
                 }
             )
         elif self.reason:
@@ -122,6 +125,7 @@ def measure(path: Optional[BarPath]) -> BarPathMeasurement:
         near_frame_edge=near_edge,
         plate_too_small=plate_too_small,
         plate_axis_ratio=path.plate_axis_ratio,
+        tapped=bool(path.tapped),
     )
 
 

@@ -14,6 +14,9 @@ import pytest
 
 from server.utils.bar_track import BarPath
 from server.utils.segmentation import CandidateSegment
+from tests.conftest import upload
+
+SNATCH_PATH = ["floor", "knees", "overhead", "overhead", "overhead", "overhead"]
 
 WIDTH, HEIGHT, FPS = 360, 640, 30
 PLATE_R = 34  # vertical semi-axis of the near plate
@@ -179,11 +182,48 @@ def test_the_tap_marks_the_plate_it_is_nearest(oblique_clip):
 
     clip, truth = oblique_clip
     x0, y0 = plate_at(0.0)
-    on_plate = follow_oblique(clip, 0.0, 3.0, hint=(x0 / WIDTH, y0 / HEIGHT))
+    on_plate = follow_oblique(clip, 0.0, 3.0, hint=(0.0, x0 / WIDTH, y0 / HEIGHT))
     assert on_plate.tracked and np.mean(_errors(on_plate, truth) <= 0.5 * PLATE_R) >= 0.9
-    # A tap on the foliage, which never rises like a bar: the near plate still wins.
-    off = follow_oblique(clip, 0.0, 3.0, hint=(110 / WIDTH, (HEIGHT - 300) / HEIGHT))
+    assert on_plate.tapped is True
+    # A tap on the foliage, which never rises like a bar: the near plate still
+    # wins, and the result does not claim to be following the tap.
+    off = follow_oblique(clip, 0.0, 3.0, hint=(0.0, 110 / WIDTH, (HEIGHT - 300) / HEIGHT))
     assert off.tracked and np.mean(_errors(off, truth) <= 0.5 * PLATE_R) >= 0.9
+    assert off.tapped is False
+    # No tap: no claim either.
+    assert follow_oblique(clip, 0.0, 3.0).tapped is False
+
+
+def test_a_tap_made_later_in_the_window_seeds_that_frame(oblique_clip):
+    """
+    The tap is on the first *trimmed* frame, which can be later than the lift
+    window's start; it names the plate where it was at that moment.
+    """
+    from server.utils.plate_oblique import follow_oblique, read_frames_for, tap_frame
+
+    clip, truth = oblique_clip
+    frames = read_frames_for(clip, 0.0, 3.0)
+    assert tap_frame(frames, 1.0) == min(range(len(frames)), key=lambda i: abs(frames[i][0] - 1.0))
+    assert tap_frame(frames, 0.0) == 0
+    assert tap_frame(frames, 9.0) == 0  # outside the window: the first frame
+    x1, y1 = plate_at(1.0 / 3.0)  # the plate at t = 1.0 s, part way up
+    path = follow_oblique(clip, 0.0, 3.0, hint=(1.0, x1 / WIDTH, y1 / HEIGHT))
+    assert path.tracked and path.tapped is True
+    assert np.mean(_errors(path, truth) <= 0.5 * PLATE_R) >= 0.9
+
+
+def test_a_tap_hint_also_marks_the_side_on_followers_plate(tmp_path):
+    from tests.test_plate_follow import HEIGHT as H, PLATE_R as R, WIDTH as W, bar_at, write_lift
+    from server.utils.plate_follow import follow_bar_path
+
+    clip = write_lift(str(tmp_path / "lift.mp4"))
+    x0, y0 = bar_at(0.0)
+    tapped = follow_bar_path(clip, 0.0, 2.5, tap=(0.0, x0 / W, y0 / H))
+    assert tapped.tracked and tapped.tapped is True
+    assert abs(tapped.plate_radius * W - R) <= 0.2 * R
+    # A tap on the plate parked on the stand, which never rises: the bar still wins, untapped.
+    parked = follow_bar_path(clip, 0.0, 2.5, tap=(0.0, 300 / W, (H - 70) / H))
+    assert parked.tracked and parked.tapped is False and parked.vertical_travel > 0.5
 
 
 def test_the_work_is_strided_and_cached(oblique_clip):
@@ -237,14 +277,82 @@ def test_a_tap_in_display_coordinates_lands_on_the_decoded_frame():
         info = VideoInfo(width=160, height=90, rotation=rotation, probed=True)
         shown = rotate_by_degrees(decoded, rotation)  # what the phone shows: portrait
         ys, xs = np.where(shown > 0)
-        tap = (float(xs.mean()) / shown.shape[1], float(ys.mean()) / shown.shape[0])
+        tap = (1.25, float(xs.mean()) / shown.shape[1], float(ys.mean()) / shown.shape[0])
         # Frames at the display size: the tap is used as is.
         assert _tap_in_decoded_frame(tap, info, shown.shape[1], shown.shape[0]) == tap
-        # Frames at the coded size: turned back onto the plate.
-        x, y = _tap_in_decoded_frame(tap, info, decoded.shape[1], decoded.shape[0])
+        # Frames at the coded size: turned back onto the plate; the time is kept.
+        t, x, y = _tap_in_decoded_frame(tap, info, decoded.shape[1], decoded.shape[0])
+        assert t == 1.25
         assert abs(x * 160 - 120) < 2 and abs(y * 90 - 30) < 2, (rotation, x, y)
     assert _tap_in_decoded_frame(None, None, 160, 90) is None
-    assert _tap_in_decoded_frame((0.2, 0.4), VideoInfo(), 160, 90) == (0.2, 0.4)
+    assert _tap_in_decoded_frame((0.0, 0.2, 0.4), VideoInfo(), 160, 90) == (0.0, 0.2, 0.4)
+
+
+# ---------- the form field ----------
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (None, None),
+        ("", None),
+        ("0.40,0.4130,0.8256", (0.40, 0.4130, 0.8256)),
+        (" 2 , 0.5 , 0.5 ", (2.0, 0.5, 0.5)),
+        ("a,b", None),
+        ("2,1.5,0.5", None),
+        ("0.5,0.5", None),
+        ("-1,0.5,0.5", None),
+        ("nan,0.5,0.5", None),
+        ("1,2,3,4", None),
+    ],
+)
+def test_the_plate_tap_field_is_parsed_or_ignored_never_refused(value, expected):
+    from server.main import _parse_plate_tap
+
+    assert _parse_plate_tap(value) == expected
+
+
+def test_a_malformed_plate_tap_still_scores_the_clip(client, clip):
+    from tests.conftest import judge_reply, observation_reply, triage_reply
+
+    for bad in ("a,b", "2,1.5,0.5"):
+        response, payload = upload(
+            client,
+            clip,
+            [triage_reply(SNATCH_PATH), observation_reply(), judge_reply("snatch", 7, "solid", 0.8)],
+            plate_tap=bad,
+        )
+        assert response.status_code == 202, (bad, response.text)
+        assert payload["status"] == "done", (bad, payload)
+        assert payload["lifts"][0]["bar_path"]["tracked"] in (True, False)
+
+
+def test_a_good_plate_tap_reaches_the_followers_and_is_reported(client, clip, monkeypatch):
+    from server.services import pipeline
+    from tests.conftest import judge_reply, observation_reply, triage_reply
+
+    seen = {}
+    real = pipeline.follow_oblique
+
+    def spy(*args, **kwargs):
+        seen["hint"] = kwargs.get("hint")
+        path = real(*args, **kwargs)
+        return path
+
+    monkeypatch.setattr(pipeline, "follow_oblique", spy)
+    _, payload = upload(
+        client,
+        clip,
+        [triage_reply(SNATCH_PATH), observation_reply(), judge_reply("snatch", 7, "solid", 0.8)],
+        plate_tap="1.000,0.4000,0.7000",
+    )
+    assert payload["status"] == "done"
+    assert seen["hint"] == pytest.approx((1.0, 0.4, 0.7))
+    bar_path = payload["lifts"][0]["bar_path"]
+    if bar_path["tracked"]:
+        assert bar_path["tapped"] in (True, False)
+    else:
+        assert "tapped" not in bar_path
 
 
 def test_a_bright_plate_with_a_full_rim_still_passes_the_gate(tmp_path):

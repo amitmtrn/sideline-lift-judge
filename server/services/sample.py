@@ -117,6 +117,7 @@ def bar_path_to_dict(path: Optional[BarPath]) -> Optional[Dict[str, Any]]:
         "sampled": path.sampled,
         "frame_width": path.frame_width,
         "frame_height": path.frame_height,
+        "tapped": bool(path.tapped),
         "reason": path.reason,
     }
 
@@ -141,6 +142,7 @@ def bar_path_from_dict(data: Any) -> Optional[BarPath]:
             sampled=int(data.get("sampled", 0) or 0),
             frame_width=int(data.get("frame_width", 0) or 0),
             frame_height=int(data.get("frame_height", 0) or 0),
+            tapped=bool(data.get("tapped", False)),
             reason=str(data.get("reason", "") or ""),
         )
     except (TypeError, ValueError):

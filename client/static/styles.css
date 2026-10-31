@@ -519,6 +519,13 @@ video {
   background: none;
 }
 
+/* Under the trace key: the tracker followed the plate the athlete tapped. */
+.trace-note {
+  margin: 4px 0 8px;
+  font-size: 13px;
+  color: var(--chalk-faint);
+}
+
 .window-bar {
   position: relative;
   height: 10px;

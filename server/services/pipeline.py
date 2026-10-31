@@ -290,11 +290,11 @@ class ScoreRequest:
     # Lift windows this one upload may score; the rest are listed as skipped.
     # 0 is no cap. The public demo sets it so one clip cannot cost a dozen calls.
     max_lifts: int = 0
-    # Where the athlete tapped the plate nearest the camera, as (x, y) in
-    # 0..1 of the frame as their phone showed it, at the start of the trim.
-    # A hint for the trackers, not an answer: it decides between two plates
-    # that both rise.
-    plate_hint: Optional[Tuple[float, float]] = None
+    # Where the athlete tapped the plate nearest the camera: (t, x, y) with t
+    # in seconds of the uploaded file and x, y in 0..1 of the frame as their
+    # phone showed it. A hint for the trackers, not an answer: it decides
+    # between two plates that both rise. None is the automatic search.
+    plate_tap: Optional[Tuple[float, float, float]] = None
 
 
 async def run_scoring(
@@ -630,7 +630,7 @@ async def _score_one_lift(
     # describes and the drift the replay draws are the same measurement.
     progress("observing", f"Following the bar — {label}…", low + 0.05 * (high - low))
     bar_path = await _offload(
-        _trace_for, request.video_path, window, lift_window, label, tap=request.plate_hint, info=info
+        _trace_for, request.video_path, window, lift_window, label, tap=request.plate_tap, info=info
     )
     measurement = measure(bar_path)
     scored.measurement = measurement
@@ -738,13 +738,13 @@ async def _score_one_lift(
 
 
 def _tap_in_decoded_frame(
-    tap: Optional[Tuple[float, float]], info: Optional[VideoInfo], frame_width: int, frame_height: int
-) -> Optional[Tuple[float, float]]:
+    tap: Optional[Tuple[float, float, float]], info: Optional[VideoInfo], frame_width: int, frame_height: int
+) -> Optional[Tuple[float, float, float]]:
     """
     The athlete tapped the frame as the phone showed it, rotation applied.
     OpenCV applies that rotation itself on most builds, in which case the
-    tap maps straight onto the decoded frame; on a build that hands back the
-    coded (unrotated) frame — told apart by its orientation, as
+    tap (t, x, y) maps straight onto the decoded frame; on a build that hands
+    back the coded (unrotated) frame — told apart by its orientation, as
     rotation_still_needed does — the tap is turned back the same way. A 180°
     rotation cannot be told from the size and is left alone, as there.
     """
@@ -758,11 +758,11 @@ def _tap_in_decoded_frame(
         return tap
     if (frame_width > frame_height) == (info.display_width > info.display_height):
         return tap  # already at the display orientation
-    x, y = tap
+    t, x, y = tap
     if info.rotation % 360 == 90:
         # displayed = rotate_90_clockwise(decoded): (xs, ys) = (1 - yd, xd)
-        return (y, 1.0 - x)
-    return (1.0 - y, x)
+        return (t, y, 1.0 - x)
+    return (t, 1.0 - y, x)
 
 
 # The oblique follower's plate must be this much bigger than the side-on
@@ -828,7 +828,7 @@ def _trace_for(
     lift_window: Optional[LiftWindow],
     label: str,
     *,
-    tap: Optional[Tuple[float, float]] = None,
+    tap: Optional[Tuple[float, float, float]] = None,
     info: Optional[VideoInfo] = None,
 ) -> BarPath:
     """
@@ -847,7 +847,8 @@ def _trace_for(
     to the follower as a hint — and a fresh bar_track pass is the last. Every
     trace but the oblique follower's own is checked with `looks_like_a_plate`
     before it is believed: `BarPath.tracked` only knows that something rose,
-    not that it was a plate. `tap` is where the athlete tapped the near plate.
+    not that it was a plate. `tap` is (t, x, y): when and where the athlete
+    tapped the near plate.
     """
     frames = []
     try:

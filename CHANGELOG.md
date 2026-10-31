@@ -29,9 +29,15 @@ in the README for the design.
   fallbacks; when nothing passes, no path is drawn and the card says *Couldn't track the bar —
   film from the side with the near plate visible*.
 - **Tap the near plate**: a step after the trim shows the first frame of the window and takes one
-  tap on the plate nearest the camera (`plate_x`/`plate_y` on `/api/jobs` and `/api/score`). It
-  decides between two plates that both rise; it never makes something that did not rise the bar.
-  Skippable; a clip the browser cannot play skips it on its own.
+  tap on the plate nearest the camera, sent as `plate_tap="t,x,y"` on `/api/jobs` and
+  `/api/score` (t in seconds of the uploaded file — 0 when the browser re-encoded the trim, the
+  trim start otherwise — and x, y as fractions of the frame as the phone shows it; turned back onto
+  the decoded frame when OpenCV hands back the unrotated one). It seeds the frame it was made on
+  and decides between two plates that both rise; it never makes something that did not rise the
+  bar. A missing or malformed field means the automatic search, never a refused upload. When the
+  plate followed is the tapped one, the result's `bar_path.tapped` is true and the card says
+  *Bar path: following the plate you tapped*. Skippable; a clip the browser cannot play skips it
+  on its own.
 - **Reps are separate lifts**: a rise that starts back on the floor (within 35 % of the previous
   lift's height) begins a new window even inside the 1.5 s phase gap, so a set of touch-and-go
   snatches is scored rep by rep; a clean and its jerk, which starts from the dip 80-90 % of the way

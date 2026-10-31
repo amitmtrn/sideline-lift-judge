@@ -119,13 +119,13 @@ TAP_REACH = 0.08
 def _seeds(
     frames,
     hint: Optional[Tuple[float, float, float, float]],
-    tap: Optional[Tuple[float, float]] = None,
+    tap: Optional[Tuple[float, float, float]] = None,
 ) -> List[_Seed]:
     """
     Circles in the opening frames, one seed per object, plus the hint. The
-    tap marks the seed nearest it (or becomes a seed of its own when no circle
-    was found near it): one more candidate with a little more weight, not an
-    answer.
+    tap (t, x, y) marks the seed nearest it (or becomes a seed of its own, on
+    the frame it was made on, when no circle was found near it): one more
+    candidate with a little more weight, not an answer.
     """
     import cv2  # type: ignore
 
@@ -153,7 +153,12 @@ def _seeds(
             add(at, x, y, r)
     seeds = seeds[:MAX_SEEDS]
     if tap is not None:
-        tx, ty = tap[0] * width, tap[1] * height
+        from server.utils.plate_oblique import tap_frame
+
+        t, tx, ty = tap[0], tap[1] * width, tap[2] * height
+        at = tap_frame(frames, t)
+        if at >= len(frames) - 1:
+            at = 0
         reach = TAP_REACH * max(width, height)
         nearest = min(seeds, key=lambda s: (s.x - tx) ** 2 + (s.y - ty) ** 2, default=None)
         if nearest is not None and ((nearest.x - tx) ** 2 + (nearest.y - ty) ** 2) ** 0.5 <= reach + nearest.radius:
@@ -161,7 +166,7 @@ def _seeds(
         else:
             radii = sorted(s.radius for s in seeds)
             radius = radii[len(radii) // 2] if radii else (low + high) / 2.0
-            seeds.append(_Seed(0, float(tx), float(ty), float(radius), tapped=True))
+            seeds.append(_Seed(at, float(tx), float(ty), float(radius), tapped=True))
     return seeds
 
 
@@ -411,17 +416,18 @@ def follow_bar_path(
     end_sec: float,
     *,
     hint: Optional[Tuple[float, float, float, float]] = None,
-    tap: Optional[Tuple[float, float]] = None,
+    tap: Optional[Tuple[float, float, float]] = None,
     frames=None,
 ) -> BarPath:
     """
     The plate's path through [start_sec, end_sec], as a BarPath in the same
     normalised coordinates as bar_track's. `hint` is (t, x, y, radius px at
     640 wide) for where another method believes the plate was; it becomes one
-    more seed, not an answer. `tap` is (x, y), normalised, where the athlete
-    tapped the near plate. `frames` is the window already read with
-    `read_gray_frames`, so the pipeline decodes it once for every follower.
-    Check `.tracked` before believing the result.
+    more seed, not an answer. `tap` is (t, x, y): when and where, as fractions
+    of the frame, the athlete tapped the near plate. `frames` is the window
+    already read with `read_gray_frames`, so the pipeline decodes it once for
+    every follower. Check `.tracked` before believing the result; `.tapped`
+    says whether the plate followed is the one they tapped.
     """
     if frames is None:
         frames = read_gray_frames(video_path, start_sec, end_sec)
@@ -503,4 +509,5 @@ def follow_bar_path(
         frame_width=width,
         frame_height=height,
         plate_axis_ratio=axis_ratio,
+        tapped=best.tapped,
     )

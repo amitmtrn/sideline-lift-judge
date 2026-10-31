@@ -808,11 +808,14 @@
       body.append("trim_start", state.start.toFixed(2));
       body.append("trim_end", state.end.toFixed(2));
     }
-    // The tap is in 0..1 of the frame, so it survives the browser re-encode
-    // (same aspect, scaled) and the server-side trim (same first frame).
+    // The tap, as "t,x,y": t in seconds of the file that goes up — the
+    // re-encoded copy starts at the trim, so the tapped first frame is at 0
+    // there; the original file keeps its own clock, so it is the trim start —
+    // and x, y in 0..1 of the frame, which survive the re-encode (same
+    // aspect, scaled). No field means the automatic search.
     if (state.plate) {
-      body.append("plate_x", state.plate.x.toFixed(4));
-      body.append("plate_y", state.plate.y.toFixed(4));
+      const tapTime = fileToUpload === state.file ? state.start : 0;
+      body.append("plate_tap", `${tapTime.toFixed(3)},${state.plate.x.toFixed(4)},${state.plate.y.toFixed(4)}`);
     }
 
     const request = new XMLHttpRequest();
@@ -1233,6 +1236,7 @@
     let trackerText = barPath.tracked
       ? `bar path in ${Math.round((barPath.coverage || 0) * 100)}% of frames`
         + (barPath.max_drift_cm_estimate != null ? `; max drift ~${barPath.max_drift_cm_estimate} cm` : "")
+        + (barPath.tapped ? "; following the plate you tapped" : "")
       : `${barPath.reason || "bar not tracked"}; drift read from the frames`;
     li1.appendChild(document.createTextNode(trackerText));
     list.appendChild(li1);
@@ -1316,6 +1320,10 @@
       addPair("start", "where it started");
       addPair("drift", "furthest from it");
       block.appendChild(key);
+      // The tracker took the plate from the athlete's tap, not its own search.
+      if (item.bar_path && item.bar_path.tapped) {
+        block.appendChild(element("p", "trace-note", "Bar path: following the plate you tapped"));
+      }
     }
     const video = document.createElement("video");
     video.src = item.annotated_video_url;

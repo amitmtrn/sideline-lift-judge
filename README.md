@@ -707,10 +707,14 @@ oblique follower's, then the lift-window trail and the legacy tracker, each gate
 passes, the card says *Couldn't track the bar — film from the side with the near plate visible*.
 
 **The tap.** After the trim the app shows the first frame of the window and takes one tap on the
-plate nearest the camera (`plate_x`/`plate_y`, 0..1 of the frame as the phone shows it; turned
-back onto the decoded frame when OpenCV hands back the unrotated one). It is a preference, not an
+plate nearest the camera, sent as the form field `plate_tap="t,x,y"`: t in seconds of the file
+that went up (0 when the browser re-encoded the trim, the trim start otherwise), x and y as
+fractions of the frame as the phone shows it, turned back onto the decoded frame when OpenCV hands
+back the unrotated one. The followers seed the frame it was made on. It is a preference, not an
 answer: it decides between two plates that both rose and cannot make something that did not rise
-the bar. Skip it and the tracker picks the plate itself.
+the bar. A missing or malformed field is the automatic search, never a refused upload. When the
+plate followed is the tapped one the result says so (`bar_path.tapped`, and *Bar path: following
+the plate you tapped* on the card). Skip it and the tracker picks the plate itself.
 
 ### What the judge is told, and what the number means
 The judge never sees pixels. Before any model call, the tracked path is turned into a short
