@@ -815,12 +815,21 @@ class LiftWindow:
     # along the same plate instead of stitching on a trail that may have
     # followed the other plate.
     trail: List[BarPoint] = field(default_factory=list)
+    # Where the rise began and ended, as normalised y (0 = top of the frame).
+    # A later rise that starts back down at `floor_y` is another rep; one that
+    # starts near `top_y` is the jerk after the clean. 0.0 means unknown.
+    floor_y: float = 0.0
+    top_y: float = 0.0
 
     def __post_init__(self) -> None:
         if not self.rise_end_sec:
             self.rise_end_sec = self.peak_sec
         if not self.rise_start_sec:
             self.rise_start_sec = min(self.peak_sec, self.start_sec + PRE_PAD)
+        if self.points and not self.floor_y:
+            self.floor_y = _y_at(self.trail or self.points, self.rise_start_sec)
+        if self.points and not self.top_y:
+            self.top_y = _y_at(self.trail or self.points, self.rise_end_sec)
 
     @property
     def duration_sec(self) -> float:
@@ -854,6 +863,13 @@ class LiftWindow:
             frame_height=self.frame_height,
             reason="" if points else "no trail in this range",
         )
+
+
+def _y_at(points: List[BarPoint], t: float) -> float:
+    """The trail's normalised y at the point nearest `t` (0.0 when empty)."""
+    if not points:
+        return 0.0
+    return min(points, key=lambda p: abs(p.t - t)).y
 
 
 # The camera does not move between attempts, so the plate keeps one apparent
@@ -961,6 +977,13 @@ def _support(index: int, trails: List[List[BarPoint]], radius: int, width: int, 
     )
 
 
+# A rise that begins this close to the floor — as a share of the lift's own
+# height above it — begins a new rep. The jerk after a clean starts from the
+# dip, 80-90 % of the way up; a bar lowered or dropped and lifted again starts
+# from the floor, within a few percent.
+RETURN_SHARE = 0.35
+
+
 @dataclass
 class _Group:
     """Windows being merged into one lift, with the span they cover so far."""
@@ -971,6 +994,8 @@ class _Group:
     rise: float
     rise_start_sec: float
     rise_end_sec: float
+    floor_y: float = 0.0
+    top_y: float = 0.0
 
     @classmethod
     def of(cls, window: LiftWindow) -> "_Group":
@@ -981,6 +1006,8 @@ class _Group:
             window.rise,
             window.rise_start_sec,
             window.rise_end_sec,
+            window.floor_y,
+            window.top_y,
         )
 
     def add(self, window: LiftWindow) -> None:
@@ -989,6 +1016,24 @@ class _Group:
         self.rise = max(self.rise, window.rise)
         self.rise_start_sec = min(self.rise_start_sec, window.rise_start_sec)
         self.rise_end_sec = max(self.rise_end_sec, window.rise_end_sec)
+        if window.top_y and (not self.top_y or window.top_y < self.top_y):
+            self.top_y = window.top_y
+
+    def back_on_the_floor(self, window: LiftWindow) -> bool:
+        """
+        Does this later rise start back down where the group's lift began?
+        Then it is another rep, not a phase of the same lift. Only a rise
+        that begins after the group's has ended can be one; a rise that
+        overlaps is the same rise seen along another trail.
+        """
+        if window.rise_start_sec < self.rise_end_sec:
+            return False
+        if not (self.floor_y and self.top_y and window.floor_y):
+            return False
+        height = self.floor_y - self.top_y
+        if height <= 0:
+            return False
+        return window.floor_y >= self.floor_y - RETURN_SHARE * height
 
     def build(self) -> LiftWindow:
         """
@@ -1029,6 +1074,8 @@ class _Group:
             rise_start_sec=self.rise_start_sec,
             rise_end_sec=self.rise_end_sec,
             trail=trail,
+            floor_y=self.floor_y,
+            top_y=self.top_y,
         )
 
 
@@ -1037,6 +1084,9 @@ def _merge_windows(windows: List[LiftWindow]) -> List[LiftWindow]:
     Collapse windows that cover the same rise seen from different trails, and
     join the phases of one lift — pull, catch, recovery, or a clean and the jerk
     after it — that sit within PHASE_GAP of each other into a single window.
+    A rise that starts back on the floor is a new rep, however soon it comes:
+    touch-and-go reps of a set are scored one by one, a clean and its jerk
+    together.
 
     A joined window never grows past MAX_WINDOW_SECONDS. Two attempts whose
     padding touches but which are too long to be one lift stay separate, with
@@ -1052,7 +1102,7 @@ def _merge_windows(windows: List[LiftWindow]) -> List[LiftWindow]:
             group = groups[-1]
             gap = window.start_sec - group.end_sec
             joined_end = max(group.end_sec, window.end_sec)
-            if gap <= PHASE_GAP and joined_end - group.start_sec <= MAX_WINDOW_SECONDS:
+            if gap <= PHASE_GAP and joined_end - group.start_sec <= MAX_WINDOW_SECONDS and not group.back_on_the_floor(window):
                 group.add(window)
                 continue
             if gap < 0:
@@ -1175,6 +1225,8 @@ def detect_lift_windows(
                         rise_start_sec=episode.start_sec,
                         rise_end_sec=episode.end_sec,
                         trail=points,
+                        floor_y=_y_at(points, episode.start_sec),
+                        top_y=_y_at(points, episode.end_sec),
                     )
                 )
     windows = _same_plate_only(windows)

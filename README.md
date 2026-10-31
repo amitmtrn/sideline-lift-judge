@@ -277,9 +277,11 @@ the model are all faked in `tests/pro_helpers.py`; nothing touches the network.
 ### How a clip becomes a verdict
 
 ```
- phone clip ──► trim ──► plate tracker (OpenCV, local, free)
-                            │  finds each lift: where the plate rises
-                            │  follows the near plate through it
+ phone clip ──► trim ──► tap the near plate (optional) ──► plate tracker (OpenCV, local, free)
+                            │  finds each lift: where the plate rises; a rise that starts
+                            │  back on the floor is the next rep
+                            │  follows the near plate through it — side-on, or as an
+                            │  ellipse from an angled camera — and checks it IS a plate
                             ├─► bar-path MEASUREMENT  (drift in plate diameters,
                             │   where in the rise, coverage)          ──────────┐
                             ▼                                                   │
@@ -325,8 +327,11 @@ server/              the Python app — nothing here is sent to the browser
                      (ffmpeg overlay), jobs.py, errors.py (plain messages for users),
                      results.py (JSON shape), demo_guard.py + sample.py (public-demo caps)
   schemas/           Pydantic models — the judge's JSON contract
-  utils/             bar_track.py (plate tracker: finds lifts, draws the trace),
-                     frames, rotation/probing, segmentation, clip cutting, uploads
+  utils/             bar_track.py (plate tracker: finds lifts, the legacy trace),
+                     plate_follow.py (the drawn trace: optical flow on the plate),
+                     plate_oblique.py (the near plate from an angled camera; the
+                     plate gate every trace passes), frames, rotation/probing,
+                     segmentation, clip cutting, uploads
 client/              everything served to the browser — no Python
   templates/         index.html (Jinja)
   static/            styles.css, app.js, service-worker.js, manifest.webmanifest,
@@ -526,7 +531,13 @@ worth repeating here:
 - **Portrait is fine.** Framing is what matters, not aspect ratio.
 - Keep the **whole bar and both plates in frame** for the entire lift. The bar leaving the frame
   is what caps confidence, not the orientation.
-- **One lift per clip.** Trim it on the trim screen; a clean & jerk is scored as two lifts.
+- **One lift per clip.** Trim it on the trim screen; a clean & jerk is scored as two lifts, and
+  a set of reps is scored rep by rep (each rise that starts back on the floor is a lift).
+- **Filmed from an angle anyway?** After the trim, tap the plate nearest the camera on the first
+  frame. The tracker can follow that plate as the ellipse it appears to be, measures the angle
+  from its shape and caps the confidence for it; the tap only tells it which plate you mean. If no
+  plate can be followed, the card says *Couldn't track the bar — film from the side with the near
+  plate visible* and no path is drawn.
 
 ### CLI (no UI)
 ```bash
@@ -669,7 +680,37 @@ the trace starts on the floor at lift-off instead of appearing above the knee.
 
 It gives up rather than guess. If the bar is found in under ~55% of frames, barely rises, or never
 moves, no trace is drawn and the replay is the verdict-only version. `bar_path_tracked` in the
-result says which you got.
+result says which you got, and `bar_path.reason` why not.
+
+**From an angled camera** (`server/utils/plate_oblique.py`) the near bumper is an ellipse —
+taller than wide, axis ratio ~0.6 from 45° off — that no circle detector finds, so the followers
+above used to settle on the smaller far plate, or on foliage in a window behind the lifter, and
+"tracked" could not tell. A third follower runs Hough on the frame stretched sideways by 1.0,
+1.3, 1.6 and 2.0 (an ellipse of ratio *q* is a circle at a stretch of 1/*q*), keeps only candidates
+that are dark inside with a rim all the way round, walks forward from the plate on the floor and
+backward from everything found high in the frame — a backward walk counts only when it lands back
+on the floor plate, which a ring hanging above the lifter or the far plate never does — and keeps
+the trail that rose furthest in pixels (the near plate rises more than the far one). The axis
+ratio it reports is an ellipse fit on the rim, with 1/stretch as the fallback, and feeds the
+off-axis confidence cap. It costs one full-frame scan every third frame at 12 fps and a 480 px
+long side, a patch around the prediction on the others, everything cached per frame: ~0.3 s of
+analysis on one thread for a 4 s 1080p window once decoded (`tools/bench_oblique.py`).
+
+**Every other trace passes a plate gate** (`looks_like_a_plate`) before it is drawn: dark inside
+with a rim, or a near-complete rim whatever the colour (white and yellow competition bumpers).
+The thresholds come from 522 samples along the hand-labelled plate tracks of 44 clips: real
+plates read a median grey of 100 inside (p90 128 — coloured bumpers, hub lettering, gym light),
+so the gate sits at 130, not at the 90 a single black bumper suggests. The order is: the side-on
+follower's trace when it passes the gate — unless the oblique follower measured the view as
+oblique *and* found a different, clearly bigger plate, the near one it could not see — then the
+oblique follower's, then the lift-window trail and the legacy tracker, each gated. When nothing
+passes, the card says *Couldn't track the bar — film from the side with the near plate visible*.
+
+**The tap.** After the trim the app shows the first frame of the window and takes one tap on the
+plate nearest the camera (`plate_x`/`plate_y`, 0..1 of the frame as the phone shows it; turned
+back onto the decoded frame when OpenCV hands back the unrotated one). It is a preference, not an
+answer: it decides between two plates that both rose and cannot make something that did not rise
+the bar. Skip it and the tracker picks the plate itself.
 
 ### What the judge is told, and what the number means
 The judge never sees pixels. Before any model call, the tracked path is turned into a short
@@ -711,8 +752,11 @@ from 39 real clips: the plate is detected in most frames of a real lift, it bare
 sideways relative to how far it rises, and its circle is the same size as the clip's plate — a
 rising circle half or twice that size is a torso, a head or a logo on a wall banner. Rises less
 than ~1.5 s apart merge as the phases of one lift (pull, catch, recovery; a clean and the jerk
-after it), and no window is allowed to be longer than one lift. The motion-energy segmentation
-remains only as a fallback when nothing could be tracked.
+after it) — unless the later rise starts back on the floor, within 35% of the earlier lift's
+height above it: that is the next rep of a set, and it gets a window of its own however soon it
+comes (the jerk starts from the dip, 80–90% of the way up, and stays with its clean). No window is
+allowed to be longer than one lift. The motion-energy segmentation remains only as a fallback
+when nothing could be tracked.
 
 **Measured on 39 real clips** (63 hand-labelled lifts, `tests/data/lift_windows_truth.json`,
 re-measured 2026-10-28): recall 89% (7 lifts missed), precision 86% (7 junk windows of 50). The
@@ -983,10 +1027,13 @@ given: these are things that happened on the 39 clips, not hypotheticals.
   of 92/84 did not reproduce and were corrected.
 - **The drawn bar path** is a second pass inside each window (`server/utils/plate_follow.py`):
   the plate followed frame by frame with optical flow, not the 12 fps detections that found the
-  lift. Scored against per-frame plate tracks checked by eye (`tools/score_bar_path.py`), 53 of
-  61 gym lifts get a clean trace (11 before) and the drift shown is off by 5 cm at the median,
-  27 cm at worst (17 and 137 before). On 6 competition clips from YouTube
-  (`--set competition`) 7 of 11 lifts are clean and the drift is off by 4 cm at the median.
+  lift. Scored against per-frame plate tracks checked by eye (`tools/score_bar_path.py`,
+  re-measured 2026-10-31): 44 of 61 gym lifts get a clean trace, 95% of trace points are on the
+  path, and the drift shown is off by 6 cm at the median, 16 cm at p90 and 23 cm at worst. The
+  plate gate changed none of the clean counts and took the worst case from 134 cm to 23 cm: the
+  two traces it removed were on nothing (52% and 6% of their points on a plate, a 140 cm drift),
+  and one mediocre trace (67%) went with them. On 6 competition clips from YouTube
+  (`--set competition`) 9 of 11 lifts are clean and the drift is off by 5 cm at the median.
 - **A clean & jerk done fast is one rise.** Rises under ~1.5 s apart merge as the phases of one
   lift, so a jerk that follows the clean at once lands in the clean's window and the split falls
   back to the quiet moment in the motion profile. If no split leaves each half at least 1.2 s —
@@ -997,7 +1044,14 @@ given: these are things that happened on the 39 clips, not hypotheticals.
   on "biggest rise" until agreement between trails became the rule), a plate parked on a stand
   beside the athlete, and the *far* plate on an off-axis camera — hopping from one plate to the
   other invents a sideways move that never happened. Colour and size checks now catch most of
-  these; a gym full of circular signage is still the hard case.
+  these, every trace must look like a plate (dark inside with a rim, or a full rim) before it is
+  drawn, and from an angled camera the near plate is followed as the ellipse it is
+  (`server/utils/plate_oblique.py`); a gym full of circular signage is still the hard case, and a
+  bright plate with a broken rim (a hand over it, a collar) can fail the gate and leave no trace.
+- **The oblique follower is tested on synthetic clips only.** No labelled oblique footage exists
+  in the sample set, so its accuracy figures (every point within half a plate radius, axis ratio
+  within 0.05 of the truth) are from drawn clips; on the real side-on clips it finds the same
+  plate as the side-on follower and gives way to it.
 - **It gives up rather than guess**: no trace when the plate is found in under ~55% of frames,
   barely rises, or never moves. Then the drift is read from the frames alone, the judge is told,
   and confidence is capped at 0.65.

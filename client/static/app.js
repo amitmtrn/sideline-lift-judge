@@ -53,6 +53,9 @@
     duration: 0,
     start: 0,
     end: 0,
+    // Where the athlete tapped the plate nearest the camera, as {x, y} in
+    // 0..1 of the frame at the start of the window; null when skipped.
+    plate: null,
     trimAvailable: true,
     capHintShown: false,
     jobId: null,
@@ -243,6 +246,17 @@
       case "preview-window":
         playWindow();
         break;
+      case "plate":
+        openPlateStep();
+        break;
+      case "plate-clear":
+        state.plate = null;
+        renderPlateMarker();
+        break;
+      case "plate-skip":
+        state.plate = null;
+        submit();
+        break;
       case "score":
         submit();
         break;
@@ -276,6 +290,8 @@
     state.duration = 0;
     state.start = 0;
     state.end = 0;
+    state.plate = null;
+    renderPlateMarker();
     if (state.objectUrl) {
       URL.revokeObjectURL(state.objectUrl);
       state.objectUrl = null;
@@ -401,6 +417,8 @@
       state.start = Math.max(0, state.end - 0.3);
       startSlider.value = String(state.start);
     }
+    // The tap was on the old first frame.
+    state.plate = null;
     preview.currentTime = state.start;
     renderWindow();
   });
@@ -470,6 +488,106 @@
     const value = Math.max(0, Number(seconds) || 0);
     const minutes = Math.floor(value / 60);
     return `${minutes}:${(value - minutes * 60).toFixed(1).padStart(4, "0")}`;
+  }
+
+  /* ---------- Tap the near plate ---------- */
+  // After the trim: the first frame of the window, drawn from the preview,
+  // and one tap on the plate nearest the camera. The tracker uses it to
+  // choose between two plates that both rise — what goes wrong on a clip
+  // filmed from an angle — and is free to ignore it. Optional: skip scores
+  // without it.
+
+  const plateCanvas = $("#plate-canvas");
+  const plateMarker = $("#plate-marker");
+
+  function openPlateStep() {
+    // A clip the browser cannot play has no frame to tap on; score it as is.
+    if (!state.trimAvailable || !state.duration || !plateCanvas) {
+      submit();
+      return;
+    }
+    state.plate = null;
+    hide($("#plate-error"));
+    show("plate");
+    renderPlateMarker();
+    drawPlateFrame();
+  }
+
+  function drawPlateFrame() {
+    const paint = () => {
+      const width = preview.videoWidth;
+      const height = preview.videoHeight;
+      if (!width || !height) {
+        fail($("#plate-error"), "This frame could not be drawn — skip the tap and the tracker will pick the plate itself.");
+        return;
+      }
+      plateCanvas.width = width;
+      plateCanvas.height = height;
+      try {
+        plateCanvas.getContext("2d").drawImage(preview, 0, 0, width, height);
+      } catch (error) {
+        fail($("#plate-error"), "This frame could not be drawn — skip the tap and the tracker will pick the plate itself.");
+      }
+      renderPlateMarker();
+    };
+    const target = Math.min(state.start, Math.max(0, state.duration - 0.05));
+    if (preview.readyState >= 2 && Math.abs(preview.currentTime - target) < 0.02) {
+      paint();
+      return;
+    }
+    waitForEvent(preview, "seeked", 5000)
+      .then(paint)
+      .catch(() => fail($("#plate-error"), "This frame could not be drawn — skip the tap and the tracker will pick the plate itself."));
+    preview.currentTime = target;
+  }
+
+  // The canvas keeps the frame's aspect inside its box (object-fit: contain),
+  // so a tap in the letterbox is outside the frame and the rest maps to 0..1.
+  function plateContentBox() {
+    const rect = plateCanvas.getBoundingClientRect();
+    const frameWidth = plateCanvas.width || 1;
+    const frameHeight = plateCanvas.height || 1;
+    const scale = Math.min(rect.width / frameWidth, rect.height / frameHeight);
+    const width = frameWidth * scale;
+    const height = frameHeight * scale;
+    return {
+      rect,
+      width,
+      height,
+      left: rect.left + (rect.width - width) / 2,
+      top: rect.top + (rect.height - height) / 2,
+    };
+  }
+
+  if (plateCanvas) {
+    plateCanvas.addEventListener("click", (event) => {
+      const box = plateContentBox();
+      if (!(box.width > 0 && box.height > 0)) return;
+      const x = (event.clientX - box.left) / box.width;
+      const y = (event.clientY - box.top) / box.height;
+      if (x < 0 || x > 1 || y < 0 || y > 1) return;
+      state.plate = { x, y };
+      renderPlateMarker();
+    });
+    window.addEventListener("resize", renderPlateMarker);
+  }
+
+  function renderPlateMarker() {
+    if (!plateMarker || !plateCanvas) return;
+    const clearButton = document.querySelector('[data-action="plate-clear"]');
+    const status = $("#plate-status");
+    if (!state.plate) {
+      plateMarker.hidden = true;
+      if (clearButton) clearButton.hidden = true;
+      if (status) status.textContent = "No tap yet — the tracker will pick the plate itself.";
+      return;
+    }
+    const box = plateContentBox();
+    plateMarker.style.left = `${box.left - box.rect.left + state.plate.x * box.width}px`;
+    plateMarker.style.top = `${box.top - box.rect.top + state.plate.y * box.height}px`;
+    plateMarker.hidden = false;
+    if (clearButton) clearButton.hidden = false;
+    if (status) status.textContent = "Tap saved. Tap again to move it.";
   }
 
   // ---------- pre-upload re-encode ----------
@@ -689,6 +807,12 @@
     if (serverSideTrim) {
       body.append("trim_start", state.start.toFixed(2));
       body.append("trim_end", state.end.toFixed(2));
+    }
+    // The tap is in 0..1 of the frame, so it survives the browser re-encode
+    // (same aspect, scaled) and the server-side trim (same first frame).
+    if (state.plate) {
+      body.append("plate_x", state.plate.x.toFixed(4));
+      body.append("plate_y", state.plate.y.toFixed(4));
     }
 
     const request = new XMLHttpRequest();
@@ -1103,10 +1227,13 @@
     // Step 1: CV tracker
     const li1 = element("li");
     li1.appendChild(element("b", null, "CV tracker measured: "));
+    // Untracked: the tracker's own reason, which on a clip filmed from an
+    // angle is the filming advice ("film from the side with the near plate
+    // visible"), then where the drift came from instead.
     let trackerText = barPath.tracked
       ? `bar path in ${Math.round((barPath.coverage || 0) * 100)}% of frames`
         + (barPath.max_drift_cm_estimate != null ? `; max drift ~${barPath.max_drift_cm_estimate} cm` : "")
-      : "bar not tracked — drift read from the frames";
+      : `${barPath.reason || "bar not tracked"}; drift read from the frames`;
     li1.appendChild(document.createTextNode(trackerText));
     list.appendChild(li1);
 
@@ -1141,7 +1268,7 @@
     if (barPath.tracked) {
       if (barPath.coverage != null) tracker += ` (plate seen in ${Math.round(barPath.coverage * 100)}% of frames)`;
     } else {
-      tracker = "CV tracker: no trace, drift read from the frames";
+      tracker = `CV tracker: ${barPath.reason || "no trace"}; drift read from the frames`;
     }
     list.appendChild(element("li", null, tracker));
     list.appendChild(element("li", null, `${models.vision_name || models.vision || "Vision model"} observed`));

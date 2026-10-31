@@ -475,6 +475,50 @@ video {
   border-radius: var(--radius);
 }
 
+/* ---------- Tap the near plate ---------- */
+
+.plate-pick {
+  position: relative;
+  margin-top: 14px;
+}
+
+#plate-canvas {
+  display: block;
+  width: 100%;
+  max-height: 46dvh;
+  object-fit: contain;
+  background: #000;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  cursor: crosshair;
+  touch-action: manipulation;
+}
+
+/* The ring that marks the tap: centred on the point, never in the way of
+   the next tap. */
+.plate-marker {
+  position: absolute;
+  width: 44px;
+  height: 44px;
+  margin: -22px 0 0 -22px;
+  border: 3px solid var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55), inset 0 0 0 2px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+}
+
+.hint.centered {
+  text-align: center;
+  margin: 10px 0 0;
+}
+
+/* The plates sit at the bottom of the frame, where a sticky dock would cover
+   them while the athlete looks for the one to tap: this dock stays in the flow. */
+.screen[data-screen="plate"] .dock {
+  position: static;
+  background: none;
+}
+
 .window-bar {
   position: relative;
   height: 10px;

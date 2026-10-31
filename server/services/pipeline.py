@@ -42,7 +42,8 @@ from server.services.nebius_client import (
 from server.services.replay import render_annotated_replay
 from server.utils.bar_track import BarPath, LiftWindow, detect_lift_windows, track_bar_path
 from server.utils.frames import sample_frames_in_range_bgr
-from server.utils.plate_follow import follow_bar_path
+from server.utils.plate_follow import follow_bar_path, read_gray_frames
+from server.utils.plate_oblique import NO_TRACE_REASON, OBLIQUE_RATIO, follow_oblique, looks_like_a_plate
 from server.utils.image_ops import frames_to_data_urls, prepare_frames
 from server.utils.segmentation import (
     CandidateSegment,
@@ -289,6 +290,11 @@ class ScoreRequest:
     # Lift windows this one upload may score; the rest are listed as skipped.
     # 0 is no cap. The public demo sets it so one clip cannot cost a dozen calls.
     max_lifts: int = 0
+    # Where the athlete tapped the plate nearest the camera, as (x, y) in
+    # 0..1 of the frame as their phone showed it, at the start of the trim.
+    # A hint for the trackers, not an answer: it decides between two plates
+    # that both rise.
+    plate_hint: Optional[Tuple[float, float]] = None
 
 
 async def run_scoring(
@@ -623,7 +629,9 @@ async def _score_one_lift(
     # for the judge as well as the trace on the replay, so the drift the judge
     # describes and the drift the replay draws are the same measurement.
     progress("observing", f"Following the bar — {label}…", low + 0.05 * (high - low))
-    bar_path = await _offload(_trace_for, request.video_path, window, lift_window, label)
+    bar_path = await _offload(
+        _trace_for, request.video_path, window, lift_window, label, tap=request.plate_hint, info=info
+    )
     measurement = measure(bar_path)
     scored.measurement = measurement
     scored.bar_path_tracked = measurement.tracked
@@ -729,40 +737,194 @@ async def _score_one_lift(
     return scored
 
 
+def _tap_in_decoded_frame(
+    tap: Optional[Tuple[float, float]], info: Optional[VideoInfo], frame_width: int, frame_height: int
+) -> Optional[Tuple[float, float]]:
+    """
+    The athlete tapped the frame as the phone showed it, rotation applied.
+    OpenCV applies that rotation itself on most builds, in which case the
+    tap maps straight onto the decoded frame; on a build that hands back the
+    coded (unrotated) frame — told apart by its orientation, as
+    rotation_still_needed does — the tap is turned back the same way. A 180°
+    rotation cannot be told from the size and is left alone, as there.
+    """
+    if tap is None:
+        return None
+    if info is None or not info.probed or info.rotation % 360 not in (90, 270):
+        return tap
+    if not (frame_width and frame_height and info.display_width and info.display_height):
+        return tap
+    if frame_width == frame_height or info.display_width == info.display_height:
+        return tap
+    if (frame_width > frame_height) == (info.display_width > info.display_height):
+        return tap  # already at the display orientation
+    x, y = tap
+    if info.rotation % 360 == 90:
+        # displayed = rotate_90_clockwise(decoded): (xs, ys) = (1 - yd, xd)
+        return (y, 1.0 - x)
+    return (1.0 - y, x)
+
+
+# The oblique follower's plate must be this much bigger than the side-on
+# follower's, and somewhere else in the frame, before it takes over: on an
+# angled clip the side-on follower settles on the smaller far plate, while on
+# a side-on clip both followers find the same plate and the side-on trace is
+# the finer one.
+OBLIQUE_BIGGER_BY = 1.25
+SAME_TRACE_RADII = 1.5
+# What the oblique follower must read before its trace replaces a side-on
+# trace of the far plate: an axis ratio clear of the 0.88-0.94 its ellipse
+# fit reads on the side-on labelled clips (an angled clip reads ~0.6; the
+# confidence cap's own line is 0.93 in confidence.py), and the plate found in
+# most of the frames. A trail found in two thirds of them has been on neither
+# plate (a competition clip), so that is also the bar for using its trace
+# when every other follower failed.
+OBLIQUE_OVERRIDE_RATIO = 0.85
+OBLIQUE_MIN_COVERAGE = 0.75
+
+
+def _same_trace(a: BarPath, b: BarPath) -> bool:
+    """Are these two traces on the same object? Compared where both have a point."""
+    if not a.points or not b.points or not a.frame_width:
+        return False
+    radius_px = max(1.0, max(a.plate_radius, b.plate_radius) * a.frame_width)
+    by_time = sorted(b.points, key=lambda p: p.t)
+    distances = []
+    for p in a.points:
+        q = min(by_time, key=lambda r: abs(r.t - p.t))
+        if abs(q.t - p.t) <= 0.1:
+            distances.append(((p.x - q.x) * a.frame_width, (p.y - q.y) * a.frame_height))
+    if len(distances) < 3:
+        return False
+    mean = sum((dx * dx + dy * dy) ** 0.5 for dx, dy in distances) / len(distances)
+    return mean / radius_px <= SAME_TRACE_RADII
+
+
+def _usable_oblique(oblique: Optional[BarPath]) -> bool:
+    """A trace from the oblique follower worth drawing at all."""
+    return oblique is not None and oblique.tracked and oblique.coverage >= OBLIQUE_MIN_COVERAGE
+
+
+def _prefer_oblique(oblique: Optional[BarPath], side: BarPath) -> bool:
+    """
+    Take the oblique follower's trace over a side-on trace that passed the
+    plate gate only when it clearly measured the view as oblique AND found a
+    different, clearly bigger plate in most frames — the near plate the
+    circle-only follower could not see. Same plate, or a reading in the
+    side-on band: the side-on follower's trace stands.
+    """
+    if not _usable_oblique(oblique) or oblique.plate_axis_ratio is None:
+        return False
+    if oblique.plate_axis_ratio >= OBLIQUE_OVERRIDE_RATIO:
+        return False
+    if oblique.plate_radius < OBLIQUE_BIGGER_BY * side.plate_radius:
+        return False
+    return not _same_trace(oblique, side)
+
+
 def _trace_for(
-    video_path: str, window: CandidateSegment, lift_window: Optional[LiftWindow], label: str
-) -> Optional[BarPath]:
+    video_path: str,
+    window: CandidateSegment,
+    lift_window: Optional[LiftWindow],
+    label: str,
+    *,
+    tap: Optional[Tuple[float, float]] = None,
+    info: Optional[VideoInfo] = None,
+) -> BarPath:
     """
     The bar's path through this window, from local CV and no model call.
+    Always a BarPath: `.tracked` says whether there is a trace and `.reason`
+    why not.
 
-    First choice is following the plate frame by frame from the start of the
-    window (plate_follow): it says where the bar went far more faithfully than
-    the trail that found the lift, which is a chain of separate guesses at
-    12 fps. That trail is the next choice — and is offered to the follower as
-    a hint — and a fresh bar_track pass is the last, because it samples
-    different frames and does not reliably agree with either.
+    The window is decoded once and every follower works from those frames.
+    The oblique follower (plate_oblique) goes first: when it finds a dark
+    elliptical plate and measures the view as oblique it is the answer,
+    because the circle-only followers cannot see that plate at all and settle
+    on the far plate or a window instead. Otherwise the side-on follower
+    (plate_follow) is the first choice, as it says where the bar went far more
+    faithfully than the trail that found the lift, which is a chain of
+    separate guesses at 12 fps; that trail is the next choice — and is offered
+    to the follower as a hint — and a fresh bar_track pass is the last. Every
+    trace but the oblique follower's own is checked with `looks_like_a_plate`
+    before it is believed: `BarPath.tracked` only knows that something rose,
+    not that it was a plate. `tap` is where the athlete tapped the near plate.
     """
-    bar_path: Optional[BarPath] = None
+    frames = []
+    try:
+        frames = read_gray_frames(video_path, window.start_sec, window.end_sec)
+    except Exception:
+        logger.exception("Reading the window failed for %s", label)
+    width = frames[0][1].shape[1] if frames else 0
+    height = frames[0][1].shape[0] if frames else 0
+    tap = _tap_in_decoded_frame(tap, info, width, height)
+    shared = frames or None
+    rejected: List[str] = []
+
+    def gated(path: Optional[BarPath], source: str) -> Optional[BarPath]:
+        if path is None or not path.tracked:
+            if path is not None and path.reason:
+                rejected.append(f"{source}: {path.reason}")
+            return None
+        ok, why = looks_like_a_plate(video_path, path, frames=shared)
+        if ok:
+            return path
+        logger.info("%s trace for %s rejected: %s", source, label, why)
+        rejected.append(f"{source}: {why}")
+        return None
+
+    oblique: Optional[BarPath] = None
+    try:
+        oblique = follow_oblique(video_path, window.start_sec, window.end_sec, hint=tap, frames=shared)
+    except Exception:
+        logger.exception("The oblique follower failed for %s", label)
+
     hint = None
     if lift_window is not None and lift_window.points and lift_window.radius:
         start = min(lift_window.points, key=lambda p: abs(p.t - lift_window.rise_start_sec))
         hint = (start.t, start.x, start.y, float(lift_window.radius))
+    side: Optional[BarPath] = None
     try:
-        bar_path = follow_bar_path(video_path, window.start_sec, window.end_sec, hint=hint)
+        side = follow_bar_path(video_path, window.start_sec, window.end_sec, hint=hint, tap=tap, frames=shared)
     except Exception:
         logger.exception("Following the plate failed for %s", label)
-    if bar_path is not None and bar_path.tracked:
-        return bar_path
+    chosen = gated(side, "side-on follower")
+    if chosen is not None and not _prefer_oblique(oblique, chosen):
+        return chosen
+    if _usable_oblique(oblique):
+        if chosen is not None:
+            logger.info(
+                "Oblique view for %s (axis ratio %.2f): the near plate the oblique follower found over the side-on trace",
+                label, oblique.plate_axis_ratio or 0.0,
+            )
+        return oblique
+    if chosen is not None:
+        return chosen
+    if oblique is not None:
+        if oblique.tracked:
+            rejected.append(f"oblique follower: the plate was found in only {oblique.coverage:.0%} of the frames")
+        elif oblique.reason:
+            rejected.append(f"oblique follower: {oblique.reason}")
+
     if lift_window is not None:
-        bar_path = lift_window.bar_path(window.start_sec, window.end_sec)
-    if bar_path is None or not bar_path.tracked:
-        try:
-            bar_path = track_bar_path(video_path, start_sec=window.start_sec, end_sec=window.end_sec)
-        except Exception:
-            logger.exception("Bar tracking failed for %s", label)
-    if bar_path is not None and not bar_path.tracked:
-        logger.info("No bar trace for %s: %s", label, bar_path.reason)
-    return bar_path
+        chosen = gated(lift_window.bar_path(window.start_sec, window.end_sec), "lift-window trail")
+        if chosen is not None:
+            return chosen
+    legacy: Optional[BarPath] = None
+    try:
+        legacy = track_bar_path(video_path, start_sec=window.start_sec, end_sec=window.end_sec)
+    except Exception:
+        logger.exception("Bar tracking failed for %s", label)
+    chosen = gated(legacy, "bar tracker")
+    if chosen is not None:
+        return chosen
+
+    logger.info("No bar trace for %s: %s", label, "; ".join(rejected) or "nothing to follow")
+    return BarPath(
+        sampled=len(frames),
+        frame_width=width,
+        frame_height=height,
+        reason=NO_TRACE_REASON,
+    )
 
 
 async def _lift_windows(

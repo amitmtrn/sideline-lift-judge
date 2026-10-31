@@ -8,6 +8,40 @@ about scoring, prompts or the rubric changed. See
 [What's new for PayPal](README.md#sideline-pro--whats-new-for-the-paypal-ai-hackathon-since-oct-30)
 in the README for the design.
 
+### Tracker: the near plate on an angled clip (Oct 31)
+- **An oblique follower** (`server/utils/plate_oblique.py`). From a phone ~45° off the side the
+  near bumper is an ellipse (axis ratio ~0.6) that circle-only Hough never finds, so the trackers
+  settled on the far plate or on foliage in a window and `BarPath.tracked` believed them. The new
+  follower runs Hough on the frame stretched sideways by 1.0 / 1.3 / 1.6 / 2.0, keeps only
+  candidates that are dark inside with a rim, walks forward from the plate on the floor and
+  backward from everything found high in the frame (a backward walk counts only if it lands back
+  on the floor plate — a ring hanging above the lifter never does), and keeps the trail that rose
+  furthest in pixels. The axis ratio comes from an ellipse fit on the rim (1/stretch as the
+  fallback), so the off-axis confidence cap now fires from the plate's own shape.
+- **A plate gate on every other trace** (`looks_like_a_plate`): the side-on follower's, the
+  lift-window trail's and the legacy tracker's traces are checked for a dark inside with a rim, or
+  a near-complete rim (white and yellow competition bumpers), before they are drawn. Thresholds are
+  from 522 samples on 44 hand-labelled clips, not guessed: real plates read a median grey of 100
+  inside, so the gate sits at 130, not at the 90 a black bumper suggests.
+- **Order in `_trace_for`**: the window is decoded once and shared; the side-on follower's trace
+  stands when it passes the gate, unless the oblique follower measured the view as oblique *and*
+  found a different, clearly bigger plate (the near one); then the oblique trace, then the gated
+  fallbacks; when nothing passes, no path is drawn and the card says *Couldn't track the bar —
+  film from the side with the near plate visible*.
+- **Tap the near plate**: a step after the trim shows the first frame of the window and takes one
+  tap on the plate nearest the camera (`plate_x`/`plate_y` on `/api/jobs` and `/api/score`). It
+  decides between two plates that both rise; it never makes something that did not rise the bar.
+  Skippable; a clip the browser cannot play skips it on its own.
+- **Reps are separate lifts**: a rise that starts back on the floor (within 35 % of the previous
+  lift's height) begins a new window even inside the 1.5 s phase gap, so a set of touch-and-go
+  snatches is scored rep by rep; a clean and its jerk, which starts from the dip 80-90 % of the way
+  up, stay one window.
+- `tools/bench_oblique.py` times the follower: on a 4 s 1080p window the analysis takes ~0.3 s on
+  one thread once the window is decoded (decoding 4 s of 1080p HEVC is ~2 s wall, shared).
+- Tests: `tests/test_plate_oblique.py` (synthetic oblique lift with foliage and a far plate,
+  foliage alone, a hanging ring, the tap, the stride/cache budget, the rotation of a tap, the
+  bright-plate gate, the preference rule) and two multi-rep tests in `tests/test_bar_track.py`.
+
 ### Fixed (pre-submission polish, Oct 30)
 - **Invoices no longer 500.** The Agent Toolkit lets `requests.HTTPError` out on a PayPal 4xx/5xx
   and nothing caught it, so confirming an invoice left the audit row at CONFIRMED and the page

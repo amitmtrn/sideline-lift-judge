@@ -426,3 +426,69 @@ def test_tracking_is_not_sensitive_to_the_window_start(tmp_path):
         path = track_bar_path(clip, start_sec=offset, end_sec=3.0)
         assert path.tracked, f"offset {offset}: {path.reason}"
         assert min(p.x for p in path.points) > 0.3, f"offset {offset}: followed the head"
+
+
+# ---------- reps: a rise that starts back on the floor is a new lift ----------
+
+
+def test_touch_and_go_reps_are_separate_lifts(tmp_path):
+    """
+    Three snatches in a row, the bar lowered to the floor between them and
+    lifted again within a second: three lifts, not one ten-second window.
+    (The phase gap alone merged them — each rise began inside PHASE_GAP of
+    the previous window's end — which is why the return to the floor decides.)
+    """
+    from server.utils.bar_track import detect_lift_windows
+
+    floor, top = HEIGHT - 70, HEIGHT - 70 - 0.4 * HEIGHT
+    period, duration = 2.5, 8.5
+
+    def reps(fraction):
+        t = fraction * duration
+        if t < 0.6:
+            return 160, floor
+        rep, local = int((t - 0.6) // period), (t - 0.6) % period
+        if rep >= 3:
+            return 160, floor
+        if local < 1.0:  # up
+            return 160, floor + (top - floor) * local
+        if local < 1.4:  # held overhead
+            return 160, top
+        if local < 2.2:  # lowered
+            return 160, top + (floor - top) * (local - 1.4) / 0.8
+        return 160, floor  # a moment on the floor
+
+    clip = write_clip(str(tmp_path / "reps.mp4"), plate_track=reps, duration=duration)
+    windows = detect_lift_windows(clip, duration_sec=duration)
+    assert len(windows) == 3, [(round(w.start_sec, 1), round(w.end_sec, 1)) for w in windows]
+    peaks = [0.6 + 1.0 + rep * period for rep in range(3)]
+    for window, peak in zip(windows, peaks):
+        assert abs(window.peak_sec - peak) < 0.5, (window.peak_sec, peak)
+        assert window.rise > 0.3
+        assert window.start_sec <= peak - 1.0 + 0.2 and window.end_sec >= peak
+    for earlier, later in zip(windows, windows[1:]):
+        assert earlier.end_sec <= later.start_sec + 1e-6
+
+
+def test_a_clean_and_its_jerk_stay_one_window_but_a_second_rep_does_not():
+    from server.utils.bar_track import LiftWindow, _merge_windows
+
+    def window(start, end, rise, peak, rise_start, rise_end, floor_y, top_y):
+        points = [BarPoint(t=rise_start, x=0.4, y=floor_y), BarPoint(t=rise_end, x=0.4, y=top_y)]
+        return LiftWindow(
+            start, end, rise, peak, radius=30, points=points, frame_width=320, frame_height=480,
+            rise_start_sec=rise_start, rise_end_sec=rise_end, trail=points, floor_y=floor_y, top_y=top_y,
+        )
+
+    clean = window(0.0, 2.5, 0.30, 1.8, 0.9, 1.8, 0.85, 0.55)
+    # The jerk drives from the dip, more than 80 % of the way up the clean's rise.
+    jerk = window(2.6, 4.5, 0.32, 3.6, 2.9, 3.6, 0.60, 0.28)
+    merged = _merge_windows([clean, jerk])
+    assert len(merged) == 1 and merged[0].start_sec == 0.0 and merged[0].end_sec == 4.5
+    # Another clean, from the floor: its own lift.
+    second_rep = window(2.6, 4.5, 0.30, 3.6, 2.9, 3.6, 0.84, 0.54)
+    assert len(_merge_windows([clean, second_rep])) == 2
+    # A window with no height information is merged as before.
+    unknown = window(2.6, 4.5, 0.30, 3.6, 2.9, 3.6, 0.0, 0.0)
+    unknown.floor_y = unknown.top_y = 0.0
+    assert len(_merge_windows([clean, unknown])) == 1

@@ -197,7 +197,7 @@
 
         <!-- 3. Trim -->
         <section class="screen" data-screen="trim" aria-labelledby="trim-title">
-          <p class="step-label">Step 3 of 4</p>
+          <p class="step-label">Step 3 of 5</p>
           <h2 id="trim-title">Trim to one lift</h2>
 
           <video id="preview" playsinline muted preload="metadata"></video>
@@ -227,13 +227,38 @@
           </div>
 
           <div class="dock">
-            <button type="button" data-action="score">Score this lift</button>
+            <button type="button" data-action="plate">Next: tap the plate</button>
           </div>
         </section>
 
-        <!-- 4. Working -->
+        <!-- 4. Tap the near plate -->
+        <section class="screen" data-screen="plate" aria-labelledby="plate-title">
+          <p class="step-label">Step 4 of 5</p>
+          <h2 id="plate-title">Tap the plate nearest you</h2>
+          <p class="lede">This is the first frame of your window. One tap on the bumper plate closest to the camera helps the tracker follow the right plate when the clip is filmed from an angle.</p>
+
+          <div class="plate-pick">
+            <canvas id="plate-canvas" aria-label="The first frame of the trimmed clip. Tap the plate nearest the camera." role="img"></canvas>
+            <div id="plate-marker" class="plate-marker" hidden></div>
+          </div>
+
+          <p id="plate-status" class="meta-row" aria-live="polite">No tap yet — the tracker will pick the plate itself.</p>
+          <p id="plate-error" class="notice" hidden></p>
+
+          <div class="actions pair">
+            <button type="button" class="ghost" data-go="trim">Back to trim</button>
+            <button type="button" class="ghost" data-action="plate-clear" hidden>Clear tap</button>
+          </div>
+
+          <div class="dock">
+            <button type="button" data-action="score">Score this lift</button>
+            <p class="hint centered"><button type="button" class="link" data-action="plate-skip">Skip the tap and score</button></p>
+          </div>
+        </section>
+
+        <!-- 5. Working -->
         <section class="screen" data-screen="progress" aria-labelledby="progress-title">
-          <p class="step-label">Step 4 of 4</p>
+          <p class="step-label">Step 5 of 5</p>
           <h2 id="progress-title">Judging</h2>
 
           <div class="track"><div class="fill" id="progress-fill"></div></div>
