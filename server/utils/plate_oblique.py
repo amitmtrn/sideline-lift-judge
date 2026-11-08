@@ -68,6 +68,17 @@ PLATE_MAX_GREY = 130.0
 MIN_RIM_SUPPORT = 0.35
 RIM_ALONE = 0.75
 RIM_SAMPLES = 36
+# A ring — the gymnastics ring hanging in a gym, a hoop, a tyre on the wall —
+# has a rim all the way round and nothing inside it but the wall behind: its
+# inside reads HOLLOW_STEP brighter than the band just inside its rim, and
+# the same as the wall just outside it (within HOLLOW_SEE_THROUGH). A plate
+# is a filled disc: its inside and its rim band are the same colour, give or
+# take a hub and lettering — on 4,600 samples along the labelled tracks the
+# largest difference a real plate read was 84 (a white hub inside a dark rim
+# band); a ring on a white wall reads about 120 — and a bright plate with a
+# dark rim is still not the wall behind it.
+HOLLOW_STEP = 100.0
+HOLLOW_SEE_THROUGH = 40.0
 RIM_EDGE = 10.0  # grey levels of gradient (3x3 Sobel / 4) that count as an edge
 # Hough: a stretched ellipse is only nearly a circle, so the accumulator
 # threshold sits under bar_track's 38; the strongest few circles per stretch
@@ -79,15 +90,31 @@ MAX_PER_STRETCH = 12
 # the frames between.
 KEY_EVERY = 3
 FLOOR_FRAMES = 4
-# The walk: the plate may move this many of its own radii per frame of gap,
-# the gap is capped, and after this many missed frames the walk stops.
+# The walk, in the clip's own seconds so the rules hold at any frame rate:
+# * the plate cannot move faster than MAX_SPEED_RADII_PER_SEC of its own
+#   radii a second — 1.5 radii per frame at the 12 fps analysis rate, which
+#   is a bar at 4 m/s on a 450 mm plate, twice a snatch's peak;
+# * the next position is predicted from the last velocity, coasting at most
+#   COAST_SECONDS (the bar reverses within that at the top of the pull), and
+#   the search sits PREDICT_REACH_RADII around the prediction, widening
+#   with the square root of the gap;
+# * a frame with no acceptable plate is bridged by that prediction for up to
+#   BRIDGE_SECONDS; longer than that the plate is lost and the walk ends
+#   there, rather than attach to a ring, a logo or the other plate.
 MAX_STEP_RADII = 1.5
-MAX_GAP = 4
-LOST_AFTER = 10
+MAX_SPEED_RADII_PER_SEC = MAX_STEP_RADII * ANALYSIS_FPS
+PREDICT_REACH_RADII = 1.0
+COAST_SECONDS = 0.17
+BRIDGE_SECONDS = 0.35
+# A candidate's size must stay within this share of the plate's; a plate on
+# the bar does not change size, a ring or the far plate is another size.
 RADIUS_TOLERANCE = 0.3
 # A plate's inside does not change brightness much from one found frame to the
 # next; a step of this many grey levels is a hop onto something else.
 GREY_STEP = 60.0
+# Hough's accumulator bar when looking only where the athlete tapped: the
+# plate is known to be there, so a fainter ellipse is accepted.
+HOUGH_PARAM2_TAP = 22
 # Two trails on the same object agree (within a plate radius) on this share
 # of the frames they both saw; only the better of the two is kept.
 SAME_OBJECT_SHARE = 0.8
@@ -201,6 +228,27 @@ def _inner_grey(gray, x: float, y: float, rx: float, ry: float) -> float:
     return float(values.mean()) if values.size else 255.0
 
 
+def _annulus_grey(gray, x: float, y: float, rx: float, ry: float, inner: float, outer: float) -> float:
+    """Mean grey over the ring between `inner` and `outer` times the axes."""
+    import cv2  # type: ignore
+    import numpy as np  # type: ignore
+
+    ax, ay = max(2, int(round(rx * outer))), max(2, int(round(ry * outer)))
+    bx, by = max(1, int(rx * inner)), max(1, int(ry * inner))
+    height, width = gray.shape[:2]
+    left, top = max(0, int(x) - ax - 1), max(0, int(y) - ay - 1)
+    right, bottom = min(width, int(x) + ax + 2), min(height, int(y) + ay + 2)
+    if right - left < 3 or bottom - top < 3:
+        return 255.0
+    patch = gray[top:bottom, left:right]
+    mask = np.zeros(patch.shape, np.uint8)
+    centre = (int(x) - left, int(y) - top)
+    cv2.ellipse(mask, centre, (ax, ay), 0, 0, 360, 255, -1)
+    cv2.ellipse(mask, centre, (bx, by), 0, 0, 360, 0, -1)
+    values = patch[mask > 0]
+    return float(values.mean()) if values.size else 255.0
+
+
 def _rim_support(grad, x: float, y: float, rx: float, ry: float, samples: int = RIM_SAMPLES) -> float:
     """
     Share of directions in which the ellipse's rim sits on an edge. Each
@@ -224,7 +272,7 @@ def _rim_support(grad, x: float, y: float, rx: float, ry: float, samples: int = 
     return float(np.mean(best[seen] >= RIM_EDGE))
 
 
-def _hough(gray, low: int, high: int):
+def _hough(gray, low: int, high: int, param2: int = HOUGH_PARAM2):
     import cv2  # type: ignore
 
     found = cv2.HoughCircles(
@@ -233,13 +281,65 @@ def _hough(gray, low: int, high: int):
         dp=1.2,
         minDist=max(4.0, float(low)),
         param1=120,
-        param2=HOUGH_PARAM2,
+        param2=param2,
         minRadius=low,
         maxRadius=high,
     )
     if found is None:
         return []
     return [(float(c[0]), float(c[1]), float(c[2])) for c in found[0][:MAX_PER_STRETCH]]
+
+
+@dataclass
+class Reading:
+    """What the image says about an ellipse: see `plate_reading`."""
+
+    grey: float  # mean grey of the inner disc
+    support: float  # share of the rim with an edge on it
+    band: float  # mean grey of the band just inside the rim
+    outside: float  # mean grey of the ring just outside the rim
+
+    @property
+    def hollow(self) -> bool:
+        """A rim with the wall showing through it: bright inside, dark band, the wall outside."""
+        return is_hollow(self.grey, self.band, self.outside)
+
+    @property
+    def plate_like(self) -> bool:
+        """
+        The gate every trace passes through: not hollow, and dark with a
+        rim, or a rim all the way round whatever the shade.
+        """
+        if self.hollow:
+            return False
+        return (self.grey <= PLATE_MAX_GREY and self.support >= MIN_RIM_SUPPORT) or self.support >= RIM_ALONE
+
+
+def plate_reading(gray, x: float, y: float, rx: float, ry: float) -> Reading:
+    """
+    What an ellipse at (x, y) in `gray` looks like, read from a patch around
+    it — what every follower asks to know whether the thing it is on is
+    still a plate. The gradient is computed on the patch alone.
+    """
+    height, width = gray.shape[:2]
+    reach = int(max(rx, ry) * 1.45) + 3
+    left, top = max(0, int(x) - reach), max(0, int(y) - reach)
+    right, bottom = min(width, int(x) + reach + 1), min(height, int(y) + reach + 1)
+    if right - left < 5 or bottom - top < 5:
+        return Reading(255.0, 0.0, 255.0, 255.0)
+    patch = gray[top:bottom, left:right]
+    lx, ly = x - left, y - top
+    return Reading(
+        _inner_grey(patch, lx, ly, rx, ry),
+        _rim_support(_gradient(patch), lx, ly, rx, ry),
+        _annulus_grey(patch, lx, ly, rx, ry, 0.85, 1.0),
+        _annulus_grey(patch, lx, ly, rx, ry, 1.15, 1.35),
+    )
+
+
+def is_hollow(grey: float, band: float, outside: float) -> bool:
+    """A rim with the wall showing through it: bright inside, dark band, the same wall outside."""
+    return grey - band > HOLLOW_STEP and abs(grey - outside) <= HOLLOW_SEE_THROUGH
 
 
 def _detect(
@@ -249,6 +349,7 @@ def _detect(
     high: int,
     stretches: Sequence[float] = STRETCHES,
     roi: Optional[Tuple[int, int, int, int]] = None,
+    param2: int = HOUGH_PARAM2,
 ) -> List[Plate]:
     """
     Plate-like ellipses in one frame (or in its `roi` = (left, top, right,
@@ -273,7 +374,7 @@ def _detect(
             image = patch
         else:
             image = cv2.resize(patch, (int(round(patch.shape[1] * stretch)), patch.shape[0]), interpolation=cv2.INTER_LINEAR)
-        for cx, cy, r in _hough(image, low, high):
+        for cx, cy, r in _hough(image, low, high, param2):
             x, y = left + cx / stretch, top + cy
             rx = r / stretch
             grey = _inner_grey(gray, x, y, rx, r)
@@ -345,25 +446,32 @@ class _Detections:
 
 def _walk(detections: _Detections, start_index: int, start: Plate, step: int) -> Dict[int, Plate]:
     """
-    Follow one plate from `start` frame by frame (step +1 forwards, -1 back),
-    predicting the next position from the last two, surviving frames where
-    Hough misses it, and refusing to hop to anything too far, too different
-    in size or too much brighter to be the same plate.
+    Follow one plate from `start` frame by frame (step +1 forwards, -1 back):
+    predict where it goes next from its last velocity, take the plate-like
+    thing nearest the prediction that is the same size and shade and could
+    have got there at a plate's speed, bridge the frames where there is
+    none, and end the walk — never hop to something else — when the plate
+    has been missing for longer than the bridge.
     """
+    frames = detections.frames
     found = {start_index: start}
     previous, previous_index = start, start_index
-    velocity = (0.0, 0.0)
-    last = len(detections.frames) if step > 0 else -1
+    velocity = (0.0, 0.0)  # analysis pixels per second
+    last = len(frames) if step > 0 else -1
     for index in range(start_index + step, last, step):
-        gap = abs(index - previous_index)
-        if gap > LOST_AFTER:
-            break
-        predicted = (previous.x + velocity[0] * gap, previous.y + velocity[1] * gap)
-        reach = MAX_STEP_RADII * start.r * min(gap, MAX_GAP)
+        dt = abs(frames[index][0] - frames[previous_index][0])
+        if dt > BRIDGE_SECONDS:
+            break  # lost: the path ends where the plate was last seen
+        coast = min(dt, COAST_SECONDS)
+        predicted = (previous.x + velocity[0] * coast, previous.y + velocity[1] * coast)
+        reach = PREDICT_REACH_RADII * start.r * math.sqrt(max(1.0, dt * ANALYSIS_FPS))
+        limit = max(MAX_STEP_RADII * start.r, MAX_SPEED_RADII_PER_SEC * start.r * dt)
         candidates = [
             plate
             for plate in detections.near(index, predicted[0], predicted[1], reach, previous)
-            if abs(plate.r - start.r) <= RADIUS_TOLERANCE * start.r and abs(plate.grey - previous.grey) <= GREY_STEP
+            if abs(plate.r - start.r) <= RADIUS_TOLERANCE * start.r
+            and abs(plate.grey - previous.grey) <= GREY_STEP
+            and plate.distance(previous.x, previous.y) <= limit
         ]
         if not candidates:
             continue
@@ -378,11 +486,8 @@ def _walk(detections: _Detections, start_index: int, start: Plate, step: int) ->
 
         pick = min(candidates, key=cost)
         if min(pick.distance(*predicted), pick.distance(previous.x, previous.y)) > reach:
-            continue
-        if gap <= MAX_GAP:
-            velocity = ((pick.x - previous.x) / gap, (pick.y - previous.y) / gap)
-        else:
-            velocity = (0.0, 0.0)
+            continue  # centre to centre: a ring two radii off the prediction is not the plate
+        velocity = ((pick.x - previous.x) / dt, (pick.y - previous.y) / dt) if dt > 0 else (0.0, 0.0)
         previous, previous_index = pick, index
         found[index] = pick
     return found
@@ -402,16 +507,34 @@ def tap_frame(frames, t: float) -> int:
     return 0
 
 
-def _floor_seeds(detections: _Detections, tap: Optional[Tuple[float, float, float]]) -> List[Tuple[int, Plate, bool]]:
+def _plate_under_tap(detections: _Detections, index: int, tx: float, ty: float, reach: float) -> Optional[Plate]:
     """
-    Plates on the floor at the start of the window: (frame, plate, tapped).
-    One per object across the opening frames, plus the frame the athlete
-    tapped on when that is later; `tapped` marks the one nearest the tap, if
-    a plate was found within reach of it.
+    A closer look where the athlete tapped, on the frame they tapped: every
+    stretch, a lower Hough bar, the same darkness-and-rim gate. The nearest
+    plate-like ellipse within reach, or None.
+    """
+    margin = int(reach + detections.high) + 4
+    roi = (int(tx) - margin, int(ty) - margin, int(tx) + margin, int(ty) + margin)
+    plates = _detect(detections.frames[index][1], detections.grad(index), detections.low, detections.high, STRETCHES, roi, HOUGH_PARAM2_TAP)
+    plates = [p for p in plates if p.distance(tx, ty) <= reach + p.r]
+    return min(plates, key=lambda p: p.distance(tx, ty)) if plates else None
+
+
+def _floor_seeds(
+    detections: _Detections, tap: Optional[Tuple[float, float, float]]
+) -> Tuple[List[Tuple[int, Plate, bool]], str]:
+    """
+    Plates on the floor at the start of the window: (frame, plate, tapped),
+    and why the tap could not be used, if it could not. One seed per object
+    across the opening frames, plus the frame the athlete tapped on when that
+    is later. `tapped` marks the plate nearest the tap — one already found
+    within reach of it, on the tapped frame by preference, else one found by
+    looking harder just there.
     """
     seeds: List[Tuple[int, Plate, bool]] = []
-    indices = list(range(min(FLOOR_FRAMES, len(detections.frames))))
-    tapped_index = tap_frame(detections.frames, tap[0]) if tap is not None else 0
+    frames = detections.frames
+    indices = list(range(min(FLOOR_FRAMES, len(frames))))
+    tapped_index = tap_frame(frames, tap[0]) if tap is not None else 0
     if tapped_index not in indices:
         indices.append(tapped_index)
     for index in indices:
@@ -419,19 +542,37 @@ def _floor_seeds(detections: _Detections, tap: Optional[Tuple[float, float, floa
             if any(plate.distance(s.x, s.y) < 0.5 * s.r and abs(plate.r - s.r) <= RADIUS_TOLERANCE * s.r for _, s, _ in seeds):
                 continue
             seeds.append((index, plate, False))
-    if tap is not None and seeds:
-        height, width = detections.frames[0][1].shape[:2]
-        tx, ty = tap[1] * width, tap[2] * height
-        reach = TAP_REACH * max(width, height)
-        # Prefer a plate seen on the tapped frame itself; any other frame's
-        # plate at the same spot stands in for it (the bar is still there).
-        on_frame = [k for k in range(len(seeds)) if seeds[k][0] == tapped_index]
-        pool = on_frame or list(range(len(seeds)))
+    if tap is None:
+        return seeds, ""
+    height, width = frames[0][1].shape[:2]
+    tx, ty = tap[1] * width, tap[2] * height
+    reach = TAP_REACH * max(width, height)
+    within = [k for k in range(len(seeds)) if seeds[k][1].distance(tx, ty) <= reach + seeds[k][1].r]
+    on_frame = [k for k in within if seeds[k][0] == tapped_index]
+    pool = on_frame or within
+    if pool:
         nearest = min(pool, key=lambda k: seeds[k][1].distance(tx, ty))
-        if seeds[nearest][1].distance(tx, ty) <= reach + seeds[nearest][1].r:
-            index, plate, _ = seeds[nearest]
-            seeds[nearest] = (index, plate, True)
-    return seeds
+        index, plate, _ = seeds[nearest]
+        seeds[nearest] = (index, plate, True)
+        logger.info(
+            "Tap at %.2f s applied to frame %d (t=%.2f s): the plate at (%d, %d) r=%d, %d px from the tap",
+            tap[0], index, frames[index][0], plate.x, plate.y, plate.r, plate.distance(tx, ty),
+        )
+        return seeds, ""
+    plate = _plate_under_tap(detections, tapped_index, tx, ty, reach)
+    if plate is not None:
+        seeds.append((tapped_index, plate, True))
+        logger.info(
+            "Tap at %.2f s applied to frame %d (t=%.2f s): a closer look found the plate at (%d, %d) r=%d, %d px from the tap",
+            tap[0], tapped_index, frames[tapped_index][0], plate.x, plate.y, plate.r, plate.distance(tx, ty),
+        )
+        return seeds, ""
+    why = (
+        f"nothing plate-like within {reach:.0f} px of the tap at ({tx:.0f}, {ty:.0f}) "
+        f"on frame {tapped_index} (t={frames[tapped_index][0]:.2f} s)"
+    )
+    logger.info("Tap at %.2f s rejected: %s", tap[0], why)
+    return seeds, why
 
 
 def _top_candidates(detections: _Detections, floor_y: float, height: int) -> List[Tuple[int, Plate]]:
@@ -538,8 +679,11 @@ def _trail_path(trail: Dict[int, Plate], frames, reason: str = "", tapped: bool 
     height, width = frames[0][1].shape[:2]
     order = sorted(trail)
     points = [BarPoint(t=frames[i][0], x=trail[i].x / width, y=trail[i].y / height) for i in order]
+    # Coverage from the first frame the plate was found in to the end of
+    # the window: a trail that ended early, the plate lost, has not seen
+    # the catch, and that shows in the number and caps the confidence.
     if order:
-        span = order[-1] - order[0] + 1
+        span = len(frames) - order[0]
     else:
         span = len(frames)
     radii = [trail[i].r for i in order]
@@ -583,7 +727,7 @@ def follow_oblique(
     high = max(low + 4, int(shorter * MAX_RADIUS_RATIO))
     detections = _Detections(frames, low, high)
 
-    seeds = _floor_seeds(detections, hint)
+    seeds, tap_reason = _floor_seeds(detections, hint)
     trails: List[Tuple[Dict[int, Plate], bool]] = []
     for index, plate, tapped in seeds:
         trail = _walk(detections, index, plate, +1)
@@ -610,7 +754,10 @@ def follow_oblique(
         trails.append((trail, tapped))
 
     if not trails:
-        return BarPath(sampled=len(frames), frame_width=width, frame_height=height, reason="no plate-like ellipse to start from")
+        return BarPath(
+            sampled=len(frames), frame_width=width, frame_height=height,
+            reason="no plate-like ellipse to start from", tap_reason=tap_reason,
+        )
     trails = _consensus(trails)
     largest = max(_median_radius(trail) for trail, _ in trails) or 1.0
 
@@ -630,6 +777,14 @@ def follow_oblique(
         return rise * (0.5 + 0.5 * share) * (0.5 + 0.5 * _median_radius(trail) / largest) * (1.3 if tapped else 1.0)
 
     best, tapped = max(trails, key=score)
+    if hint is not None and not tapped and not tap_reason:
+        marked = [t for t, was_tapped in trails if was_tapped]
+        if marked:
+            rise = max(_rise_px(t) for t in marked) / height
+            tap_reason = f"the plate at the tap did not rise like a bar (rose {rise:.0%} of the frame)"
+        else:
+            tap_reason = "the plate at the tap could not be followed"
+        logger.info("Tap at %.2f s not followed: %s", hint[0], tap_reason)
     if score((best, tapped)) <= 0.0:
         rises = sorted((round(_rise_px(t) / height, 2) for t, _ in trails), reverse=True)[:3]
         logger.info("Oblique follower: nothing dark and round rose like a bar (best rises %s)", rises)
@@ -638,8 +793,10 @@ def follow_oblique(
             frame_width=width,
             frame_height=height,
             reason="nothing dark and round rose like a bar",
+            tap_reason=tap_reason,
         )
     path = _trail_path(best, frames, tapped=tapped)
+    path.tap_reason = tap_reason
     if not path.tracked:
         path.reason = "the plate was followed through too little of the window"
     return path
@@ -684,10 +841,8 @@ def looks_like_a_plate(video_path: Optional[str], path: BarPath, *, frames=None)
             height, width = gray.shape[:2]
         x, y = point.x * width, point.y * height
         r = path.plate_radius * width
-        grey = _inner_grey(gray, x, y, r, r)
-        support = _rim_support(_gradient(gray), x, y, r, r)
         checked += 1
-        if (grey <= PLATE_MAX_GREY and support >= MIN_RIM_SUPPORT) or support >= RIM_ALONE:
+        if plate_reading(gray, x, y, r, r).plate_like:
             passed += 1
     if not checked:
         return False, "no frames to check the trace against"

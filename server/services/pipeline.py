@@ -43,7 +43,7 @@ from server.services.replay import render_annotated_replay
 from server.utils.bar_track import BarPath, LiftWindow, detect_lift_windows, track_bar_path
 from server.utils.frames import sample_frames_in_range_bgr
 from server.utils.plate_follow import follow_bar_path, read_gray_frames
-from server.utils.plate_oblique import NO_TRACE_REASON, OBLIQUE_RATIO, follow_oblique, looks_like_a_plate
+from server.utils.plate_oblique import NO_TRACE_REASON, OBLIQUE_RATIO, follow_oblique, looks_like_a_plate, tap_frame
 from server.utils.image_ops import frames_to_data_urls, prepare_frames
 from server.utils.segmentation import (
     CandidateSegment,
@@ -858,8 +858,15 @@ def _trace_for(
     width = frames[0][1].shape[1] if frames else 0
     height = frames[0][1].shape[0] if frames else 0
     tap = _tap_in_decoded_frame(tap, info, width, height)
+    if tap is not None and frames:
+        at = tap_frame(frames, tap[0])
+        logger.info(
+            "Tap (t=%.2f s, x=%.3f, y=%.3f) for %s: frame %d of the window %.2f-%.2f s, at t=%.2f s",
+            tap[0], tap[1], tap[2], label, at, window.start_sec, window.end_sec, frames[at][0],
+        )
     shared = frames or None
     rejected: List[str] = []
+    tap_reasons: List[str] = []
 
     def gated(path: Optional[BarPath], source: str) -> Optional[BarPath]:
         if path is None or not path.tracked:
@@ -873,11 +880,26 @@ def _trace_for(
         rejected.append(f"{source}: {why}")
         return None
 
+    def finish(path: BarPath) -> BarPath:
+        """
+        The trace as returned: when the athlete tapped and the plate
+        followed is not the one they tapped, the path says why, in the
+        followers' own words, so the page can say the tap was not used.
+        """
+        if tap is None or path.tapped:
+            return path
+        if not path.tap_reason:
+            path.tap_reason = "; ".join(tap_reasons) or "no follower could follow the plate you tapped"
+        logger.info("Tap not used for %s: %s", label, path.tap_reason)
+        return path
+
     oblique: Optional[BarPath] = None
     try:
         oblique = follow_oblique(video_path, window.start_sec, window.end_sec, hint=tap, frames=shared)
     except Exception:
         logger.exception("The oblique follower failed for %s", label)
+    if oblique is not None and oblique.tap_reason:
+        tap_reasons.append(f"oblique follower: {oblique.tap_reason}")
 
     hint = None
     if lift_window is not None and lift_window.points and lift_window.radius:
@@ -888,18 +910,34 @@ def _trace_for(
         side = follow_bar_path(video_path, window.start_sec, window.end_sec, hint=hint, tap=tap, frames=shared)
     except Exception:
         logger.exception("Following the plate failed for %s", label)
+    if side is not None and side.tap_reason:
+        tap_reasons.insert(0, f"side-on follower: {side.tap_reason}")
     chosen = gated(side, "side-on follower")
+    usable = _usable_oblique(oblique)
+    if tap is not None:
+        # The athlete said which plate. A follower that followed that plate
+        # wins over one that followed something else; between two that did,
+        # the usual rule.
+        if chosen is not None and chosen.tapped and not (usable and oblique.tapped and _prefer_oblique(oblique, chosen)):
+            return chosen
+        if usable and oblique.tapped:
+            if chosen is not None:
+                logger.info(
+                    "Tap for %s: the oblique follower followed the plate the athlete tapped, the side-on follower did not",
+                    label,
+                )
+            return oblique
     if chosen is not None and not _prefer_oblique(oblique, chosen):
-        return chosen
-    if _usable_oblique(oblique):
+        return finish(chosen)
+    if usable:
         if chosen is not None:
             logger.info(
                 "Oblique view for %s (axis ratio %.2f): the near plate the oblique follower found over the side-on trace",
                 label, oblique.plate_axis_ratio or 0.0,
             )
-        return oblique
+        return finish(oblique)
     if chosen is not None:
-        return chosen
+        return finish(chosen)
     if oblique is not None:
         if oblique.tracked:
             rejected.append(f"oblique follower: the plate was found in only {oblique.coverage:.0%} of the frames")
@@ -909,7 +947,7 @@ def _trace_for(
     if lift_window is not None:
         chosen = gated(lift_window.bar_path(window.start_sec, window.end_sec), "lift-window trail")
         if chosen is not None:
-            return chosen
+            return finish(chosen)
     legacy: Optional[BarPath] = None
     try:
         legacy = track_bar_path(video_path, start_sec=window.start_sec, end_sec=window.end_sec)
@@ -917,14 +955,16 @@ def _trace_for(
         logger.exception("Bar tracking failed for %s", label)
     chosen = gated(legacy, "bar tracker")
     if chosen is not None:
-        return chosen
+        return finish(chosen)
 
     logger.info("No bar trace for %s: %s", label, "; ".join(rejected) or "nothing to follow")
-    return BarPath(
-        sampled=len(frames),
-        frame_width=width,
-        frame_height=height,
-        reason=NO_TRACE_REASON,
+    return finish(
+        BarPath(
+            sampled=len(frames),
+            frame_width=width,
+            frame_height=height,
+            reason=NO_TRACE_REASON,
+        )
     )
 
 

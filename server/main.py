@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import os
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -205,6 +206,12 @@ def _start_pro() -> None:
             "Add Heroku Postgres (DATABASE_URL)."
         )
     sweeper.start()
+    # Does the sandbox app have the Invoicing feature? One read, off the
+    # startup path: a 403 turns the invoice tools off before anyone is
+    # offered an invoice they cannot get.
+    from server.services.ops_agent import probe_invoicing
+
+    threading.Thread(target=probe_invoicing, name="invoicing-probe", daemon=True).start()
 
 
 @asynccontextmanager

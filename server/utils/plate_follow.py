@@ -53,9 +53,13 @@ REFRESH_EVERY = 3
 ROUND_TRIP_PX = 1.0
 LK_PARAMS = dict(winSize=(21, 21), maxLevel=4)
 # Re-centring: every REFRESH_EVERY frames a circle within SNAP_RADIUS of the
-# plate's size and SNAP_DISTANCE radii of the track takes over from the flow.
+# plate's size and SNAP_DISTANCE radii of the track takes over from the flow;
+# while the plate is being bridged (hidden behind a hand, blurred through the
+# turnover) the search widens to SNAP_DISTANCE_BRIDGE radii around where the
+# track coasted to, so the plate is picked up again where it reappears.
 SNAP_RADIUS = 0.12
 SNAP_DISTANCE = 0.35
+SNAP_DISTANCE_BRIDGE = 1.5
 # What it takes to be the plate: this share of those checks found a circle of
 # the plate's size on the track, and the track rose this far up the frame.
 MIN_SUPPORT = 0.3
@@ -63,6 +67,25 @@ MIN_RISE = MIN_VERTICAL_TRAVEL
 # Points handed on, at most this many per second: the trace and the evidence
 # need nothing finer, and a 60 fps trace is 5x the points to draw.
 OUTPUT_FPS = 30.0
+# Continuity, in the clip's own seconds (the same physics as plate_oblique's
+# walk): a flow step that would move the plate faster than
+# MAX_SPEED_RADII_PER_SEC of its radii a second is not the plate moving but
+# the corners landing on something else, so it is refused and the position
+# coasts on the last velocity for up to COAST_SECONDS instead. At every
+# re-centring the image under the track is read: dark like the plate was
+# when it was seeded (within GREY_STEP) with some rim, or a rim all the way
+# round, means the track is still on the plate; anything else for longer
+# than BRIDGE_SECONDS means the plate was lost, and the path ends at the
+# last place it was seen rather than go on with an arm, a ring or a wall.
+MAX_SPEED_RADII_PER_SEC = 18.0
+MIN_STEP_RADII = 0.3
+COAST_SECONDS = 0.17
+BRIDGE_SECONDS = 0.35
+GREY_STEP = 60.0
+ON_PLATE_RIM = 0.2
+# A diagnostic hook: (seed index, frame index, t, event, payload) at every
+# refused step, coast, re-centring and loss. None in production.
+_debug = None
 
 
 @dataclass
@@ -84,6 +107,12 @@ class _Seed:
     found: int = 0
     # The athlete tapped this one as the near plate.
     tapped: bool = False
+    # Mean grey inside the plate where it was seeded: what "still on the
+    # same plate" is measured against. Read when the seed joins the follow.
+    grey: Optional[float] = None
+    # Set when the plate was lost for longer than the bridge: the track ends
+    # at the last place it was seen.
+    lost: bool = False
 
     @property
     def support(self) -> float:
@@ -123,9 +152,11 @@ def _seeds(
 ) -> List[_Seed]:
     """
     Circles in the opening frames, one seed per object, plus the hint. The
-    tap (t, x, y) marks the seed nearest it (or becomes a seed of its own, on
-    the frame it was made on, when no circle was found near it): one more
-    candidate with a little more weight, not an answer.
+    tap (t, x, y) marks the seed nearest it, on the frame it was made on;
+    when no circle was found near it, a closer look there (every stretch,
+    a lower Hough bar) sizes a seed of its own, and failing that the tap
+    itself becomes one at the typical radius. One more candidate with a
+    little more weight, not an answer.
     """
     import cv2  # type: ignore
 
@@ -153,7 +184,7 @@ def _seeds(
             add(at, x, y, r)
     seeds = seeds[:MAX_SEEDS]
     if tap is not None:
-        from server.utils.plate_oblique import tap_frame
+        from server.utils.plate_oblique import HOUGH_PARAM2_TAP, STRETCHES, _detect, _gradient, tap_frame
 
         t, tx, ty = tap[0], tap[1] * width, tap[2] * height
         at = tap_frame(frames, t)
@@ -163,10 +194,34 @@ def _seeds(
         nearest = min(seeds, key=lambda s: (s.x - tx) ** 2 + (s.y - ty) ** 2, default=None)
         if nearest is not None and ((nearest.x - tx) ** 2 + (nearest.y - ty) ** 2) ** 0.5 <= reach + nearest.radius:
             nearest.tapped = True
+            logger.info(
+                "Side-on follower: tap at %.2f s applied to frame %d (t=%.2f s), the circle at (%d, %d) r=%d",
+                t, at, frames[at][0], nearest.x, nearest.y, nearest.radius,
+            )
+            return seeds
+        margin = int(reach + high) + 4
+        roi = (int(tx) - margin, int(ty) - margin, int(tx) + margin, int(ty) + margin)
+        gray = frames[at][1]
+        plates = [
+            p
+            for p in _detect(gray, _gradient(gray), low, high, STRETCHES, roi, HOUGH_PARAM2_TAP)
+            if p.distance(tx, ty) <= reach + p.r
+        ]
+        if plates:
+            plate = min(plates, key=lambda p: p.distance(tx, ty))
+            seeds.append(_Seed(at, float(plate.x), float(plate.y), float(plate.r), tapped=True))
+            logger.info(
+                "Side-on follower: tap at %.2f s applied to frame %d (t=%.2f s), a closer look found the plate at (%d, %d) r=%d",
+                t, at, frames[at][0], plate.x, plate.y, plate.r,
+            )
         else:
             radii = sorted(s.radius for s in seeds)
             radius = radii[len(radii) // 2] if radii else (low + high) / 2.0
             seeds.append(_Seed(at, float(tx), float(ty), float(radius), tapped=True))
+            logger.info(
+                "Side-on follower: tap at %.2f s applied to frame %d (t=%.2f s) as a seed of its own at (%d, %d), r=%d assumed",
+                t, at, frames[at][0], tx, ty, radius,
+            )
     return seeds
 
 
@@ -189,23 +244,67 @@ def _features(gray, x: float, y: float, radius: float):
     return found + np.array([left, top], np.float32)
 
 
-def _snap(gray, x: float, y: float, radius: float) -> Optional[Tuple[float, float, Optional[float]]]:
-    """
-    A circle of the plate's size close to the track, if there is one, then
-    an ellipse fit on the rim pixels around it so the returned centre lands
-    on the sleeve rather than wherever Hough fitted its circle. The ellipse
-    refinement matters for oblique views where the plate projects to an
-    ellipse — a side-on circle degenerates to the Hough centre, which is
-    the same point.
+# What the image under a track says: ON, the plate (its shade, with some
+# rim); DARK, its shade but too little rim — a track that has slipped
+# half a radius off-centre reads this, and so would a sleeve of the same
+# colour, so the flow goes on but nothing is confirmed; OFF, not the plate
+# at all (another shade, or a hollow ring), when the flow must not steer.
+ON, DARK, OFF = 2, 1, 0
 
-    Returns `(x, y, axis_ratio)`: `axis_ratio` is the ellipse's minor/major
-    (close to 1 side-on, below 1 the more the camera tilts). None when no
-    ellipse fit was healthy enough to measure it.
+
+def _on_plate(gray, x: float, y: float, radius: float, grey0: Optional[float]) -> Tuple[int, float, float]:
+    """
+    ON, DARK or OFF for the image under (x, y) against the plate last seen
+    at grey `grey0`, with the grey and the rim support read. A rim on its
+    own is not enough here — a noisy patch has "edges" in every direction
+    too, and a plate's own inside reads as much texture as noise does. The
+    caller lets its reference shade follow the plate from the floor into
+    the light: on the labelled clips a plate's inside changes by 80 grey
+    levels over a clean, a step or two of 20 at a time.
+    """
+    from server.utils.plate_oblique import plate_reading
+
+    reading = plate_reading(gray, x, y, radius, radius)
+    grey = reading.grey
+    if reading.hollow or (grey0 is not None and abs(grey - grey0) > GREY_STEP):
+        return OFF, grey, reading.support
+    return (ON if reading.support >= ON_PLATE_RIM else DARK), grey, reading.support
+
+
+# A circle picked up again after the plate was hidden must be unmistakably
+# a plate: this much of its rim on an edge (the labelled plates' median).
+BRIDGE_RIM = 0.5
+
+
+def _snap(
+    gray,
+    x: float,
+    y: float,
+    radius: float,
+    grey0: Optional[float] = None,
+    distance: float = SNAP_DISTANCE,
+    *,
+    strict: bool = False,
+) -> Optional[Tuple[float, float, Optional[float], float]]:
+    """
+    A circle of the plate's size within `distance` radii of the track, if
+    there is one and it is the plate (its shade, with a rim — the hollow
+    ring hanging in a gym is not; `strict`, for a plate picked up again
+    after a gap, wants most of the rim), then an ellipse fit on the rim
+    pixels around it so the returned centre lands on the sleeve rather
+    than wherever Hough fitted its circle. The ellipse refinement matters
+    for oblique views where the plate projects to an ellipse — a side-on
+    circle degenerates to the Hough centre, which is the same point.
+
+    Returns `(x, y, axis_ratio, grey)`: `axis_ratio` is the ellipse's
+    minor/major (close to 1 side-on, below 1 the more the camera tilts),
+    None when no ellipse fit was healthy enough to measure it; `grey` is
+    the inside of the plate as read there.
     """
     import cv2  # type: ignore
     import numpy as np  # type: ignore
 
-    reach = int(radius * 1.6)
+    reach = int(radius * (distance + 1.25))
     top, left = max(0, int(y) - reach), max(0, int(x) - reach)
     patch = gray[top : int(y) + reach, left : int(x) + reach]
     if patch.shape[0] < 8 or patch.shape[1] < 8:
@@ -219,14 +318,17 @@ def _snap(gray, x: float, y: float, radius: float) -> Optional[Tuple[float, floa
         return None
     best = min(found[0], key=lambda c: np.hypot(c[0] + left - x, c[1] + top - y))
     bx, by = float(best[0] + left), float(best[1] + top)
-    if np.hypot(bx - x, by - y) > SNAP_DISTANCE * radius:
+    if np.hypot(bx - x, by - y) > distance * radius:
+        return None
+    state, grey, support = _on_plate(gray, bx, by, radius, grey0)
+    if state != ON or (strict and support < BRIDGE_RIM):
         return None
     refined = _ellipse_centre(gray, bx, by, radius)
     if refined is not None:
         (ex, ey), ratio = refined
         if np.hypot(ex - bx, ey - by) <= 0.3 * radius:
-            return ex, ey, ratio
-    return bx, by, None
+            return ex, ey, ratio, grey
+    return bx, by, None, grey
 
 
 def _ellipse_centre(
@@ -291,23 +393,49 @@ def _follow(frames, order: Sequence[int], seeds: List[_Seed]) -> None:
     one flow call per frame for all of their corners, each seed moving by the
     median of its own. A seed joins when `order` reaches its frame, and
     fills seed.track at each frame it is followed through.
+
+    Continuity rules the flow: a step too fast for a plate is refused and
+    the position coasts on its velocity instead; at every re-centring the
+    image under the track must still look like the plate it was seeded on,
+    and when it has not for longer than the bridge the seed is lost — its
+    track is cut back to the last place the plate was seen and it is
+    followed no further.
     """
     import cv2  # type: ignore
     import numpy as np  # type: ignore
 
+    from server.utils.plate_oblique import plate_reading
+
     active: List[int] = []
     positions = {}
     corners = {}
+    velocity = {}  # pixels per second
+    confirmed = {}  # (time, step) the track was last ON the plate
+    seen = {}  # (time, step) the plate's shade was last under the track (ON or DARK)
+    off = {}  # the last re-centring found the track OFF the plate: bridging
+    last_time = None
     previous = None
     for step, index in enumerate(order):
-        gray = frames[index][1]
+        t, gray = frames[index]
+        dt = abs(t - last_time) if last_time is not None else 0.0
+        if dt <= 0.0:
+            dt = 1.0 / MAX_FPS
         for k, seed in enumerate(seeds):
             if seed.frame == index and k not in positions:
                 positions[k] = (seed.x, seed.y)
                 corners[k] = _features(gray, seed.x, seed.y, seed.radius)
+                velocity[k] = (0.0, 0.0)
+                confirmed[k] = seen[k] = (t, step)
+                off[k] = False
+                if seed.grey is None:
+                    seed.grey = plate_reading(gray, seed.x, seed.y, seed.radius, seed.radius).grey
                 active.append(k)
                 seed.track[index] = (seed.x, seed.y)
-        moving = [k for k in active if previous is not None and len(corners[k]) >= 5]
+        live = [k for k in active if not seeds[k].lost]
+        # While the track is off the plate the flow is whatever hid it (a
+        # hand, an arm) and must not steer; the position coasts instead.
+        moving = [k for k in live if previous is not None and len(corners[k]) >= 5 and not off[k]]
+        stepped: set = set()
         if moving:
             stacked = np.concatenate([corners[k] for k in moving]).astype(np.float32)
             moved, status, _ = cv2.calcOpticalFlowPyrLK(previous, gray, stacked, None, **LK_PARAMS)
@@ -320,35 +448,95 @@ def _follow(frames, order: Sequence[int], seeds: List[_Seed]) -> None:
                 count = len(corners[k])
                 mine = good[at : at + count]
                 if mine.sum() >= 5:
-                    dx, dy = np.median(shift[at : at + count][mine], axis=0)
-                    x, y = positions[k]
-                    positions[k] = (x + float(dx), y + float(dy))
-                    corners[k] = moved[at : at + count][mine].reshape(-1, 1, 2)
+                    dx, dy = (float(v) for v in np.median(shift[at : at + count][mine], axis=0))
+                    radius = seeds[k].radius
+                    limit = max(MIN_STEP_RADII * radius, MAX_SPEED_RADII_PER_SEC * radius * dt)
+                    if np.hypot(dx, dy) <= limit:
+                        x, y = positions[k]
+                        positions[k] = (x + dx, y + dy)
+                        corners[k] = moved[at : at + count][mine].reshape(-1, 1, 2)
+                        vx, vy = velocity[k]
+                        velocity[k] = (0.5 * vx + 0.5 * dx / dt, 0.5 * vy + 0.5 * dy / dt)
+                        stepped.add(k)
+                    elif _debug is not None:
+                        _debug(k, index, t, "refused", (dx, dy, int(mine.sum())))
+                elif _debug is not None:
+                    _debug(k, index, t, "few corners", (int(mine.sum()), count))
                 at += count
+        for k in live:
+            if k in stepped or previous is None or seeds[k].frame == index:
+                continue
+            # No usable flow this frame, or a step no plate could make:
+            # coast on the last velocity for a moment, then hold.
+            if t - seen[k][0] <= COAST_SECONDS:
+                x, y = positions[k]
+                vx, vy = velocity[k]
+                positions[k] = (x + vx * dt, y + vy * dt)
+            if _debug is not None:
+                _debug(k, index, t, "coast", (positions[k], velocity[k], off[k]))
+            corners[k] = corners[k][:0]
         refresh = step % REFRESH_EVERY == 0
-        for k in active:
+        for k in live:
             seed = seeds[k]
             x, y = positions[k]
+            state = None
             if refresh and seed.frame != index:
                 seed.checks += 1
-                rim = _snap(gray, x, y, seed.radius)
+                was_off = off[k]
+                rim = _snap(
+                    gray, x, y, seed.radius, seed.grey,
+                    SNAP_DISTANCE_BRIDGE if was_off else SNAP_DISTANCE, strict=was_off,
+                )
                 if rim is not None:
                     seed.found += 1
-                    x, y, ratio = rim
+                    x, y, ratio, grey = rim
                     positions[k] = (x, y)
                     if ratio is not None:
                         seed.axis_ratios.append(ratio)
+                    state = ON
                 else:
-                    # Hough failed — still measure the plate's axis ratio at
-                    # the flow-tracked position so an oblique view (where
-                    # Hough struggles for exactly this reason) is detected.
-                    fit = _ellipse_centre(gray, x, y, seed.radius)
-                    if fit is not None:
-                        seed.axis_ratios.append(fit[1])
-            if refresh or len(corners[k]) < 10:
+                    state, grey, _ = _on_plate(gray, x, y, seed.radius, seed.grey)
+                    if state == ON:
+                        # Hough failed — still measure the plate's axis ratio
+                        # at the flow-tracked position so an oblique view
+                        # (where Hough struggles for exactly this reason) is
+                        # detected; and a tapped plate counts as found: the
+                        # athlete said it is the plate, it need only still be.
+                        fit = _ellipse_centre(gray, x, y, seed.radius)
+                        if fit is not None:
+                            seed.axis_ratios.append(fit[1])
+                        if seed.tapped:
+                            seed.found += 1
+                off[k] = state == OFF
+                if _debug is not None:
+                    _debug(k, index, t, "refresh", (positions[k], rim is not None, state, grey, seed.grey))
+                if state != OFF:
+                    since = seen[k][1]
+                    if was_off and step - since > 1 and seed.track[order[since]] is not None:
+                        # Bridged: the positions coasted through are
+                        # replaced by the straight line from where the plate
+                        # was last seen to where it was found again.
+                        x0, y0 = seed.track[order[since]]
+                        for n, cut in enumerate(order[since + 1 : step], 1):
+                            share = n / (step - since)
+                            seed.track[cut] = (x0 + share * (x - x0), y0 + share * (y - y0))
+                    seen[k] = (t, step)
+                if state == ON:
+                    confirmed[k] = (t, step)
+                    # The reference shade follows the plate into the light.
+                    seed.grey = grey if seed.grey is None else 0.7 * seed.grey + 0.3 * grey
+                elif state == OFF and t - seen[k][0] > BRIDGE_SECONDS:
+                    # Lost: cut the track back to where the plate was last
+                    # seen and leave this seed there.
+                    seed.lost = True
+                    for cut in order[seen[k][1] + 1 : step]:
+                        seed.track[cut] = None
+                    continue
+            if (refresh or len(corners[k]) < 10) and state != OFF:
                 corners[k] = _features(gray, x, y, seed.radius)
             seed.track[index] = (x, y)
         previous = gray
+        last_time = t
 
 
 def _rise(track: List[Optional[Tuple[float, float]]]) -> float:
@@ -464,12 +652,26 @@ def follow_bar_path(
         return (rise * seed.support * size_weight * tap_weight, seed.sightings, seed.radius)
 
     best = max(seeds, key=score)
+    tap_reason = ""
+    if tap is not None and not best.tapped:
+        marked = [s for s in seeds if s.tapped]
+        if marked:
+            mine = max(marked, key=lambda s: _rise(s.track))
+            rise = _rise(mine.track) / height
+            if mine.support < MIN_SUPPORT:
+                tap_reason = f"the plate at the tap was followed through too little of the window ({mine.support:.0%} of the checks found it)"
+            else:
+                tap_reason = f"the plate at the tap did not rise like a bar (rose {rise:.0%} of the frame)"
+        else:
+            tap_reason = "the plate at the tap could not be followed"
+        logger.info("Side-on follower: tap at %.2f s not followed: %s", tap[0], tap_reason)
     if score(best)[0] <= 0.0:
         rises = sorted(((_rise(s.track) / height, s.support) for s in seeds), reverse=True)[:3]
         logger.info("No plate followed: best (rise, support) %s", [(round(r, 2), round(s, 2)) for r, s in rises])
         return BarPath(
             sampled=len(frames), frame_width=width, frame_height=height,
             reason="nothing followed through the window rose like a bar and stayed round like a plate",
+            tap_reason=tap_reason,
         )
     # Drop the pre-lift-off tail: a hop from a static plate onto the bar
     # leaves a leading segment at the stand's x which is where the dashed
@@ -483,11 +685,13 @@ def follow_bar_path(
         if p is not None and i % keep_every == 0
     ]
     followed = sum(1 for p in best.track if p is not None)
-    # Coverage over the lift window the trail covers, not the whole analysis
-    # span — a trail trimmed to post-lift-off must not be penalised for the
-    # setup frames it deliberately left out.
+    # Coverage from the trail's first point to the end of the window, not
+    # the whole analysis span — a trail trimmed to post-lift-off must not be
+    # penalised for the setup frames it deliberately left out — but a trail
+    # that ended early, the plate lost at the turnover, has not seen the
+    # catch, and that shows in the number and caps the confidence.
     if points:
-        span_frames = sum(1 for ft, _ in frames if points[0].t <= ft <= points[-1].t)
+        span_frames = sum(1 for ft, _ in frames if points[0].t <= ft)
     else:
         span_frames = len(frames)
     axis_ratio: Optional[float] = None
@@ -510,4 +714,5 @@ def follow_bar_path(
         frame_height=height,
         plate_axis_ratio=axis_ratio,
         tapped=best.tapped,
+        tap_reason=tap_reason,
     )

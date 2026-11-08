@@ -883,7 +883,9 @@
           [
             `Agent: ${overview.model || ""} on Nebius Token Factory`,
             "releases and refunds: the app's own PayPal Payments v2 calls",
-            `invoices: ${overview.tool_source || "PayPal Agent Toolkit"}`,
+            overview.invoicing_enabled === false
+              ? `invoicing: not available on this sandbox app${overview.invoicing_off_reason ? ` (${overview.invoicing_off_reason})` : ""}`
+              : `invoices: ${overview.tool_source || "PayPal Agent Toolkit"}`,
             overview.agent_calls_remaining_today == null ? "" : `${overview.agent_calls_remaining_today} model calls left today`,
           ]
             .filter(Boolean)

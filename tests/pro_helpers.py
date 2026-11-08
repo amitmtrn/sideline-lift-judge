@@ -296,6 +296,10 @@ def pro_app(tmp_path, monkeypatch, paypal):
     monkeypatch.delenv("STAFF_LOGIN_HOURLY_LIMIT", raising=False)
     monkeypatch.delenv("PRO_DEMO_MODE", raising=False)
     monkeypatch.delenv("DYNO", raising=False)
+    monkeypatch.delenv("INVOICING_ENABLED", raising=False)
+    from server.services import pro_config
+
+    pro_config.reset_invoicing_for_tests()
     for name in ("DEMO_ACCESS_CODE", "ACCESS_MODE", "DEMO_DISABLED", "DEMO_DAILY_LIMIT", "DEMO_IP_HOURLY_LIMIT", "MAX_CONCURRENT_JOBS", "TRUSTED_PROXIES"):
         monkeypatch.delenv(name, raising=False)
     reset_db_for_tests()
@@ -316,6 +320,7 @@ def pro_app(tmp_path, monkeypatch, paypal):
         yield client
     reset_paypal_for_tests(None)
     ops_agent.reset_toolkit_for_tests(None)
+    pro_config.reset_invoicing_for_tests()
     reset_budgets_for_tests()
     staff_auth.reset_login_attempts_for_tests()
     reset_db_for_tests()

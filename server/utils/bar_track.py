@@ -92,6 +92,8 @@ class BarPath:
     plate_axis_ratio: Optional[float] = None
     # True when the plate followed is the one the athlete tapped.
     tapped: bool = False
+    # Why the athlete's tap was not followed, when they made one and it was not.
+    tap_reason: str = ""
     reason: str = ""
 
     @property

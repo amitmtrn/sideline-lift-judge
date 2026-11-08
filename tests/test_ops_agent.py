@@ -159,10 +159,12 @@ def test_three_invoices_are_one_card_and_go_through_the_toolkit(pro_app, paypal)
     assert confirmed["result"]["errors"] == []
     bridge = ops_agent.toolkit()
     # Create the draft, send it, read it back (the status stored is PayPal's).
-    assert [run["method"] for run in bridge.runs] == ["create_invoice", "send_invoice", "get_invoice"] * 3
-    assert bridge.runs[0]["params"]["currency_code"] == "USD"
-    assert bridge.runs[0]["params"]["items"][0]["unit_amount"]["value"] == "60.00"
-    assert bridge.runs[1]["params"] == {"invoice_id": sent[0]["invoice_id"], "send_to_recipient": True}
+    # The startup probe's own list_invoices read is not part of the invoice.
+    runs = [run for run in bridge.runs if run["method"] != "list_invoices"]
+    assert [run["method"] for run in runs] == ["create_invoice", "send_invoice", "get_invoice"] * 3
+    assert runs[0]["params"]["currency_code"] == "USD"
+    assert runs[0]["params"]["items"][0]["unit_amount"]["value"] == "60.00"
+    assert runs[1]["params"] == {"invoice_id": sent[0]["invoice_id"], "send_to_recipient": True}
     assert all(invoice["status"] == "SENT" for invoice in paypal.invoices.values())
     # The ids are in the app and the audit log.
     assert confirmed["paypal_id"] == ",".join(i["invoice_id"] for i in sent)
@@ -358,3 +360,99 @@ def test_without_the_toolkit_invoices_use_the_builtin_client(pro_app, paypal):
     assert created[0]["payload"]["detail"]["currency_code"] == "USD"
     assert created[0]["payload"]["items"][0]["unit_amount"]["value"] == "20.00"
     assert created[0]["request_id"].startswith("inv-")
+
+
+# ---------- invoicing: on, unless the sandbox app cannot ----------
+
+
+def _not_authorized(method, params):
+    """PayPal's answer when the sandbox REST app lacks the Invoicing feature."""
+    if method in ("list_invoices", "create_invoice", "get_invoice", "send_invoice_reminder", "cancel_sent_invoice"):
+        return paypal_http_error(403, {"name": "NOT_AUTHORIZED", "message": "Authorization failed due to insufficient permissions.", "debug_id": "d3bug1d"})
+    return None
+
+
+def test_the_startup_probe_turns_invoicing_off_on_a_403(pro_app, paypal):
+    from server.services import pro_config
+
+    bridge = ops_agent.toolkit()
+    assert ops_agent.probe_invoicing() is True
+    assert any(run["method"] == "list_invoices" for run in bridge.runs)
+    bridge.fail = _not_authorized
+    assert ops_agent.probe_invoicing() is False
+    assert pro_config.invoicing_enabled() is False
+    assert "NOT_AUTHORIZED" in pro_config.invoicing_off_reason() and "d3bug1d" in pro_config.invoicing_off_reason()
+    # The invoice tools are gone from the model's menu; the rest stay.
+    names = [schema["function"]["name"] for schema in ops_agent.tool_schemas()]
+    assert "invoice_athletes" not in names and "list_invoices" not in names and "send_invoice_reminder" not in names
+    assert "cancel_or_refund_review" in names and "get_order_details" in names and "earnings_summary" in names
+    # The page is told, in the overview and in the config the template reads.
+    overview = pro_app.get("/api/ops/overview").json()
+    assert overview["invoicing_enabled"] is False and overview["tool_source"].startswith("unavailable")
+    assert not any("Invoice" in example for example in overview["examples"])
+    assert pro_app.get("/api/config").json()["pro"]["invoicing_enabled"] is False
+    page = pro_app.get("/").text
+    assert "Agent Toolkit" not in page and "invoicing is not available on this sandbox app" in page
+
+
+def test_without_invoicing_the_agent_cannot_propose_an_invoice_and_says_so(pro_app, paypal):
+    from server.services import pro_config
+
+    pro_config.disable_invoicing("PayPal answered NOT_AUTHORIZED (403)")
+    response, model = _run(
+        pro_app,
+        "Invoice Lior $60 for November programming.",
+        [
+            tool_call("invoice_athletes", {"invoices": [{"athlete_name": "Lior", "amount_usd": 60, "description": "November programming"}]}),
+            final("Invoicing is not available here, so I cannot send Lior an invoice. I can release or refund reviews."),
+        ],
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["actions"] == [] and body["invoicing_enabled"] is False
+    # The model was told, and the tool call it made anyway came back as an error, not a card.
+    system = [m["content"] for m in model.requests[0]["messages"] if m["role"] == "system"]
+    assert any("Invoicing is not available" in text for text in system)
+    assert "invoice_athletes" not in [t["function"]["name"] for t in model.requests[0]["tools"]]
+    tool_messages = [m for m in model.requests[-1]["messages"] if m["role"] == "tool"]
+    assert "not available" in tool_messages[-1]["content"]
+    with session_scope() as session:
+        assert session.query(AgentAction).count() == 0
+    # A read of the invoices is refused the same way; a reminder cannot be confirmed either.
+    with session_scope() as session:
+        assert "not available" in ops_agent.run_read_tool(session, "list_invoices", {})["error"]
+        with pytest.raises(ops_agent.AgentError, match="not available"):
+            ops_agent.validate_proposal(session, "send_invoice_reminder", {"invoice_id": "INV2-ABCD-EFGH"})
+
+
+def test_a_403_on_a_live_invoice_turns_invoicing_off_for_the_next_request(pro_app, paypal):
+    from server.services import pro_config
+
+    card = _propose_invoice(pro_app, ("Lior",))
+    bridge = ops_agent.toolkit()
+    bridge.fail = _not_authorized
+    confirmed = pro_app.post(f"/api/ops/actions/{card['id']}/confirm", json={"token": card["confirm_token"]})
+    assert confirmed.status_code == 502, confirmed.text
+    assert "NOT_AUTHORIZED" in confirmed.json()["detail"]
+    assert pro_config.invoicing_enabled() is False
+    assert pro_app.get("/api/ops/overview").json()["invoicing_enabled"] is False
+    assert "invoice_athletes" not in [schema["function"]["name"] for schema in ops_agent.tool_schemas()]
+
+
+def test_invoicing_can_be_switched_off_by_configuration(pro_app, paypal, monkeypatch):
+    from server.services import pro_config
+
+    monkeypatch.setenv("INVOICING_ENABLED", "false")
+    assert pro_config.invoicing_enabled() is False
+    assert pro_config.invoicing_off_reason() == "INVOICING_ENABLED is off"
+    assert ops_agent.probe_invoicing() is False
+    assert "list_invoices" not in [run["method"] for run in ops_agent.toolkit().runs if run["method"] == "list_invoices"][1:]
+    assert "Agent Toolkit" not in pro_app.get("/").text
+
+
+def test_with_invoicing_on_the_page_says_so(pro_app, paypal):
+    page = pro_app.get("/").text
+    assert "Invoicing v2 via the PayPal Agent Toolkit" in page
+    assert "invoices go through the PayPal Agent Toolkit" in page
+    overview = pro_app.get("/api/ops/overview").json()
+    assert overview["invoicing_enabled"] is True and overview["tool_source"] == "PayPal Agent Toolkit (fake)"

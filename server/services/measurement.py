@@ -48,6 +48,8 @@ class BarPathMeasurement:
     plate_axis_ratio: Optional[float] = None
     # The plate followed is the one the athlete tapped on the first frame.
     tapped: bool = False
+    # They tapped, and the plate followed is not the one they tapped: why.
+    tap_reason: str = ""
     reason: str = ""
 
     def as_dict(self) -> Dict[str, Any]:
@@ -69,6 +71,9 @@ class BarPathMeasurement:
             )
         elif self.reason:
             body["reason"] = self.reason
+        if self.tap_reason:
+            body["tap_ignored"] = True
+            body["tap_reason"] = self.tap_reason
         return body
 
 
@@ -86,6 +91,7 @@ def measure(path: Optional[BarPath]) -> BarPathMeasurement:
             coverage=path.coverage,
             points=len(path.points),
             reason=path.reason or "the bar was not tracked",
+            tap_reason=path.tap_reason,
         )
     plate_px = 2.0 * path.plate_radius * path.frame_width
     drift_norm, worst = path.max_drift()
@@ -126,6 +132,7 @@ def measure(path: Optional[BarPath]) -> BarPathMeasurement:
         plate_too_small=plate_too_small,
         plate_axis_ratio=path.plate_axis_ratio,
         tapped=bool(path.tapped),
+        tap_reason=path.tap_reason,
     )
 
 

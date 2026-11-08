@@ -26,6 +26,12 @@ flip a value with monkeypatch:
     PAYPAL_INVOICE_MAX_USD  200 unless set; AGENT_INVOICE_MAX_COUNT 5
     DEMO_ATHLETE_EMAILS     comma-separated sandbox personal emails for the
                             three seeded athletes (invoices go there)
+    INVOICING_ENABLED       true (default): the ops agent may propose
+                            invoices. Turned off for the life of the process
+                            when PayPal answers an invoicing call with 403
+                            NOT_AUTHORIZED — the sandbox REST app lacks the
+                            Invoicing feature — starting with a probe at
+                            startup (ops_agent.probe_invoicing)
 
 Pro is "enabled" when a PayPal client id and secret are both set. Without
 them the judge works exactly as before and the paid flow stays hidden.
@@ -191,6 +197,41 @@ def demo_mode() -> bool:
     return _flag("PRO_DEMO_MODE", True)
 
 
+# Invoicing is on unless INVOICING_ENABLED says otherwise or PayPal has
+# refused it (403 NOT_AUTHORIZED: the sandbox app lacks the Invoicing
+# feature), in which case the reason is kept for the page and the log.
+_invoicing_off_reason: Optional[str] = None
+
+
+def invoicing_setting() -> bool:
+    return _flag("INVOICING_ENABLED", True)
+
+
+def invoicing_enabled() -> bool:
+    """Whether the ops agent may offer invoices right now."""
+    return invoicing_setting() and _invoicing_off_reason is None
+
+
+def invoicing_off_reason() -> str:
+    """Why invoicing is off: the setting, PayPal's refusal, or '' when it is on."""
+    if not invoicing_setting():
+        return "INVOICING_ENABLED is off"
+    return _invoicing_off_reason or ""
+
+
+def disable_invoicing(reason: str) -> None:
+    """PayPal refused an invoicing call: no more invoice offers this process."""
+    global _invoicing_off_reason
+    if _invoicing_off_reason is None:
+        logger.warning("Invoicing turned off: %s", reason)
+    _invoicing_off_reason = reason
+
+
+def reset_invoicing_for_tests() -> None:
+    global _invoicing_off_reason
+    _invoicing_off_reason = None
+
+
 def staff_login_configured() -> bool:
     """Whether COACH_PASSWORD is set; the page shows the sign-in only then."""
     return bool((os.getenv("COACH_PASSWORD") or "").strip())
@@ -226,6 +267,7 @@ def public_config() -> dict:
         "demo_mode": demo_mode(),
         "staff_login_configured": staff_login_configured(),
         "coach_name": coach_name(),
+        "invoicing_enabled": pro_enabled() and invoicing_enabled(),
     }
 
 

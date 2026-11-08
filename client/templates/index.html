@@ -371,8 +371,8 @@
           <p class="step-label">Ops</p>
           <h2 id="ops-title">Ops agent</h2>
           <p class="lede">
-            Payments and invoices in plain English. Releases and refunds are the app's own PayPal
-            Payments v2 calls; invoices go through the PayPal Agent Toolkit. Nothing that moves money or
+            Payments{% if pro.invoicing_enabled %} and invoices{% endif %} in plain English. Releases and refunds are the app's own PayPal
+            Payments v2 calls{% if pro.invoicing_enabled %}; invoices go through the PayPal Agent Toolkit{% else %}; invoicing is not available on this sandbox app{% endif %}. Nothing that moves money or
             sends anything runs until you tap Confirm.
           </p>
           <div id="ops-chat" class="chat" aria-live="polite"></div>
@@ -408,7 +408,7 @@
       <footer>
         <span id="install-hint" hidden>Add to Home Screen for a full-screen app. </span>
         {% if demo_disabled %}Live scoring paused · {% elif access_mode == "open" %}Open demo, no code needed · daily limit applies · {% elif access_mode == "link" %}Demo by link · {% elif access_required %}Demo by access code · {% endif %}CV tracker measured → {{ vision_name }} observed → {{ judge_name }} judged, on Nebius Token Factory ·
-        {% if pro.pro_enabled %}PayPal sandbox: Orders v2 (authorize) → Payments v2 (capture / void / refund), the app's own server calls · Invoicing v2 via the PayPal Agent Toolkit · {% endif %}
+        {% if pro.pro_enabled %}PayPal sandbox: Orders v2 (authorize) → Payments v2 (capture / void / refund), the app's own server calls · {% if pro.invoicing_enabled %}Invoicing v2 via the PayPal Agent Toolkit · {% endif %}{% endif %}
         <a href="https://github.com/amitmtrn/sideline-lift-judge">source (MIT)</a>
       </footer>
     </div>

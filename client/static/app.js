@@ -1233,11 +1233,14 @@
     // Untracked: the tracker's own reason, which on a clip filmed from an
     // angle is the filming advice ("film from the side with the near plate
     // visible"), then where the drift came from instead.
+    const tapNote = barPath.tap_ignored
+      ? `; couldn't use your tap (${barPath.tap_reason || "the plate you tapped could not be followed"})`
+      : "";
     let trackerText = barPath.tracked
       ? `bar path in ${Math.round((barPath.coverage || 0) * 100)}% of frames`
         + (barPath.max_drift_cm_estimate != null ? `; max drift ~${barPath.max_drift_cm_estimate} cm` : "")
-        + (barPath.tapped ? "; following the plate you tapped" : "")
-      : `${barPath.reason || "bar not tracked"}; drift read from the frames`;
+        + (barPath.tapped ? "; following the plate you tapped" : tapNote)
+      : `${barPath.reason || "bar not tracked"}${tapNote}; drift read from the frames`;
     li1.appendChild(document.createTextNode(trackerText));
     list.appendChild(li1);
 
@@ -1324,6 +1327,13 @@
       if (item.bar_path && item.bar_path.tapped) {
         block.appendChild(element("p", "trace-note", "Bar path: following the plate you tapped"));
       }
+    }
+    // They tapped a plate and the tracker could not follow it: say so,
+    // rather than let the tap look as if it was used.
+    if (item.bar_path && item.bar_path.tap_ignored) {
+      const note = element("p", "trace-note muted", "Couldn't use your tap; tracked automatically");
+      if (item.bar_path.tap_reason) note.title = item.bar_path.tap_reason;
+      block.appendChild(note);
     }
     const video = document.createElement("video");
     video.src = item.annotated_video_url;

@@ -69,7 +69,8 @@ async def ops_agent_request(request: Request):
             "tools_called": reply.tools_called,
             "model": reply.model,
             "steps": reply.steps,
-            "tool_source": ops_agent.toolkit().label,
+            "tool_source": ops_agent.invoicing_source(),
+            "invoicing_enabled": ops_agent.invoicing_enabled(),
         }
     )
 
@@ -145,14 +146,20 @@ async def overview(request: Request):
                     {"id": a.id, "name": a.display_name, "email": a.payer_email} for a in ops_agent.demo_athletes(session)
                 ],
                 "agent_calls_remaining_today": agent_budget().remaining_today(),
-                "tool_source": ops_agent.toolkit().label,
+                "tool_source": ops_agent.invoicing_source(),
+                "invoicing_enabled": ops_agent.invoicing_enabled(),
+                "invoicing_off_reason": pro_config.invoicing_off_reason(),
                 "model": ops_agent.agent_model(),
                 "sla_hours": pro_config.sla_hours(),
                 "examples": [
-                    "Refund Dan's review, I can't make it this week.",
-                    "Invoice my 3 athletes $60 each for November programming.",
-                    "What did I earn this week?",
-                    "Which holds expire today?",
+                    example
+                    for example in (
+                        "Refund Dan's review, I can't make it this week.",
+                        "Invoice my 3 athletes $60 each for November programming." if ops_agent.invoicing_enabled() else "",
+                        "What did I earn this week?",
+                        "Which holds expire today?",
+                    )
+                    if example
                 ],
             }
 

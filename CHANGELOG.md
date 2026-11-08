@@ -48,6 +48,66 @@ in the README for the design.
   foliage alone, a hanging ring, the tap, the stride/cache budget, the rotation of a tap, the
   bright-plate gate, the preference rule) and two multi-rep tests in `tests/test_bar_track.py`.
 
+### Tracker: never switch objects, the tap always seeded, invoicing only when PayPal allows it (Oct 31, fix PRD v2)
+- **Continuity in both followers** (`server/utils/plate_follow.py`, `server/utils/plate_oblique.py`).
+  The live bug: on an angled snatch clip the tapped trace followed the near plate through the pull,
+  then jumped to the gymnastics ring hanging at the top-right of the frame during the turnover — a
+  false 41 cm drift, a "bar left the frame" warning, and still *following the plate you tapped*.
+  Now, in the clip's own seconds so the rules hold at any frame rate: a step faster than 18 plate
+  radii a second (1.5 radii a frame at the 12 fps analysis rate — a bar at 4 m/s on a 450 mm
+  plate, twice a snatch's peak) is refused; the next position is predicted from the last velocity,
+  coasting at most 0.17 s (a bar reverses within that at the top); a frame with nothing acceptable
+  is bridged by that prediction for up to 0.35 s, and the positions bridged through become the
+  straight line to where the plate was found again; longer than that the plate is lost and the
+  path ends where it was last seen, with its coverage counted to the end of the window so the
+  confidence cap and the warning say the catch was not seen — never "bar left the frame" for a
+  jump. A candidate must be the plate's size (within 30 %) and shade (within 60 grey of the last
+  reading; the reference follows the plate from the floor into the light, since on the labelled
+  clips a plate's inside changes by 80 grey levels over a clean). In the optical-flow follower the
+  image under the track is read at every re-centring, and while it is not the plate the flow — an
+  arm, a hand — does not steer.
+- **A ring is not a plate.** A gymnastics ring has a rim all the way round and the wall showing
+  through it: inside 100 grey levels brighter than the band just inside its rim, and the same as
+  the wall just outside. That reading fails the plate gate, the re-centring and the on-plate check.
+  On 4,600 samples along the hand-labelled tracks no real plate reads this way (the largest
+  inside-to-band difference was 84: a white hub inside a dark band).
+- **The tap is always seeded.** When no circle was found within reach of the tap, both followers
+  look harder just there — every stretch, a lower Hough bar — on the frame the tap was made on
+  (the one nearest `t`; the first of the window when `t` is before it, as it is when the browser
+  re-encoded the trim or the lift window opens after the tap), and only then fall back to a seed at
+  the tap itself. A tapped seed counts as found whenever the image under it is still the plate, not
+  only when a circle snaps, so the side-on follower can follow an elliptical near plate too. The
+  pipeline prefers the follower that followed the tapped plate over one that did not. The server
+  log says which frame the tap was applied to, and why when it was not used.
+- **`bar_path.tapped` means the whole path is the tapped plate's** — a path is one object by
+  construction now. When the tap was not followed the result carries `tap_ignored: true` and
+  `tap_reason`, the card says *Couldn't use your tap; tracked automatically*, and "How this was
+  judged" gives the reason.
+- **Regression tests** (`tests/test_plate_continuity.py`, synthetic only): a plate hidden by an arm
+  at the turnover with a ring two and a half radii away — both followers bridge the gap and never
+  take the ring (the previous tracker failed all four of these); hidden for longer than the bridge,
+  the path ends there and coverage drops; a tap on nothing is reported as not used; the tap lands
+  on the frame nearest its time or the window's first. The real clip the bug was seen on runs only
+  where `SIDELINE_OBLIQUE_CLIP` and `SIDELINE_OBLIQUE_TRUTH` point at it (never committed), and
+  writes the trace overlay to `SIDELINE_OBLIQUE_OUT` for a look.
+- **Invoicing only when the sandbox app can** (`INVOICING_ENABLED`, `ops_agent.probe_invoicing`).
+  The live app's invoices failed with PayPal 403 NOT_AUTHORIZED: the sandbox REST app lacks the
+  Invoicing feature. `INVOICING_ENABLED` (on unless set) gates the invoice tools, and a probe at
+  startup — one `list_invoices` read, off the startup path — or any later 403 from an invoicing
+  call turns them off for the life of the process: the model gets no invoice tools and a system
+  line saying invoicing is unavailable, a proposal or a Confirm of an invoice action is refused
+  with a readable 409, `/api/ops/overview` and the agent's reply carry `invoicing_enabled` and
+  `tool_source: "unavailable: …"`, the Ops intro drops the invoice example, and the footer and the
+  Ops lede say *Invoicing v2 via the PayPal Agent Toolkit* only when it is on. Enable the feature
+  on the sandbox app (developer dashboard → the app → Features → Invoicing), restart, and it is
+  back. Everything else on screen names PayPal usage as it is: Orders v2 authorize and Payments v2
+  capture, void and refund are the app's own server-side REST calls.
+- **Real-clip check** (`tools/score_bar_path.py`, re-run with the continuity rules): gym set 45 of
+  61 lifts clean (was 44), 96 % of trace points on the path, the drift shown off by 5.8 cm at the
+  median and 23 cm at worst (unchanged); competition set 10 of 11 clean (was 9), the worst drift
+  error from 36 cm to 15 cm and the median from 5 cm to 3 cm. No lift got worse.
+- The 48 h deadline is read from `SLA_HOURS` everywhere on screen (checked; nothing hard-coded).
+
 ### Fixed (pre-submission polish, Oct 30)
 - **Invoices no longer 500.** The Agent Toolkit lets `requests.HTTPError` out on a PayPal 4xx/5xx
   and nothing caught it, so confirming an invoice left the audit row at CONFIRMED and the page

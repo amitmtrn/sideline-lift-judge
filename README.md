@@ -167,6 +167,16 @@ sandbox) and earnings come from the local ledger rather than Transaction Search,
 three hours. If the package is missing the invoice tools fall back to the built-in Invoicing v2
 client; the Ops tab and `/api/ops/overview` say which one is in use.
 
+**Invoicing needs the Invoicing feature on the sandbox app.** Without it PayPal answers every
+invoicing call with 403 `NOT_AUTHORIZED`. The app checks once at startup (one `list_invoices`
+read, off the startup path; `ops_agent.probe_invoicing`) and on any later 403, and turns the
+invoice tools off for the life of the process: the agent is told invoicing is unavailable and
+gets no invoice tools, an invoice proposal or Confirm is refused with a readable 409,
+`/api/ops/overview` and the agent's reply carry `invoicing_enabled` and `tool_source`, and the
+footer and the Ops intro claim the Agent Toolkit only while invoicing is on. `INVOICING_ENABLED=false`
+turns it off by hand. To enable the feature: developer dashboard → the sandbox app → Features →
+Invoicing → save, then restart the app.
+
 ### AI, in three places
 
 1. **The judge**, unchanged: OpenCV plate tracker → MiniCPM-V 4.5 observations → NVIDIA
@@ -212,8 +222,10 @@ client; the Ops tab and `/api/ops/overview` say which one is in use.
    add-on. Optional: `SESSION_SECRET`, `STAFF_LOGIN_HOURLY_LIMIT`, `PAYPAL_WEBHOOK_ID`,
    `SLA_HOURS` (48; never above 72), `REVIEW_PRICE_USD`, `COACH_NAME`, `COACH_EMAIL`,
    `DEMO_ATHLETE_EMAILS`, `AGENT_MODEL`, `DRAFT_DAILY_LIMIT`, `AGENT_DAILY_LIMIT`,
-   `AGENT_HOURLY_LIMIT`, `PRO_DEMO_MODE`. Pro is on when the client id and secret are both set;
-   without them the judge runs exactly as before and the paid flow stays hidden.
+   `AGENT_HOURLY_LIMIT`, `PRO_DEMO_MODE`, `INVOICING_ENABLED` (on; turned off by itself when
+   PayPal refuses invoicing with 403 — enable the Invoicing feature on the sandbox app). Pro is
+   on when the client id and secret are both set; without them the judge runs exactly as before
+   and the paid flow stays hidden.
 3. **Heroku** (buildpack path, what the live app runs):
    ```bash
    heroku addons:create heroku-postgresql:essential-0 -a <app>
@@ -239,7 +251,9 @@ client; the Ops tab and `/api/ops/overview` say which one is in use.
    agent: "Refund <name>'s review, she disputed it" → card → *Confirm* → the refund id is in the
    audit log and the reply renders as clean text. "Invoice my 3 athletes $60 each" → *Confirm* →
    three invoices reach **SENT** with their ids in the card and the audit log; a PayPal refusal
-   reads as its error name, the issue and the `debug_id`, never as a bare 500. Signed out,
+   reads as its error name, the issue and the `debug_id`, never as a bare 500 — and if the app
+   lacks the Invoicing feature (403 `NOT_AUTHORIZED`), the Ops tab offers no invoices and the
+   footer makes no Toolkit claim (see *Invoicing needs the Invoicing feature* above). Signed out,
    `curl` each coach/ops route → **401**. `python tools/secret_scan.py` → clean.
 
 ### For the judges (testing instructions)
@@ -714,7 +728,29 @@ back the unrotated one. The followers seed the frame it was made on. It is a pre
 answer: it decides between two plates that both rose and cannot make something that did not rise
 the bar. A missing or malformed field is the automatic search, never a refused upload. When the
 plate followed is the tapped one the result says so (`bar_path.tapped`, and *Bar path: following
-the plate you tapped* on the card). Skip it and the tracker picks the plate itself.
+the plate you tapped* on the card). Skip it and the tracker picks the plate itself. When no circle
+was found within reach of the tap, both followers look harder just there (every stretch, a lower
+Hough bar) on the frame the tap was made on — the one nearest `t`, or the window's first when `t`
+is before it — before falling back to a seed at the tap itself; the follower that followed the
+tapped plate wins over one that did not. A tap that could not be followed is said so on the card
+(*Couldn't use your tap; tracked automatically*; `bar_path.tap_ignored` and `tap_reason` in the
+result) and in the server log, with the frame it was applied to.
+
+**Continuity.** Once a follower is on the plate it never switches to something else. Both followers
+reason in the clip's own seconds: a step faster than 18 plate radii a second (a bar at 4 m/s, twice
+a snatch's peak) is refused; the next position is predicted from the last velocity, coasting at
+most 0.17 s; a frame with nothing acceptable is bridged by that prediction for up to 0.35 s (and the
+bridged positions become the straight line to where the plate was found again); longer than that
+the plate is lost and the path ends where it was last seen, its coverage counted to the end of the
+window so the confidence cap says the catch was not seen. A candidate must be the plate's size
+(within 30 %) and shade (within 60 grey of the last reading, a reference that follows the plate
+from the floor into the light). The optical-flow follower reads the image under the track at every
+re-centring, and while it is not the plate the flow — an arm, a hand — does not steer. A
+gymnastics ring is told from a plate by the wall showing through it: inside 100 grey brighter than
+the band just inside its rim and the same as the wall outside; no real plate on the labelled tracks
+reads that way. `tests/test_plate_continuity.py` holds the synthetic regressions (a plate hidden by
+an arm at the turnover with a ring two and a half radii away) and a test on the real clip the bug
+was seen on, which runs only where `SIDELINE_OBLIQUE_CLIP` and `SIDELINE_OBLIQUE_TRUTH` point at it.
 
 ### What the judge is told, and what the number means
 The judge never sees pixels. Before any model call, the tracked path is turned into a short
@@ -1032,12 +1068,13 @@ given: these are things that happened on the 39 clips, not hypotheticals.
 - **The drawn bar path** is a second pass inside each window (`server/utils/plate_follow.py`):
   the plate followed frame by frame with optical flow, not the 12 fps detections that found the
   lift. Scored against per-frame plate tracks checked by eye (`tools/score_bar_path.py`,
-  re-measured 2026-10-31): 44 of 61 gym lifts get a clean trace, 95% of trace points are on the
-  path, and the drift shown is off by 6 cm at the median, 16 cm at p90 and 23 cm at worst. The
-  plate gate changed none of the clean counts and took the worst case from 134 cm to 23 cm: the
-  two traces it removed were on nothing (52% and 6% of their points on a plate, a 140 cm drift),
-  and one mediocre trace (67%) went with them. On 6 competition clips from YouTube
-  (`--set competition`) 9 of 11 lifts are clean and the drift is off by 5 cm at the median.
+  re-measured 2026-11-08 with the continuity rules): 45 of 61 gym lifts get a clean trace, 96% of
+  trace points are on the path, and the drift shown is off by 6 cm at the median, 16 cm at p90
+  and 23 cm at worst. The plate gate took the worst case from 134 cm to 23 cm: the two traces it
+  removed were on nothing (52% and 6% of their points on a plate, a 140 cm drift), and one
+  mediocre trace (67%) went with them; the continuity rules then added one clean gym trace and
+  made no lift worse. On 6 competition clips from YouTube (`--set competition`) 10 of 11 lifts
+  are clean, the drift is off by 3 cm at the median and 15 cm at worst (36 cm before continuity).
 - **A clean & jerk done fast is one rise.** Rises under ~1.5 s apart merge as the phases of one
   lift, so a jerk that follows the clean at once lands in the clean's window and the split falls
   back to the quiet moment in the motion profile. If no split leaves each half at least 1.2 s —
@@ -1055,7 +1092,9 @@ given: these are things that happened on the 39 clips, not hypotheticals.
 - **The oblique follower is tested on synthetic clips only.** No labelled oblique footage exists
   in the sample set, so its accuracy figures (every point within half a plate radius, axis ratio
   within 0.05 of the truth) are from drawn clips; on the real side-on clips it finds the same
-  plate as the side-on follower and gives way to it.
+  plate as the side-on follower and gives way to it. The one real angled clip (a portrait snatch
+  with a gymnastics ring in view) is not in the repo; `tests/test_plate_continuity.py` runs on it
+  where `SIDELINE_OBLIQUE_CLIP` and `SIDELINE_OBLIQUE_TRUTH` point at it.
 - **It gives up rather than guess**: no trace when the plate is found in under ~55% of frames,
   barely rises, or never moves. Then the drift is read from the frames alone, the judge is told,
   and confidence is capped at 0.65.
